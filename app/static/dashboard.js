@@ -5,6 +5,8 @@
       let currentReview = null;
       let currentEvents = [];
       let currentWorkflowDetails = {};
+      let currentLearnerEval = null;
+      let currentCreatorFeedback = [];
       let recentDraftRuns = [];
       let currentTab = "create";
       let draftPollHandle = null;
@@ -43,13 +45,27 @@
       const draftsTabPane = document.getElementById("tab-pane-drafts");
       const createDraftShortcut = document.getElementById("create-draft-shortcut");
       const draftSearchInput = document.getElementById("draft-search");
-      const form = document.getElementById("course-brief-form");
       const goalField = document.getElementById("goal");
-      const outcomesField = document.getElementById("outcomes");
       const goalCount = document.getElementById("goal-count");
       const outcomesCount = document.getElementById("outcomes-count");
       const generateButton = document.getElementById("generate-button");
       const suggestOutcomesButton = document.getElementById("suggest-outcomes-button");
+      const creatorStep1Next = document.getElementById("creator-step-1-next");
+      const creatorStep2Next = document.getElementById("creator-step-2-next");
+      const creatorStep3Next = document.getElementById("creator-step-3-next");
+      const creatorAddOutcome = document.getElementById("creator-add-outcome");
+      const creatorOutcomesList = document.getElementById("creator-outcomes-list");
+      const creatorPlanPreview = document.getElementById("creator-plan-preview");
+      const creatorStepTitle = document.getElementById("creator-step-title");
+      const creatorPanes = Array.from(document.querySelectorAll(".creator-pane"));
+      const creatorStepper = document.getElementById("creator-stepper");
+      const creatorState = {
+        step: 1,
+        goal: "",
+        outcomes: [],
+        choices: { starter_type: "partial_implementation", primary_database: "postgres", cache_backend: "redis", tech_stack: [] },
+        plan: null,
+      };
       const results = document.getElementById("results");
       const draftStageBadge = document.getElementById("draft-stage-badge");
       const draftStatusSummary = document.getElementById("draft-status-summary");
@@ -720,6 +736,76 @@
         return null;
       }
 
+      function renderPlainReviewSummary(workflow, detail) {
+        const spec = detail?.artifacts?.task_agent_spec;
+        const blueprint = detail?.artifacts?.blueprint;
+        const pendingGate = workflow.pending_gate || "gate_1_spec_review";
+
+        if (!spec && blueprint) {
+          const inputs = (blueprint.required_inputs || []).map((item) => titleCase(item)).slice(0, 3).join(", ");
+          const starters = (blueprint.starter_types || []).map(friendlyStarterType).join(", ");
+          return `
+            <div class="review-plain-summary">
+              <p class="review-plain-eyebrow">Plan blueprint review</p>
+              <h5>${escapeHtml(blueprint.title || "Course blueprint")}</h5>
+              <p>${escapeHtml(blueprint.summary || "")}</p>
+              <ul>
+                <li><strong>Build pattern:</strong> ${escapeHtml(friendlyBuildPattern(blueprint.archetype_id))}</li>
+                <li><strong>Course shape:</strong> ${escapeHtml(friendlyCourseShape(blueprint.package_type))}</li>
+                ${inputs ? `<li><strong>Required inputs:</strong> ${escapeHtml(inputs)}</li>` : ""}
+                ${starters ? `<li><strong>Starter shapes:</strong> ${escapeHtml(starters)}</li>` : ""}
+              </ul>
+            </div>
+          `;
+        }
+        if (!spec) {
+          return `
+            <div class="review-plain-summary">
+              <p>Review details are still loading. Refresh the draft before deciding on this step.</p>
+            </div>
+          `;
+        }
+
+        const tools = spec.tool_registry?.tools || [];
+        const writeCount = tools.filter((t) => t.safety === "write").length;
+        const irreversibleCount = tools.filter((t) => t.safety === "irreversible" || t.approval_required).length;
+        const behaviors = spec.behaviors || [];
+        const qualities = spec.qualities || [];
+        const modules = spec.modules || [];
+        const headlineByGate = {
+          gate_1_spec_review: "Assignment spec ready for review",
+          gate_2_progression_review: "Module ladder ready for review",
+          gate_3_pre_publish: "Final pass before publish",
+        };
+        const eyebrowByGate = {
+          gate_1_spec_review: "Spec review",
+          gate_2_progression_review: "Module ladder review",
+          gate_3_pre_publish: "Pre-publish review",
+        };
+
+        const moduleList = modules.length
+          ? `<ul class="review-plain-modules">${modules.map((m, i) => `
+              <li><strong>${i + 1}. ${escapeHtml(m.title)}</strong>${m.objective ? ` — ${escapeHtml(m.objective)}` : ""}</li>
+            `).join("")}</ul>`
+          : "";
+
+        const facts = [];
+        facts.push(`<li><strong>Build pattern:</strong> ${escapeHtml(friendlyBuildPattern(spec.archetype))}</li>`);
+        facts.push(`<li><strong>Modules:</strong> ${modules.length}</li>`);
+        facts.push(`<li><strong>Tools:</strong> ${tools.length} total${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} writes data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
+        facts.push(`<li><strong>Checks:</strong> ${behaviors.length} visible behavior${behaviors.length === 1 ? "" : "s"} · ${qualities.length} quality bar${qualities.length === 1 ? "" : "s"}</li>`);
+
+        return `
+          <div class="review-plain-summary">
+            <p class="review-plain-eyebrow">${escapeHtml(eyebrowByGate[pendingGate] || "Review")}</p>
+            <h5>${escapeHtml(spec.title || headlineByGate[pendingGate] || "Review this step")}</h5>
+            <p>${escapeHtml(spec.summary || "")}</p>
+            <ul>${facts.join("")}</ul>
+            ${pendingGate !== "gate_1_spec_review" ? moduleList : ""}
+          </div>
+        `;
+      }
+
       function renderSpecSnapshot(workflow, detail) {
         const spec = detail?.artifacts?.task_agent_spec;
         const blueprint = detail?.artifacts?.blueprint;
@@ -1001,12 +1087,272 @@
 
       function updateBriefCounters() {
         const goalLength = goalField.value.trim().length;
-        const outcomeLines = outcomesField.value
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean);
         goalCount.textContent = `${goalLength} character${goalLength === 1 ? "" : "s"}`;
-        outcomesCount.textContent = `${outcomeLines.length} outcome${outcomeLines.length === 1 ? "" : "s"}`;
+        outcomesCount.textContent = `${creatorState.outcomes.length} outcome${creatorState.outcomes.length === 1 ? "" : "s"}`;
+      }
+
+      function showCreatorStep(n) {
+        creatorState.step = n;
+        creatorPanes.forEach((pane) => {
+          const idx = parseInt(pane.id.split("-").pop(), 10);
+          const active = idx === n;
+          pane.classList.toggle("active", active);
+          if (active) {
+            pane.removeAttribute("hidden");
+          } else {
+            pane.setAttribute("hidden", "");
+          }
+        });
+        if (creatorStepper) {
+          creatorStepper.querySelectorAll("[data-creator-step]").forEach((li) => {
+            const idx = parseInt(li.dataset.creatorStep, 10);
+            li.classList.remove("done", "current", "up-next");
+            if (idx < n) li.classList.add("done");
+            else if (idx === n) li.classList.add("current");
+            else li.classList.add("up-next");
+          });
+        }
+        const titles = {
+          1: "Describe the system",
+          2: "Refine outcomes",
+          3: "Setup choices",
+          4: "Review the proposed plan",
+        };
+        if (creatorStepTitle) creatorStepTitle.textContent = titles[n] || "";
+      }
+
+      function syncOutcomesFromInputs() {
+        const inputs = creatorOutcomesList?.querySelectorAll("input[data-outcome-index]") || [];
+        creatorState.outcomes = Array.from(inputs).map((el) => el.value.trim()).filter(Boolean);
+      }
+
+      function renderCreatorOutcomes() {
+        if (!creatorOutcomesList) return;
+        if (!creatorState.outcomes.length) {
+          creatorOutcomesList.innerHTML = `
+            <div class="creator-outcome-empty">
+              <p class="field-hint">No outcomes yet. Add one or use “Suggest outcomes again”.</p>
+            </div>
+          `;
+        } else {
+          creatorOutcomesList.innerHTML = creatorState.outcomes.map((outcome, i) => `
+            <div class="creator-outcome-row">
+              <span class="creator-outcome-index">${i + 1}</span>
+              <input type="text" data-outcome-index="${i}" value="${escapeHtml(outcome)}" placeholder="What will the learner be able to do?" />
+              <button type="button" class="creator-outcome-remove" data-remove-outcome="${i}" aria-label="Remove outcome">×</button>
+            </div>
+          `).join("");
+        }
+        updateBriefCounters();
+      }
+
+      function readCreatorChoices() {
+        const starter = document.querySelector('input[name="starter_type"]:checked');
+        const dbSelect = document.getElementById("creator-database");
+        const cacheSelect = document.getElementById("creator-cache");
+        return {
+          starter_type: starter?.value || "partial_implementation",
+          primary_database: dbSelect?.value || null,
+          cache_backend: cacheSelect?.value || null,
+          tech_stack: [],
+        };
+      }
+
+      function applyCreatorChoicesToInputs(choices) {
+        if (!choices) return;
+        const starter = document.querySelector(`input[name="starter_type"][value="${choices.starter_type}"]`);
+        if (starter) starter.checked = true;
+        const dbSelect = document.getElementById("creator-database");
+        if (dbSelect && choices.primary_database !== undefined) {
+          dbSelect.value = choices.primary_database || "";
+        }
+        const cacheSelect = document.getElementById("creator-cache");
+        if (cacheSelect && choices.cache_backend !== undefined) {
+          cacheSelect.value = choices.cache_backend || "";
+        }
+      }
+
+      function friendlyDatabase(value) {
+        const labels = { postgres: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", mongodb: "MongoDB" };
+        if (!value) return "No database";
+        return labels[value] || titleCase(value);
+      }
+
+      function friendlyCache(value) {
+        const labels = { redis: "Redis", memcached: "Memcached" };
+        if (!value) return "No cache";
+        return labels[value] || titleCase(value);
+      }
+
+      function renderCreatorPlanPreview() {
+        const plan = creatorState.plan;
+        if (!creatorPlanPreview) return;
+        if (!plan) {
+          creatorPlanPreview.innerHTML = `<p class="field-hint">Generate a plan from step 3 first.</p>`;
+          return;
+        }
+        const choices = plan.creator_choices || creatorState.choices;
+        const choicePills = [
+          pill(`Starter: ${friendlyStarterType(choices.starter_type)}`),
+          pill(`Database: ${friendlyDatabase(choices.primary_database)}`),
+          pill(`Cache: ${friendlyCache(choices.cache_backend)}`),
+        ].join("");
+        const moduleCards = (plan.modules || []).map((m, i) => `
+          <article class="creator-plan-module">
+            <header>
+              <span class="creator-plan-module-index">${i + 1}</span>
+              <h4>${escapeHtml(m.title)}</h4>
+            </header>
+            <p>${escapeHtml(m.summary || "")}</p>
+            ${m.learning_outcomes && m.learning_outcomes.length ? `
+              <p class="creator-plan-module-section-title">What learners build</p>
+              <ul>${m.learning_outcomes.map((o) => `<li>${escapeHtml(o)}</li>`).join("")}</ul>
+            ` : ""}
+            ${m.creator_notes && m.creator_notes.length ? `
+              <p class="creator-plan-module-section-title">Notes for you</p>
+              <ul class="creator-plan-notes">${m.creator_notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
+            ` : ""}
+          </article>
+        `).join("");
+        creatorPlanPreview.innerHTML = `
+          <div class="creator-plan-summary">
+            <h3>${escapeHtml(plan.title)}</h3>
+            ${plan.summary ? `<p class="creator-plan-summary-line">${escapeHtml(plan.summary)}</p>` : ""}
+            ${plan.creator_summary ? `<p class="creator-plan-narrative">${escapeHtml(plan.creator_summary)}</p>` : ""}
+            <div class="pill-row">${choicePills}</div>
+          </div>
+          <div class="creator-plan-modules">${moduleCards}</div>
+          ${plan.notes && plan.notes.length ? `
+            <aside class="creator-plan-footnotes">
+              <h4>Notes about this plan</h4>
+              <ul>${plan.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
+            </aside>
+          ` : ""}
+        `;
+      }
+
+      async function fetchCreatorSuggestedOutcomes(opts = {}) {
+        const goal = goalField.value.trim();
+        if (goal.length < 10) {
+          setMessage(formMessage, "error", "Add a more specific problem statement first.");
+          return false;
+        }
+        creatorState.goal = goal;
+        if (!opts.silentMessage) {
+          setMessage(formMessage, "info", "Suggesting outcomes from your problem statement...");
+        }
+        try {
+          const response = await fetch(state.suggest_outcomes_url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ goal }),
+          });
+          if (!response.ok) {
+            throw new Error(await extractDetail(response));
+          }
+          const payload = await response.json();
+          const fresh = (payload.learning_outcomes || []).filter(Boolean);
+          creatorState.outcomes = fresh.length
+            ? fresh
+            : [
+                "Define a working contract for the system.",
+                "Implement the core feature with sensible defaults.",
+                "Add tests that match the contract.",
+              ];
+          if (!opts.silentMessage) {
+            setMessage(
+              formMessage,
+              payload.source === "openai_live" ? "success" : "info",
+              payload.source === "openai_live"
+                ? "Suggested outcomes added. Edit them however you want."
+                : "Suggested outcomes added from the fallback planner. Edit them however you want.",
+            );
+          }
+          return true;
+        } catch (error) {
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not suggest outcomes.");
+          return false;
+        }
+      }
+
+      async function fetchCreatorPlan() {
+        creatorState.choices = readCreatorChoices();
+        setMessage(formMessage, "info", "Building a module plan from your brief...");
+        try {
+          const response = await fetch("/v1/course-generation/creator-plan", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              goal: creatorState.goal,
+              learning_outcomes: creatorState.outcomes,
+              creator_choices: creatorState.choices,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(await extractDetail(response));
+          }
+          const payload = await response.json();
+          creatorState.plan = payload.plan;
+          if (payload.learning_outcomes && payload.learning_outcomes.length) {
+            creatorState.outcomes = payload.learning_outcomes.filter(Boolean);
+          }
+          if (payload.status) {
+            renderGenerationStatus(payload.status);
+          }
+          setMessage(
+            formMessage,
+            payload.source === "openai_live" ? "success" : "info",
+            payload.source === "openai_live"
+              ? "Module plan ready. Review and create the draft when you're aligned."
+              : "Module plan ready (fallback planner). Review and create the draft when you're aligned.",
+          );
+          return true;
+        } catch (error) {
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not generate the module plan.");
+          return false;
+        }
+      }
+
+      async function createDraftFromCreatorPlan() {
+        if (!creatorState.plan) {
+          setMessage(formMessage, "error", "Generate a plan first.");
+          return;
+        }
+        generateButton.disabled = true;
+        setMessage(formMessage, "info", "Creating the draft from your plan...");
+        try {
+          const response = await fetch("/v1/course-runs/from-creator-plan", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ plan: creatorState.plan }),
+          });
+          if (!response.ok) {
+            throw new Error(await extractDetail(response));
+          }
+          const courseRun = await response.json();
+          await loadCourseDraft(courseRun.id, {
+            silentMessage: true,
+            historyMode: "push",
+            tabAfterLoad: "drafts",
+            scrollToResult: true,
+          });
+          setMessage(formMessage, "success", "Draft created. Follow it in Drafts.");
+          resetCreatorFlow();
+        } catch (error) {
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not create the draft.");
+        } finally {
+          generateButton.disabled = false;
+        }
+      }
+
+      function resetCreatorFlow() {
+        creatorState.goal = "";
+        creatorState.outcomes = [];
+        creatorState.plan = null;
+        if (goalField) goalField.value = "";
+        renderCreatorOutcomes();
+        if (creatorPlanPreview) creatorPlanPreview.innerHTML = "";
+        showCreatorStep(1);
       }
 
       function renderWorkflowProgress(courseRun = currentCourseRun, review = currentReview, events = currentEvents) {
@@ -1350,6 +1696,35 @@
         }
       }
 
+      function renderLearnerEvalSummary(evalReport) {
+        const target = document.getElementById("learner-eval-summary");
+        if (!target) return;
+        if (!evalReport) {
+          target.innerHTML = "";
+          target.classList.add("hidden");
+          return;
+        }
+        const moduleResults = evalReport.module_results || [];
+        const passed = moduleResults.filter((r) => r.progression_observed || r.good_attempt?.passed).length;
+        const total = moduleResults.length;
+        const overall = evalReport.overall_status || "unknown";
+        const tone = overall === "passed" ? "passed" : overall === "blocked" ? "blocked" : "neutral";
+        target.classList.remove("hidden");
+        target.innerHTML = `
+          <div class="panel-header">
+            <h3>Learner test pass</h3>
+            <span class="badge ${tone === "passed" ? "live" : tone === "blocked" ? "fallback" : "fallback"}">${escapeHtml(titleCase(overall))}</span>
+          </div>
+          <div class="panel-body">
+            <p class="learner-eval-line">${passed}/${total} modules cleared in the latest learner walkthrough.</p>
+            <p class="learner-eval-meta">Run on ${escapeHtml(formatDate(evalReport.created_at))}</p>
+            ${evalReport.notes && evalReport.notes.length ? `
+              <ul class="learner-eval-notes">${evalReport.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
+            ` : ""}
+          </div>
+        `;
+      }
+
       function renderActivity(events) {
         currentEvents = events;
         if (!events.length) {
@@ -1530,7 +1905,11 @@
                 : (reviewPromptByGate[pendingGate] || "Approve if this review step matches your intent, or request changes with the exact fix.");
               return `
                 <div class="module-item review-workbench">
-                  ${renderSpecSnapshot(workflow, detail)}
+                  ${renderPlainReviewSummary(workflow, detail)}
+                  <details class="review-technical-details">
+                    <summary>Technical details</summary>
+                    ${renderSpecSnapshot(workflow, detail)}
+                  </details>
                   <div class="review-pane-footer">
                     <div class="review-footer-note ${blockers.length ? "warning" : ""}">
                       ${blockers.length
@@ -1643,32 +2022,30 @@
       }
 
       async function refreshDraftDetails(courseRunId, options = {}) {
-        const [courseResponse, reviewResponse, eventsResponse, versionsResponse] = await Promise.all([
+        const [courseResponse, creatorViewResponse, eventsResponse] = await Promise.all([
           fetch(`/v1/course-runs/${courseRunId}/sync`, { method: "POST" }),
-          fetch(`/v1/course-runs/${courseRunId}/review`),
+          fetch(`/v1/course-runs/${courseRunId}/creator-view`),
           fetch(`/v1/course-runs/${courseRunId}/events`),
-          fetch(`/v1/course-runs/${courseRunId}/published-versions`),
         ]);
         if (!courseResponse.ok) {
           const detail = await extractDetail(courseResponse);
           throw new Error(detail);
         }
-        if (!reviewResponse.ok) {
-          const detail = await extractDetail(reviewResponse);
+        if (!creatorViewResponse.ok) {
+          const detail = await extractDetail(creatorViewResponse);
           throw new Error(detail);
         }
         if (!eventsResponse.ok) {
           const detail = await extractDetail(eventsResponse);
           throw new Error(detail);
         }
-        if (!versionsResponse.ok) {
-          const detail = await extractDetail(versionsResponse);
-          throw new Error(detail);
-        }
         const courseRun = await courseResponse.json();
-        const review = await reviewResponse.json();
+        const creatorView = await creatorViewResponse.json();
         const events = await eventsResponse.json();
-        const versions = await versionsResponse.json();
+        const review = creatorView.review || { linked_workflows: [], counts: {}, blockers: [], next_actions: [] };
+        const versions = creatorView.published_versions || { versions: [] };
+        currentLearnerEval = creatorView.latest_learner_evaluation || null;
+        currentCreatorFeedback = creatorView.creator_feedback || [];
         const workflowDetails = options.includeWorkflowDetails === false
           ? {}
           : await fetchWorkflowDetails(review.linked_workflows || []);
@@ -1681,6 +2058,7 @@
         renderReview(review, courseRun, events, workflowDetails);
         renderPublishedVersions(versions);
         renderActivity(events);
+        renderLearnerEvalSummary(currentLearnerEval);
         if (!options.silent && shouldPollDraft(courseRun, review)) {
           ensureDraftPolling(courseRun.id);
         }
@@ -1775,99 +2153,96 @@
         }
       }
 
-      suggestOutcomesButton.addEventListener("click", async () => {
-        const goal = goalField.value.trim();
-        if (goal.length < 10) {
-          setMessage(formMessage, "error", "Add a more specific goal first, then we can suggest useful outcomes.");
-          return;
-        }
-
-        const existingOutcomes = outcomesField.value.trim();
-        if (existingOutcomes) {
-          const confirmed = window.confirm("Replace the current learning outcomes with a new suggested draft?");
-          if (!confirmed) return;
-        }
-
-        suggestOutcomesButton.disabled = true;
-        setMessage(formMessage, "info", "Suggesting learning outcomes from the goal...");
-
+      creatorStep1Next?.addEventListener("click", async () => {
+        creatorStep1Next.disabled = true;
         try {
-          const response = await fetch(state.suggest_outcomes_url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              goal,
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(await extractDetail(response));
+          const ok = await fetchCreatorSuggestedOutcomes();
+          if (ok) {
+            renderCreatorOutcomes();
+            showCreatorStep(2);
           }
-          const payload = await response.json();
-          const outcomes = payload.learning_outcomes || [];
-          outcomesField.value = outcomes.join("\\n");
-          updateBriefCounters();
-          setMessage(
-            formMessage,
-            "success",
-            payload.source === "openai_live"
-              ? "Suggested outcomes added. Edit them however you want."
-              : "Suggested outcomes added from the fallback planner. Edit them however you want.",
-          );
-        } catch (error) {
-          setMessage(
-            formMessage,
-            "error",
-            error instanceof Error ? error.message : "Could not suggest learning outcomes.",
-          );
         } finally {
-          suggestOutcomesButton.disabled = false;
+          creatorStep1Next.disabled = false;
         }
       });
 
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const goal = goalField.value.trim();
-        const learningOutcomes = outcomesField.value
-          .split("\\n")
-          .map((line) => line.trim())
-          .filter(Boolean);
-
-        if (!goal || learningOutcomes.length === 0) {
-          setMessage(formMessage, "error", "Please add a goal and at least one learning outcome.");
+      creatorStep2Next?.addEventListener("click", () => {
+        syncOutcomesFromInputs();
+        if (!creatorState.outcomes.length) {
+          setMessage(formMessage, "error", "Add at least one outcome before continuing.");
           return;
         }
+        applyCreatorChoicesToInputs(creatorState.choices);
+        showCreatorStep(3);
+      });
 
-        generateButton.disabled = true;
-        setMessage(formMessage, "info", "Starting the first draft and moving it into Drafts...");
-
+      creatorStep3Next?.addEventListener("click", async () => {
+        creatorStep3Next.disabled = true;
         try {
-          const response = await fetch(state.generate_url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              goal,
-              learning_outcomes: learningOutcomes,
-            }),
-          });
-
-          if (!response.ok) {
-            const detail = await extractDetail(response);
-            throw new Error(detail);
+          const ok = await fetchCreatorPlan();
+          if (ok) {
+            renderCreatorPlanPreview();
+            showCreatorStep(4);
           }
-
-          const payload = await response.json();
-          renderGenerationStatus(payload.status);
-          await loadCourseDraft(payload.course_run.id, {
-            silentMessage: true,
-            historyMode: "push",
-            tabAfterLoad: "drafts",
-            scrollToResult: true,
-          });
-          setMessage(formMessage, "success", "Draft started. We’ll keep updating the Drafts tab as the build moves forward.");
-        } catch (error) {
-          setMessage(formMessage, "error", error instanceof Error ? error.message : "Failed to start the draft.");
         } finally {
-          generateButton.disabled = false;
+          creatorStep3Next.disabled = false;
+        }
+      });
+
+      generateButton?.addEventListener("click", async (event) => {
+        event.preventDefault();
+        await createDraftFromCreatorPlan();
+      });
+
+      creatorAddOutcome?.addEventListener("click", () => {
+        syncOutcomesFromInputs();
+        creatorState.outcomes.push("");
+        renderCreatorOutcomes();
+        const inputs = creatorOutcomesList?.querySelectorAll("input[data-outcome-index]");
+        inputs?.[inputs.length - 1]?.focus();
+      });
+
+      creatorOutcomesList?.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const removeBtn = target.closest("[data-remove-outcome]");
+        if (removeBtn instanceof HTMLElement) {
+          syncOutcomesFromInputs();
+          const idx = parseInt(removeBtn.dataset.removeOutcome || "-1", 10);
+          if (idx >= 0) {
+            creatorState.outcomes.splice(idx, 1);
+            renderCreatorOutcomes();
+          }
+        }
+      });
+
+      creatorOutcomesList?.addEventListener("input", (event) => {
+        if (!(event.target instanceof HTMLInputElement)) return;
+        const inputs = creatorOutcomesList.querySelectorAll("input[data-outcome-index]");
+        outcomesCount.textContent = `${inputs.length} outcome${inputs.length === 1 ? "" : "s"}`;
+      });
+
+      document.querySelectorAll("[data-creator-prev]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const target = parseInt(btn.dataset.creatorPrev, 10);
+          if (creatorState.step === 2) syncOutcomesFromInputs();
+          if (target) showCreatorStep(target);
+        });
+      });
+
+      suggestOutcomesButton?.addEventListener("click", async () => {
+        const hasOutcomes = creatorState.outcomes.length > 0;
+        if (hasOutcomes && !window.confirm("Replace the current outcomes with a fresh AI suggestion?")) {
+          return;
+        }
+        suggestOutcomesButton.disabled = true;
+        try {
+          const ok = await fetchCreatorSuggestedOutcomes();
+          if (ok) {
+            renderCreatorOutcomes();
+          }
+        } finally {
+          suggestOutcomesButton.disabled = false;
         }
       });
 
@@ -2143,7 +2518,6 @@
       createTabButton.addEventListener("click", () => setActiveTab("create", { historyMode: "push" }));
       draftsTabButton.addEventListener("click", () => setActiveTab("drafts", { historyMode: "push" }));
       goalField.addEventListener("input", updateBriefCounters);
-      outcomesField.addEventListener("input", updateBriefCounters);
 
       document.addEventListener("click", (event) => {
         const target = event.target;
@@ -2161,6 +2535,8 @@
         }
       });
 
+      renderCreatorOutcomes();
+      showCreatorStep(1);
       updateBriefCounters();
       const urlState = readUrlState();
       pendingDraftId = urlState.draftId || null;

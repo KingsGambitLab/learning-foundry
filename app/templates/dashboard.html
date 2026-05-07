@@ -163,41 +163,92 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
               <div id="form-message" class="message" role="status" aria-live="polite"></div>
 
               <section id="tab-pane-create" class="tab-pane active">
-                <section class="panel create-panel">
-                  <div class="panel-header create-panel-header">
+                <section class="panel creator-flow-panel">
+                  <div class="panel-header creator-flow-header">
                     <div>
                       <p class="section-kicker">New course brief</p>
-                      <h2>Goal and learning outcomes</h2>
+                      <h2 id="creator-step-title">Describe the system</h2>
                     </div>
-                    <div class="create-header-meta">
-                      <span id="goal-count" class="status-pill">0 characters</span>
-                      <span id="outcomes-count" class="status-pill">0 outcomes</span>
-                    </div>
+                    <ol id="creator-stepper" class="creator-stepper" aria-label="Creator funnel">
+                      <li class="creator-step current" data-creator-step="1"><span>1</span><strong>Describe</strong></li>
+                      <li class="creator-step" data-creator-step="2"><span>2</span><strong>Outcomes</strong></li>
+                      <li class="creator-step" data-creator-step="3"><span>3</span><strong>Setup</strong></li>
+                      <li class="creator-step" data-creator-step="4"><span>4</span><strong>Plan</strong></li>
+                    </ol>
                   </div>
-                  <div class="panel-body create-panel-body">
-                    <form id="course-brief-form">
-                      <div class="create-form-grid">
-                        <label class="field field-goal">
-                          <span class="field-label-row">
-                            <span>Goal</span>
-                          </span>
-                          <textarea id="goal" name="goal" placeholder="Build a production-ready customer support agent that triages tickets, uses tools safely, and can be deployed in a real environment." required></textarea>
-                          <p class="field-hint">Describe the system the learner should build and what “working” means at the end.</p>
+                  <div class="panel-body creator-flow-body">
+                    <section id="creator-pane-1" class="creator-pane active">
+                      <p class="field-hint creator-pane-intro">Tell us what you want the learner to build. We will turn this into outcomes, setup options, and a plan you can review.</p>
+                      <label class="field field-goal">
+                        <span class="field-label-row"><span>Problem statement</span><span id="goal-count" class="status-pill">0 characters</span></span>
+                        <textarea id="goal" placeholder="Build a flight booking system that is production ready. Mock external dependent services where required." required></textarea>
+                        <p class="field-hint">Describe the system the learner should build and what “working” means at the end.</p>
+                      </label>
+                      <div class="creator-pane-actions">
+                        <button id="creator-step-1-next" class="button primary" type="button">Suggest outcomes</button>
+                      </div>
+                    </section>
+
+                    <section id="creator-pane-2" class="creator-pane" hidden>
+                      <p class="field-hint creator-pane-intro">These are the suggested learning outcomes from your problem statement. Edit, remove, or add until they feel right.</p>
+                      <div class="field-label-row">
+                        <span>Goal and learning outcomes</span>
+                        <span id="outcomes-count" class="status-pill">0 outcomes</span>
+                      </div>
+                      <div id="creator-outcomes-list" class="creator-outcomes-list"></div>
+                      <button id="creator-add-outcome" class="button subtle" type="button">+ Add outcome</button>
+                      <button id="suggest-outcomes-button" class="button subtle creator-suggest-again" type="button">Suggest outcomes again</button>
+                      <div class="creator-pane-actions">
+                        <button class="button subtle" type="button" data-creator-prev="1">Back</button>
+                        <button id="creator-step-2-next" class="button primary" type="button">Continue to setup</button>
+                      </div>
+                    </section>
+
+                    <section id="creator-pane-3" class="creator-pane" hidden>
+                      <p class="field-hint creator-pane-intro">A few practical choices help us shape the codebase. You can change these later.</p>
+                      <fieldset class="creator-choice">
+                        <legend>How much starter code should learners get?</legend>
+                        <div class="creator-choice-grid">
+                          <label><input type="radio" name="starter_type" value="bare_stub" /> <span><strong>Bare stub</strong><em>Empty scaffolds; learners write everything from scratch.</em></span></label>
+                          <label><input type="radio" name="starter_type" value="partial_implementation" checked /> <span><strong>Partial scaffold</strong><em>Some pieces wired; learners fill in the core.</em></span></label>
+                          <label><input type="radio" name="starter_type" value="working_buggy" /> <span><strong>Working but buggy</strong><em>Learners debug and fix existing code.</em></span></label>
+                          <label><input type="radio" name="starter_type" value="working_suboptimal" /> <span><strong>Working but suboptimal</strong><em>Learners refactor and improve.</em></span></label>
+                        </div>
+                      </fieldset>
+                      <div class="creator-choice-row">
+                        <label class="field">
+                          <span>Which database should the course assume?</span>
+                          <select name="primary_database" id="creator-database">
+                            <option value="">No database</option>
+                            <option value="postgres" selected>PostgreSQL</option>
+                            <option value="mysql">MySQL</option>
+                            <option value="sqlite">SQLite</option>
+                            <option value="mongodb">MongoDB</option>
+                          </select>
                         </label>
-                        <label class="field field-outcomes">
-                          <span class="field-label-row">
-                            <span>Learning outcomes</span>
-                            <button id="suggest-outcomes-button" class="button subtle" type="button">Suggest outcomes</button>
-                          </span>
-                          <textarea id="outcomes" name="outcomes" placeholder="One outcome per line&#10;Tool selection and execution&#10;Approval gates and dry runs&#10;Observability and eval-driven iteration" required></textarea>
-                          <p class="field-hint">One outcome per line works best. Ask for a first draft, then edit freely.</p>
+                        <label class="field">
+                          <span>Should learners have a cache available?</span>
+                          <select name="cache_backend" id="creator-cache">
+                            <option value="">No cache</option>
+                            <option value="redis" selected>Redis</option>
+                            <option value="memcached">Memcached</option>
+                          </select>
                         </label>
                       </div>
-                      <div class="create-actions">
-                        <button id="generate-button" type="submit" class="button primary">Start building</button>
-                        <p class="field-hint">We create the draft immediately, then move you into Drafts to follow progress and review checkpoints.</p>
+                      <div class="creator-pane-actions">
+                        <button class="button subtle" type="button" data-creator-prev="2">Back</button>
+                        <button id="creator-step-3-next" class="button primary" type="button">Generate module plan</button>
                       </div>
-                    </form>
+                    </section>
+
+                    <section id="creator-pane-4" class="creator-pane" hidden>
+                      <p class="field-hint creator-pane-intro">Here is the proposed module ladder. Review the structure and accept it to create the draft.</p>
+                      <div id="creator-plan-preview" class="creator-plan-preview"></div>
+                      <div class="creator-pane-actions">
+                        <button class="button subtle" type="button" data-creator-prev="3">Back</button>
+                        <button id="generate-button" class="button primary" type="button">Start building</button>
+                      </div>
+                    </section>
                   </div>
                 </section>
               </section>
@@ -226,6 +277,8 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                           </div>
                         </div>
                       </section>
+
+                      <section id="learner-eval-summary" class="panel learner-eval-summary hidden"></section>
 
                       <details id="where-we-are-panel" class="panel accordion-panel">
                         <summary class="panel-header accordion-header">
