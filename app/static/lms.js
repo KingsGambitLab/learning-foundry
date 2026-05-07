@@ -40,7 +40,7 @@
     pageMessage: null,
     workspaceFeedback: null,
     submissionFeedback: null,
-    writeupExpanded: true,
+    writeupExpanded: false,
   };
 
   function escapeHtml(value) {
@@ -321,11 +321,10 @@
     learnerShell.classList.toggle("sidebar-hidden", sidebarHidden);
     courseSidebar.classList.toggle("hidden", sidebarHidden);
 
-    progressToggle.classList.toggle("hidden", !sidebarAvailable);
-    progressToggle.disabled = !sidebarAvailable;
-    progressToggle.textContent = sidebarAvailable
-      ? (sidebarHidden ? "Show modules" : "Hide modules")
-      : "Modules unavailable";
+    const showToolbarToggle = sidebarAvailable && sidebarHidden;
+    progressToggle.classList.toggle("hidden", !showToolbarToggle);
+    progressToggle.disabled = !showToolbarToggle;
+    progressToggle.textContent = "Show modules";
 
     viewTabButtons.forEach((button) => {
       const active = button.dataset.viewTab === uiState.activeTab;
@@ -687,12 +686,17 @@
                 <p class="card-eyebrow">What to build</p>
                 <h3>Module brief</h3>
               </div>
-              <button class="button subtle" type="button" data-toggle-writeup="${uiState.writeupExpanded ? "collapse" : "expand"}">
-                ${uiState.writeupExpanded ? "Collapse brief" : "Expand brief"}
-              </button>
+              ${uiState.writeupExpanded ? `
+                <button class="button subtle" type="button" data-toggle-writeup="collapse">Collapse brief</button>
+              ` : ""}
             </div>
             <div class="writeup-frame ${uiState.writeupExpanded ? "" : "is-collapsed"}">
               <div class="writeup-rendered">${renderMarkdown(writeup)}</div>
+              ${uiState.writeupExpanded ? "" : `
+                <button class="writeup-expand" type="button" data-toggle-writeup="expand">
+                  <span>Read full brief</span>
+                </button>
+              `}
             </div>
           </div>
 
@@ -981,7 +985,7 @@
       uiState.currentExperience = payload;
       uiState.currentEnrollmentId = enrollmentId;
       uiState.workspaceFeedback = null;
-      uiState.writeupExpanded = true;
+      uiState.writeupExpanded = false;
       setPageMessage(null, "");
       syncUrlState();
       return payload;
