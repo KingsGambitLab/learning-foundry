@@ -18,7 +18,7 @@ from app.services.dashboard_page import build_dashboard_state, render_author_das
 from app.services.docs_page import build_docs_state, render_docs_page
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
-from app.services.lms_page import build_lms_state, render_lms_home
+from app.services.lms_page import build_lms_state, render_lms_courses_page, render_lms_home
 from app.services.lms_service import LMSService
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService
@@ -136,6 +136,15 @@ def root(request: Request) -> HTMLResponse:
         enrollments=_ensure_lms_service(request.app).list_enrollments(),
     )
     return HTMLResponse(render_lms_home(lms_state))
+
+
+@app.get("/courses", tags=["system"], include_in_schema=False)
+def courses(request: Request) -> HTMLResponse:
+    lms_state = build_lms_state(
+        catalog=_ensure_lms_service(request.app).list_catalog(),
+        enrollments=_ensure_lms_service(request.app).list_enrollments(),
+    )
+    return HTMLResponse(render_lms_courses_page(lms_state))
 
 
 @app.get("/docs", tags=["system"], include_in_schema=False)

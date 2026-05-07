@@ -7,6 +7,7 @@ from app.domain.learner import LearnerEnrollmentList, PublishedCourseCatalog
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 LMS_TEMPLATE_PATH = APP_ROOT / "templates" / "lms_home.html"
+LMS_COURSES_TEMPLATE_PATH = APP_ROOT / "templates" / "lms_courses.html"
 LMS_STATE_PLACEHOLDER = "__LMS_STATE_JSON__"
 
 
@@ -23,4 +24,10 @@ def build_lms_state(*, catalog: PublishedCourseCatalog, enrollments: LearnerEnro
 def render_lms_home(state: dict) -> str:
     payload = json.dumps(state).replace("</", "<\\/")
     template = LMS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return template.replace(LMS_STATE_PLACEHOLDER, payload)
+
+
+def render_lms_courses_page(state: dict) -> str:
+    payload = json.dumps(state).replace("</", "<\\/")
+    template = LMS_COURSES_TEMPLATE_PATH.read_text(encoding="utf-8")
     return template.replace(LMS_STATE_PLACEHOLDER, payload)

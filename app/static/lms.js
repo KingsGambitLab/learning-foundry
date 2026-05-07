@@ -556,21 +556,13 @@
     }
 
     if (!experience && selectedSummary) {
-      const progress = computeCourseProgress(selectedSummary);
       learnerFocus.innerHTML = `
         <div class="hero-copy">
           <p class="eyebrow">Continue where you left off</p>
           <h1>${escapeHtml(selectedSummary.course_title)}</h1>
           <p class="focus-subtitle">${selectedSummary.current_module_title
-            ? `Module ${selectedSummary.current_module_index} of ${progress.total} · ${escapeHtml(selectedSummary.current_module_title)}`
+            ? `Module ${selectedSummary.current_module_index} · ${escapeHtml(selectedSummary.current_module_title)}`
             : "Loading your current module..."}</p>
-          <div class="focus-progress">
-            <div class="progress-meter"><span style="width: ${progress.positionPercent}%"></span></div>
-            <div class="progress-meta">
-              <span>${escapeHtml(`${progress.completed}/${progress.total} modules completed`)}</span>
-              <span>${escapeHtml(`Updated ${formatRelative(selectedSummary.updated_at)}`)}</span>
-            </div>
-          </div>
         </div>
       `;
       return;
@@ -624,13 +616,6 @@
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(activeModule.title)}</h1>
           <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Keep building through the published learner modules with a persistent workspace and graded checkpoints.")}</p>
-          <div class="focus-progress">
-            <div class="progress-meter"><span style="width: ${progress.positionPercent}%"></span></div>
-            <div class="progress-meta">
-              <span><strong>${escapeHtml(`${progress.completed}/${progress.total}`)}</strong> modules passed</span>
-              <span>${escapeHtml(`Updated ${formatRelative(enrollment.updated_at)}`)}</span>
-            </div>
-          </div>
 
           <div class="writeup-shell">
             <div class="experience-section-header">
@@ -809,6 +794,7 @@
   }
 
   function renderEnrollments(payload) {
+    if (!enrollmentList) return;
     const enrollments = payload?.enrollments || [];
     if (!enrollments.length) {
       enrollmentList.innerHTML = `
@@ -854,6 +840,7 @@
   }
 
   function renderCatalog(payload) {
+    if (!catalogList) return;
     const courses = payload?.courses || [];
     const enrolledCourseIds = new Set((state.enrollments?.enrollments || []).map((item) => item.course_run_id));
     const readyCourses = courses.filter((course) => course.supported_for_lms).length;
@@ -921,8 +908,6 @@
     renderPageMessage();
     renderFocus();
     renderExperience();
-    renderEnrollments(state.enrollments);
-    renderCatalog(state.catalog);
     updateDocumentTitle();
   }
 
@@ -1115,10 +1100,12 @@
     }
   }
 
-  catalogToggle.addEventListener("click", () => {
-    uiState.catalogExpanded = !uiState.catalogExpanded;
-    renderCatalog(state.catalog);
-  });
+  if (catalogToggle) {
+    catalogToggle.addEventListener("click", () => {
+      uiState.catalogExpanded = !uiState.catalogExpanded;
+      renderCatalog(state.catalog);
+    });
+  }
 
   document.addEventListener("click", async (event) => {
     const target = event.target instanceof Element

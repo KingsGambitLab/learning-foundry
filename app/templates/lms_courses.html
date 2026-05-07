@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Courses · Course Gen Codex</title>
+    <link rel="stylesheet" href="/static/app-shell.css" />
+    <link rel="stylesheet" href="/static/lms.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-shell">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark">CG</span>
+            <span class="brand-copy">
+              <span class="brand-label">Learner experience</span>
+              <span class="brand-title">Course Gen Codex</span>
+            </span>
+          </a>
+          <nav class="topnav" aria-label="Primary">
+            <a class="topnav-link" href="/">Learner LMS</a>
+            <a class="topnav-link active" href="/courses">Courses</a>
+            <a class="topnav-link" href="/create-course">Course builder</a>
+            <a class="topnav-link" href="/docs">API docs</a>
+          </nav>
+        </header>
+
+        <main class="container">
+          <div id="page-message" class="message"></div>
+
+          <header class="courses-page-header">
+            <p class="eyebrow">Courses</p>
+            <h1>My courses &amp; published catalog</h1>
+            <p class="page-subtitle">Resume an enrollment or browse new courses to start a fresh codebase.</p>
+          </header>
+
+          <div class="courses-tabs" role="tablist" aria-label="Courses views">
+            <button
+              id="my-courses-tab"
+              class="courses-tab active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="my-courses-pane"
+              data-courses-tab="my"
+            >My courses</button>
+            <button
+              id="all-courses-tab"
+              class="courses-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="all-courses-pane"
+              data-courses-tab="all"
+            >All courses</button>
+          </div>
+
+          <section id="my-courses-pane" class="courses-pane">
+            <div id="enrollment-list" class="course-rows">
+              <div class="empty">No enrollments yet. Switch to All courses to enroll in something.</div>
+            </div>
+          </section>
+
+          <section id="all-courses-pane" class="courses-pane hidden">
+            <p id="catalog-caption" class="page-subtitle catalog-caption"></p>
+            <div id="catalog-list" class="catalog-grid">
+              <div class="empty">Checking for published courses...</div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script id="lms-state" type="application/json">__LMS_STATE_JSON__</script>
+    <script src="/static/lms-courses.js" defer></script>
+  </body>
+</html>
