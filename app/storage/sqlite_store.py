@@ -15,6 +15,12 @@ from app.domain.learner import (
 )
 from app.domain.publish import PublishSnapshot, PublishSnapshotSummary
 from app.domain.task_agent import LearnerModuleBrief
+from app.domain.registry import StarterType
+from app.domain.testing import (
+    CreatorFeedbackRecord,
+    LearnerCourseEvaluationReport,
+    LearnerFeedbackRecord,
+)
 from app.domain.workflow import WorkflowEvent, WorkflowRun, WorkflowRunSummary
 
 
@@ -138,6 +144,38 @@ class SQLiteWorkflowStore:
                     course_run_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     version INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creator_feedback (
+                    feedback_id TEXT PRIMARY KEY,
+                    course_run_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learner_feedback (
+                    feedback_id TEXT PRIMARY KEY,
+                    enrollment_id TEXT NOT NULL,
+                    course_run_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learner_eval_reports (
+                    report_id TEXT PRIMARY KEY,
+                    course_run_id TEXT NOT NULL,
+                    publish_snapshot_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 )
                 """
@@ -362,12 +400,18 @@ class SQLiteWorkflowStore:
             learner_enrollment_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_enrollments").fetchone()["count"])
             learner_submission_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_submissions").fetchone()["count"])
             learner_workspace_session_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_workspace_sessions").fetchone()["count"])
+            creator_feedback_count = int(connection.execute("SELECT COUNT(*) AS count FROM creator_feedback").fetchone()["count"])
+            learner_feedback_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_feedback").fetchone()["count"])
+            learner_eval_report_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_eval_reports").fetchone()["count"])
 
             connection.execute("DELETE FROM workflow_events")
             connection.execute("DELETE FROM workflow_runs")
             connection.execute("DELETE FROM course_events")
             connection.execute("DELETE FROM course_runs")
             connection.execute("DELETE FROM publish_snapshots")
+            connection.execute("DELETE FROM creator_feedback")
+            connection.execute("DELETE FROM learner_feedback")
+            connection.execute("DELETE FROM learner_eval_reports")
             connection.execute("DELETE FROM learner_submissions")
             connection.execute("DELETE FROM learner_workspace_sessions")
             connection.execute("DELETE FROM learner_enrollments")
@@ -382,6 +426,9 @@ class SQLiteWorkflowStore:
             "deleted_learner_enrollments": learner_enrollment_count,
             "deleted_learner_submissions": learner_submission_count,
             "deleted_learner_workspace_sessions": learner_workspace_session_count,
+            "deleted_creator_feedback": creator_feedback_count,
+            "deleted_learner_feedback": learner_feedback_count,
+            "deleted_learner_eval_reports": learner_eval_report_count,
         }
 
     def save_learner_enrollment(self, enrollment: LearnerEnrollment) -> LearnerEnrollment:
@@ -614,6 +661,145 @@ class SQLiteWorkflowStore:
         best = max(summaries, key=lambda item: (item.version, item.created_at))
         return self.get_publish_snapshot(best.id)
 
+    def save_creator_feedback(self, feedback: CreatorFeedbackRecord) -> CreatorFeedbackRecord:
+        payload = json.dumps(feedback.model_dump(mode="json"))
+        with self._lock, self._session() as connection:
+            connection.execute(
+                """
+                INSERT INTO creator_feedback (
+                    feedback_id, course_run_id, created_at, payload_json
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(feedback_id) DO UPDATE SET
+                    course_run_id = excluded.course_run_id,
+                    created_at = excluded.created_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    feedback.id,
+                    feedback.course_run_id,
+                    feedback.created_at.isoformat(),
+                    payload,
+                ),
+            )
+            connection.commit()
+        return feedback
+
+    def list_creator_feedback(self, course_run_id: str, limit: int = 100) -> list[CreatorFeedbackRecord]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM creator_feedback
+                WHERE course_run_id = ?
+                ORDER BY datetime(created_at) DESC
+                LIMIT ?
+                """,
+                (course_run_id, limit),
+            ).fetchall()
+        return [CreatorFeedbackRecord.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def save_learner_feedback(self, feedback: LearnerFeedbackRecord) -> LearnerFeedbackRecord:
+        payload = json.dumps(feedback.model_dump(mode="json"))
+        with self._lock, self._session() as connection:
+            connection.execute(
+                """
+                INSERT INTO learner_feedback (
+                    feedback_id, enrollment_id, course_run_id, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(feedback_id) DO UPDATE SET
+                    enrollment_id = excluded.enrollment_id,
+                    course_run_id = excluded.course_run_id,
+                    created_at = excluded.created_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    feedback.id,
+                    feedback.enrollment_id,
+                    feedback.course_run_id,
+                    feedback.created_at.isoformat(),
+                    payload,
+                ),
+            )
+            connection.commit()
+        return feedback
+
+    def list_learner_feedback(self, enrollment_id: str, limit: int = 100) -> list[LearnerFeedbackRecord]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM learner_feedback
+                WHERE enrollment_id = ?
+                ORDER BY datetime(created_at) DESC
+                LIMIT ?
+                """,
+                (enrollment_id, limit),
+            ).fetchall()
+        return [LearnerFeedbackRecord.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def save_learner_eval_report(self, report: LearnerCourseEvaluationReport) -> LearnerCourseEvaluationReport:
+        payload = json.dumps(report.model_dump(mode="json"))
+        with self._lock, self._session() as connection:
+            connection.execute(
+                """
+                INSERT INTO learner_eval_reports (
+                    report_id, course_run_id, publish_snapshot_id, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(report_id) DO UPDATE SET
+                    course_run_id = excluded.course_run_id,
+                    publish_snapshot_id = excluded.publish_snapshot_id,
+                    created_at = excluded.created_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    report.id,
+                    report.course_run_id,
+                    report.publish_snapshot_id,
+                    report.created_at.isoformat(),
+                    payload,
+                ),
+            )
+            connection.commit()
+        return report
+
+    def list_learner_eval_reports(
+        self,
+        course_run_id: str | None = None,
+        publish_snapshot_id: str | None = None,
+        limit: int = 100,
+    ) -> list[LearnerCourseEvaluationReport]:
+        query = """
+            SELECT payload_json
+            FROM learner_eval_reports
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if course_run_id is not None:
+            clauses.append("course_run_id = ?")
+            params.append(course_run_id)
+        if publish_snapshot_id is not None:
+            clauses.append("publish_snapshot_id = ?")
+            params.append(publish_snapshot_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY datetime(created_at) DESC LIMIT ?"
+        params.append(limit)
+        with self._session() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [LearnerCourseEvaluationReport.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def get_latest_learner_eval_report(
+        self,
+        course_run_id: str,
+        publish_snapshot_id: str | None = None,
+    ) -> LearnerCourseEvaluationReport | None:
+        reports = self.list_learner_eval_reports(
+            course_run_id=course_run_id,
+            publish_snapshot_id=publish_snapshot_id,
+            limit=1,
+        )
+        return reports[0] if reports else None
+
     def _normalize_publish_snapshot_payload(self, payload: dict) -> dict:
         task_agent_spec = payload.get("task_agent_spec")
         if isinstance(task_agent_spec, dict):
@@ -702,15 +888,33 @@ class SQLiteWorkflowStore:
                 "progression_mode": "cumulative_module_gates",
                 "shared_codebase": True,
             },
-            "runtime_dependencies": runtime_dependencies
-            or {
-                "execution_surface": "http_service",
-                "editable_files": editable_files,
-                "visible_fixture_files": visible_fixture_files,
-                "local_run_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
-                "visible_check_command": "python checks/run_visible_checks.py",
-                "preview_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
-            },
+            "runtime_dependencies": (
+                {
+                    "execution_surface": "http_service",
+                    "starter_type": StarterType.partial_implementation.value,
+                    "editable_files": editable_files,
+                    "visible_fixture_files": visible_fixture_files,
+                    "primary_database": None,
+                    "cache_backend": None,
+                    "tech_stack": [],
+                    "local_run_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                    "visible_check_command": "python checks/run_visible_checks.py",
+                    "preview_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                }
+                if runtime_dependencies is None
+                else {
+                    **runtime_dependencies,
+                    "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial_implementation.value,
+                    "editable_files": runtime_dependencies.get("editable_files") or editable_files,
+                    "visible_fixture_files": runtime_dependencies.get("visible_fixture_files") or visible_fixture_files,
+                    "primary_database": runtime_dependencies.get("primary_database"),
+                    "cache_backend": runtime_dependencies.get("cache_backend"),
+                    "tech_stack": runtime_dependencies.get("tech_stack") or [],
+                    "local_run_command": runtime_dependencies.get("local_run_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                    "visible_check_command": runtime_dependencies.get("visible_check_command") or "python checks/run_visible_checks.py",
+                    "preview_command": runtime_dependencies.get("preview_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                }
+            ),
             "capabilities": capabilities
             or {
                 "retrieval_mode": "none",

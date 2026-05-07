@@ -5,10 +5,16 @@ import threading
 from collections.abc import Callable
 
 from app.domain.course import (
+    CreateCourseFromCreatorPlanRequest,
     CourseGenerationSource,
     CourseGenerationStatus,
+    CourseRun,
+    CreatorCourseModulePlan,
+    CreatorCoursePlan,
     CreateCourseModuleRequest,
     CreateCourseRunRequest,
+    GenerateCreatorCoursePlanRequest,
+    GenerateCreatorCoursePlanResponse,
     GenerateCourseFromBriefRequest,
     GenerateCourseFromBriefResponse,
     GeneratedCoursePlan,
@@ -16,7 +22,7 @@ from app.domain.course import (
     SuggestLearningOutcomesRequest,
     SuggestLearningOutcomesResponse,
 )
-from app.domain.registry import PackageType, RiskClass
+from app.domain.registry import PackageType, RiskClass, StarterType
 from app.domain.task_agent import (
     AssignmentDesignSpec,
     ProgressionMode,
@@ -91,7 +97,7 @@ class CourseGenerationService:
                 return SuggestLearningOutcomesResponse(
                     source=source,
                     status=status,
-                    learning_outcomes=outcomes,
+                    learning_outcomes=self._normalize_learning_outcomes(outcomes),
                 )
             except (OpenAICourseGenerationError, OpenAICoursePlannerUnavailable) as exc:
                 status = CourseGenerationStatus(
@@ -108,8 +114,111 @@ class CourseGenerationService:
         return SuggestLearningOutcomesResponse(
             source=source,
             status=status,
-            learning_outcomes=self._fallback_learning_outcomes(request.goal),
+            learning_outcomes=self._normalize_learning_outcomes(self._fallback_learning_outcomes(request.goal)),
         )
+
+    def generate_creator_plan(
+        self,
+        request: GenerateCreatorCoursePlanRequest,
+    ) -> GenerateCreatorCoursePlanResponse:
+        normalized_outcomes = self._normalize_learning_outcomes(
+            request.learning_outcomes or self._fallback_learning_outcomes(request.goal)
+        )
+        plan_request = GenerateCourseFromBriefRequest(
+            goal=request.goal,
+            learning_outcomes=normalized_outcomes,
+            title=request.title,
+            package_type_hint=request.package_type_hint,
+        )
+        normalized_plan, source, status = self._generate_normalized_plan(plan_request)
+        adjusted_shared_design_spec = self._apply_creator_choices_to_design_spec(
+            normalized_plan.shared_design_spec,
+            request.creator_choices,
+        )
+        creator_modules = self._creator_plan_modules(
+            request=plan_request,
+            design_spec=adjusted_shared_design_spec,
+            default_modules=normalized_plan.modules,
+            creator_summary=normalized_plan.summary,
+            creator_choices=request.creator_choices,
+        )
+        creator_plan = CreatorCoursePlan(
+            title=normalized_plan.title,
+            summary=normalized_plan.summary,
+            package_type=normalized_plan.package_type,
+            creator_choices=request.creator_choices,
+            shared_design_spec=adjusted_shared_design_spec,
+            modules=creator_modules,
+            creator_summary=self._creator_summary(adjusted_shared_design_spec, request.creator_choices),
+            notes=list(
+                dict.fromkeys(
+                    [
+                        *normalized_plan.notes,
+                        "Review the module ladder before creating the draft.",
+                        "The approved creator plan feeds the same course-generation and review pipeline.",
+                    ]
+                )
+            ),
+        )
+        return GenerateCreatorCoursePlanResponse(
+            source=source,
+            status=status,
+            learning_outcomes=normalized_outcomes,
+            plan=creator_plan,
+        )
+
+    def create_course_run_from_creator_plan(
+        self,
+        request: CreateCourseFromCreatorPlanRequest,
+    ) -> CourseRun:
+        plan = request.plan
+        shared_design_spec = self._apply_creator_choices_to_design_spec(
+            plan.shared_design_spec,
+            plan.creator_choices,
+        )
+        modules = [
+            CreateCourseModuleRequest(
+                module_slug=module.module_slug,
+                title=module.title,
+                summary=module.summary,
+                learning_outcomes=module.learning_outcomes,
+                checkpoint_module_ids=module.checkpoint_module_ids,
+                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or shared_design_spec, plan.creator_choices),
+            )
+            for module in plan.modules
+        ]
+        course_run = self.course_workflow_service.create_run(
+            CreateCourseRunRequest(
+                title=plan.title,
+                summary=plan.summary,
+                package_type=plan.package_type,
+                shared_design_spec=shared_design_spec,
+                modules=modules,
+            )
+        )
+        course_run.notes = list(
+            dict.fromkeys(
+                [
+                    *course_run.notes,
+                    "Draft created from an approved creator plan.",
+                    f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
+                    *( [f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else [] ),
+                    *( [f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else [] ),
+                ]
+            )
+        )
+        self.course_workflow_service.store.save_course_run(course_run)
+        self.course_workflow_service.store.append_course_event(
+            course_run.id,
+            "creator_plan_accepted",
+            {
+                "module_count": len(plan.modules),
+                "starter_type": plan.creator_choices.starter_type.value,
+                "primary_database": plan.creator_choices.primary_database,
+                "cache_backend": plan.creator_choices.cache_backend,
+            },
+        )
+        return course_run
 
     def generate_course_run(self, request: GenerateCourseFromBriefRequest) -> GenerateCourseFromBriefResponse:
         normalized_plan, source, status = self._generate_normalized_plan(request)
@@ -250,7 +359,7 @@ class CourseGenerationService:
         for module in normalized.modules:
             design_spec = module.design_spec or shared_design_spec
             design_spec = self._with_package_type(design_spec, normalized.package_type)
-            learning_outcomes = module.learning_outcomes or request.learning_outcomes[:3]
+            learning_outcomes = self._normalize_learning_outcomes(module.learning_outcomes or request.learning_outcomes[:3])
             modules.append(
                 CreateCourseModuleRequest(
                     module_slug=module.module_slug,
@@ -416,11 +525,11 @@ class CourseGenerationService:
             ),
             CreateCourseModuleRequest(
                 title="Approvals, fallbacks, and observability",
-                summary="Add safety controls, error recovery, and traces that make the system operable.",
-                learning_outcomes=outcomes[:3] or ["approval gates", "fallback handling", "observability"],
-                design_spec=design_spec,
-                domain_pack_hint=design_spec.domain_pack,
-                overlays_hint=["productionization_overlay"],
+                    summary="Add safety controls, error recovery, and traces that make the system operable.",
+                    learning_outcomes=outcomes[:3] or ["approval gates", "fallback handling", "observability"],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=["productionization_overlay"],
             ),
         ]
         if package_type == PackageType.progressive_codebase_course:
@@ -446,6 +555,98 @@ class CourseGenerationService:
             )
         return modules
 
+    def _creator_plan_modules(
+        self,
+        *,
+        request: GenerateCourseFromBriefRequest,
+        design_spec: AssignmentDesignSpec,
+        default_modules: list[CreateCourseModuleRequest],
+        creator_summary: str,
+        creator_choices,
+    ) -> list[CreatorCourseModulePlan]:
+        text = " ".join([request.goal, creator_summary, *request.learning_outcomes]).lower()
+        modules: list[CreateCourseModuleRequest]
+        if (
+            design_spec.capabilities.durable_state_required
+            and any(keyword in text for keyword in ["flight", "booking", "reservation", "inventory"])
+        ):
+            cache_label = creator_choices.cache_backend.title() if creator_choices.cache_backend else "Caching"
+            cache_summary = (
+                f"Introduce {creator_choices.cache_backend} caching for availability lookups and protect freshness."
+                if creator_choices.cache_backend
+                else "Improve read-path performance without breaking booking correctness."
+            )
+            db_label = creator_choices.primary_database or "the primary database"
+            modules = [
+                CreateCourseModuleRequest(
+                    module_slug="exercise/01-core-booking-flow",
+                    title="Core booking contract and seat inventory",
+                    summary="Model the booking flow, inventory records, and baseline invariants before adding concurrency controls.",
+                    learning_outcomes=[
+                        "Define the booking workflow and the invariants that must never break.",
+                        "Model seats, reservations, and booking state transitions clearly.",
+                    ],
+                    design_spec=design_spec,
+                ),
+                CreateCourseModuleRequest(
+                    module_slug="exercise/02-pessimistic-locking",
+                    title=f"Pessimistic locking in {db_label}",
+                    summary="Prevent overselling by introducing pessimistic locking around the critical reservation path.",
+                    learning_outcomes=[
+                        "Use pessimistic locking to protect the hot booking path.",
+                        "Explain the tradeoff between safety and throughput under contention.",
+                    ],
+                    design_spec=design_spec,
+                ),
+                CreateCourseModuleRequest(
+                    module_slug="exercise/03-optimistic-locking",
+                    title=f"Optimistic locking and retries in {db_label}",
+                    summary="Shift the booking path to optimistic control with version checks, retries, and clear failure responses.",
+                    learning_outcomes=[
+                        "Implement optimistic concurrency control with version-aware writes.",
+                        "Design retry and conflict handling that feels safe in production.",
+                    ],
+                    design_spec=design_spec,
+                ),
+                CreateCourseModuleRequest(
+                    module_slug="exercise/04-caching",
+                    title=f"{cache_label} for availability reads",
+                    summary=cache_summary,
+                    learning_outcomes=[
+                        "Use caching to speed up read-heavy traffic without corrupting booking correctness.",
+                        "Explain the freshness and invalidation tradeoffs in the booking workflow.",
+                    ],
+                    design_spec=design_spec,
+                ),
+                CreateCourseModuleRequest(
+                    module_slug="final/production-readiness",
+                    title="Production hardening and failure drills",
+                    summary="Pull the booking service together with observability, retries, and realistic operational drills.",
+                    learning_outcomes=[
+                        "Make the service observable and debuggable under failure.",
+                        "Prepare the system for production traffic and operator confidence.",
+                    ],
+                    design_spec=design_spec.model_copy(
+                        update={"overlays": list(dict.fromkeys([*design_spec.overlays, "productionization_overlay"]))}
+                    ),
+                ),
+            ]
+        else:
+            modules = default_modules
+
+        return [
+            CreatorCourseModulePlan(
+                module_slug=module.module_slug or f"module-{index}",
+                title=module.title,
+                summary=module.summary or module.title,
+                learning_outcomes=self._normalize_learning_outcomes(module.learning_outcomes or request.learning_outcomes[:3]),
+                creator_notes=self._creator_notes_for_module(module, creator_choices),
+                checkpoint_module_ids=list(module.checkpoint_module_ids),
+                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or design_spec, creator_choices),
+            )
+            for index, module in enumerate(modules, start=1)
+        ]
+
     def _fallback_learning_outcomes(self, goal: str) -> list[str]:
         design_spec = infer_assignment_design(
             title=self._title_from_goal(goal),
@@ -455,29 +656,37 @@ class CourseGenerationService:
 
         if design_spec is None:
             return [
-                "Define the system contract and the core behaviors the learner must make reliable.",
-                "Implement the primary workflow end to end with concrete success and failure handling.",
-                "Add observability or evaluation checks that make quality visible during development.",
-                "Raise the system to a production-minded bar for correctness, safety, or reliability.",
+                "Turn the problem statement into a production-ready service contract with clear boundaries.",
+                "Implement the core workflow end to end and make failure handling visible.",
+                "Add debugging and quality signals so a teammate can trust the system under load.",
+                "Push the system to a production bar for correctness, safety, or operational confidence.",
             ]
 
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
             return [
-                "Build a retrieval pipeline that returns grounded answers with citations.",
-                "Measure retrieval quality and reduce unsupported or hallucinated responses.",
-                "Tune latency and cost so the system can run at a practical production bar.",
-                "Add evaluation loops that surface failure cases and track quality over time.",
+                "Build a retrieval flow that answers from evidence instead of guessing.",
+                "Use citations and abstention to make groundedness visible to the learner.",
+                "Tune latency and cost until the system feels believable in production.",
+                "Add evaluation loops that catch regressions before they hit users.",
             ]
 
         if design_spec.capabilities.retrieval_mode == RetrievalMode.ranked_results:
             return [
-                "Design an index and query flow that retrieves relevant results reliably.",
-                "Measure ranking quality with concrete retrieval metrics and fixtures.",
-                "Handle filters, freshness, and edge cases in the retrieval contract.",
-                "Tune the system for practical latency under realistic query load.",
+                "Design a retrieval contract that returns relevant results consistently.",
+                "Measure ranking quality with concrete fixtures instead of intuition.",
+                "Handle filters, freshness, and read-path edge cases without surprises.",
+                "Tune the service for practical latency under realistic query load.",
             ]
 
         if design_spec.capabilities.durable_state_required and not design_spec.capabilities.tool_use_required:
+            lowered_goal = goal.lower()
+            if any(keyword in lowered_goal for keyword in ["flight", "booking", "reservation", "inventory"]):
+                return [
+                    "Model bookings and seat inventory so the service preserves the right invariants.",
+                    "Use locking and retries to keep concurrent reservations safe under load.",
+                    "Add caching and observability without making availability stale or misleading.",
+                    "Raise the service to a production bar for correctness, latency, and operator trust.",
+                ]
             return [
                 "Model the core state transitions and the invariants the service must preserve.",
                 "Make duplicate requests and concurrent access safe to handle in production.",
@@ -499,6 +708,78 @@ class CourseGenerationService:
         if not words:
             return "Generated Course Draft"
         return " ".join(word.capitalize() for word in words[:6])
+
+    def _normalize_learning_outcomes(self, outcomes: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in outcomes:
+            parts = re.split(r"(?:\r?\n|;)", raw)
+            for part in parts:
+                cleaned = part.strip()
+                cleaned = re.sub(r"^[-*•\d\.\)\s]+", "", cleaned).strip()
+                if not cleaned:
+                    continue
+                cleaned = re.sub(r"\s+", " ", cleaned)
+                key = cleaned.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized.append(cleaned)
+        return normalized
+
+    def _apply_creator_choices_to_design_spec(
+        self,
+        design_spec: AssignmentDesignSpec | None,
+        creator_choices,
+    ) -> AssignmentDesignSpec | None:
+        if design_spec is None:
+            return None
+        return design_spec.model_copy(
+            update={
+                "runtime_dependencies": design_spec.runtime_dependencies.model_copy(
+                    update={
+                        "starter_type": creator_choices.starter_type,
+                        "primary_database": creator_choices.primary_database,
+                        "cache_backend": creator_choices.cache_backend,
+                        "tech_stack": list(creator_choices.tech_stack),
+                    }
+                )
+            }
+        )
+
+    def _creator_summary(self, design_spec: AssignmentDesignSpec, creator_choices) -> str:
+        parts = [
+            "We will create the course as a shared production-ready codebase."
+            if design_spec.course_structure.shared_codebase
+            else "We will create the course as separate module projects.",
+            (
+                "Learners start from a scaffolded starter app."
+                if creator_choices.starter_type != StarterType.bare_stub
+                else "Learners start closer to a blank scaffold and implement most of the system themselves."
+            ),
+        ]
+        if creator_choices.primary_database:
+            parts.append(f"The current plan assumes `{creator_choices.primary_database}` as the primary database.")
+        if creator_choices.cache_backend:
+            parts.append(f"The plan also gives learners access to `{creator_choices.cache_backend}` for caching work.")
+        capability_labels = ", ".join(design_spec.capabilities.summary_labels())
+        parts.append(f"Under the hood, the generation pipeline will target {capability_labels}.")
+        return " ".join(parts)
+
+    def _creator_notes_for_module(self, module: CreateCourseModuleRequest, creator_choices) -> list[str]:
+        notes: list[str] = []
+        summary_lower = (module.summary or "").lower()
+        if creator_choices.primary_database and any(keyword in summary_lower for keyword in ["lock", "transaction", "concurrency"]):
+            notes.append(f"Expected to use `{creator_choices.primary_database}` in this module.")
+        if creator_choices.cache_backend and "cache" in summary_lower:
+            notes.append(f"Expected to use `{creator_choices.cache_backend}` in this module.")
+        if creator_choices.starter_type.name.startswith("working"):
+            notes.append("Learners should inherit a starter that already runs, then improve it.")
+        elif creator_choices.starter_type == creator_choices.starter_type.partial_implementation:
+            notes.append("Learners should inherit a partial starter so they can focus on the core change.")
+        else:
+            notes.append("Learners should implement most of this module themselves from a bare scaffold.")
+        return notes
 
     def _preferred_package_type(
         self,

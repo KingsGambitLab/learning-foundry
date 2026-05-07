@@ -130,6 +130,17 @@ class FakeLivePlanner:
         )
 
 
+class FakeMultilineOutcomePlanner(FakeLivePlanner):
+    def suggest_learning_outcomes(self, request):
+        return (
+            [
+                "- Model the booking workflow clearly.\n- Handle concurrent reservations safely.",
+                "Use caching carefully for read-heavy traffic.",
+            ],
+            self.status(),
+        )
+
+
 class FakeSandboxRunner:
     def __init__(self, *, success: bool = True) -> None:
         self.success = success
@@ -718,6 +729,81 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["source"], "deterministic_fallback")
         self.assertGreaterEqual(len(body["learning_outcomes"]), 4)
+
+    def test_suggest_learning_outcomes_normalizes_multiline_items(self) -> None:
+        app.state.course_generation_service = CourseGenerationService(
+            app.state.course_workflow_service,
+            live_planner=FakeMultilineOutcomePlanner(),
+        )
+        response = self.client.post(
+            "/v1/course-generation/suggest-outcomes",
+            json={"goal": "Build a production-ready flight booking system."},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            body["learning_outcomes"],
+            [
+                "Model the booking workflow clearly.",
+                "Handle concurrent reservations safely.",
+                "Use caching carefully for read-heavy traffic.",
+            ],
+        )
+
+    def test_creator_plan_endpoint_shapes_flight_booking_course(self) -> None:
+        response = self.client.post(
+            "/v1/course-generation/creator-plan",
+            json={
+                "goal": "Build a flight booking system that is production ready. Mock external dependent services where required.",
+                "learning_outcomes": [
+                    "Keep seat inventory correct under load.",
+                    "Explain the tradeoffs between different locking strategies.",
+                ],
+                "creator_choices": {
+                    "starter_type": "partial_implementation",
+                    "primary_database": "postgres",
+                    "cache_backend": "redis",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["plan"]["creator_choices"]["primary_database"], "postgres")
+        self.assertEqual(body["plan"]["creator_choices"]["cache_backend"], "redis")
+        module_titles = [module["title"] for module in body["plan"]["modules"]]
+        self.assertIn("Pessimistic locking in postgres", module_titles)
+        self.assertIn("Optimistic locking and retries in postgres", module_titles)
+        self.assertIn("Redis for availability reads", module_titles)
+        self.assertIn("shared production-ready codebase", body["plan"]["creator_summary"].lower())
+
+    def test_create_course_run_from_creator_plan_preserves_creator_choices(self) -> None:
+        planned = self.client.post(
+            "/v1/course-generation/creator-plan",
+            json={
+                "goal": "Build a flight booking system that is production ready. Mock external dependent services where required.",
+                "learning_outcomes": [
+                    "Keep seat inventory correct under load.",
+                    "Explain the tradeoffs between different locking strategies.",
+                ],
+                "creator_choices": {
+                    "starter_type": "bare_stub",
+                    "primary_database": "postgres",
+                    "cache_backend": "redis",
+                },
+            },
+        )
+        self.assertEqual(planned.status_code, 200)
+
+        created = self.client.post(
+            "/v1/course-runs/from-creator-plan",
+            json={"plan": planned.json()["plan"]},
+        )
+        self.assertEqual(created.status_code, 200)
+        body = created.json()
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "bare_stub")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["primary_database"], "postgres")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["cache_backend"], "redis")
+        self.assertIsNotNone(body["shared_workflow_run_id"])
 
     def test_normalize_plan_preserves_shared_design_spec_across_progressive_modules(self) -> None:
         service = app.state.course_generation_service
@@ -2005,6 +2091,112 @@ class CourseGenCodexApiTests(unittest.TestCase):
         version_body = versions.json()
         self.assertEqual(version_body["versions"][0]["learner_count"], 1)
         self.assertEqual(version_body["versions"][0]["snapshot_id"], snapshot_id)
+
+    def test_creator_and_learner_testing_views_capture_feedback_and_eval_report(self) -> None:
+        app.state.lms_service = LMSService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            learner_studio_service=FakeLearnerStudioService(),
+            base_dir=f"{self.temp_dir.name}/learner-workspaces",
+        )
+
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run = created.json()
+        course_run_id = course_run["id"]
+        shared_run_id = course_run["shared_workflow_run_id"]
+
+        creator_feedback = self.client.post(
+            f"/v1/course-runs/{course_run_id}/feedback",
+            json={
+                "summary": "Module ladder feels close.",
+                "details": "The first module is clear, but I want to watch the later modules closely.",
+                "category": "module-plan",
+                "module_slug": course_run["modules"][0]["module_slug"],
+            },
+        )
+        self.assertEqual(creator_feedback.status_code, 200)
+
+        for gate in (
+            "gate_1_spec_review",
+            "gate_2_progression_review",
+            "gate_3_pre_publish",
+        ):
+            self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+        self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
+        self.assertEqual(published.status_code, 200)
+        snapshot_id = published.json()["latest_publish_snapshot_id"]
+        snapshot = app.state.workflow_service.store.get_publish_snapshot(snapshot_id)
+        assert snapshot is not None
+
+        enrollment = self.client.post(
+            "/v1/lms/enrollments",
+            json={"course_run_id": course_run_id, "learner_id": "test-learner"},
+        )
+        self.assertEqual(enrollment.status_code, 200)
+        enrollment_id = enrollment.json()["id"]
+
+        learner_feedback = self.client.post(
+            f"/v1/lms/enrollments/{enrollment_id}/feedback",
+            json={
+                "summary": "The starter is easy to understand.",
+                "details": "README and module content were enough to get moving.",
+            },
+        )
+        self.assertEqual(learner_feedback.status_code, 200)
+
+        first_module = snapshot.learner_package.modules[0]
+        report = self.client.post(
+            f"/v1/course-runs/{course_run_id}/learner-eval",
+            json={
+                "publish_snapshot_id": snapshot_id,
+                "learner_id": "test-learner",
+                "enrollment_id": enrollment_id,
+                "module_results": [
+                    {
+                        "module_id": first_module.module_id,
+                        "title": first_module.title,
+                        "module_index": first_module.module_index,
+                        "learner_visible_files": first_module.visible_files,
+                        "bad_attempt": {
+                            "status": "failed",
+                            "passed_tests": 0,
+                            "total_tests": 1,
+                            "pass_rate": 0.0,
+                        },
+                        "good_attempt": {
+                            "status": "passed",
+                            "passed_tests": 1,
+                            "total_tests": 1,
+                            "pass_rate": 1.0,
+                        },
+                        "next_module_id": snapshot.learner_package.modules[1].module_id,
+                        "progression_observed": True,
+                        "course_completed": False,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual(report.json()["overall_status"], "passed")
+
+        creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
+        self.assertEqual(creator_view.status_code, 200)
+        creator_body = creator_view.json()
+        self.assertEqual(creator_body["creator_feedback"][0]["summary"], "Module ladder feels close.")
+        self.assertEqual(creator_body["latest_learner_evaluation"]["publish_snapshot_id"], snapshot_id)
+
+        learner_view = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/learner-view")
+        self.assertEqual(learner_view.status_code, 200)
+        learner_body = learner_view.json()
+        self.assertEqual(learner_body["feedback"][0]["summary"], "The starter is easy to understand.")
 
     def test_create_revision_produces_new_draft_without_replacing_published_catalog_entry(self) -> None:
         app.state.lms_service = LMSService(

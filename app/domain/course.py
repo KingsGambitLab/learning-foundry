@@ -5,7 +5,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.domain.registry import PackageType
+from app.domain.registry import PackageType, StarterType
 from app.domain.task_agent import AssignmentDesignSpec
 from app.domain.workflow import DraftKind, HILGate, MaterializedBundle, WorkflowReviewSummary, WorkflowStage, WorkflowStatus
 
@@ -121,6 +121,9 @@ class LocalDraftResetResult(BaseModel):
     deleted_learner_enrollments: int = 0
     deleted_learner_submissions: int = 0
     deleted_learner_workspace_sessions: int = 0
+    deleted_creator_feedback: int = 0
+    deleted_learner_feedback: int = 0
+    deleted_learner_eval_reports: int = 0
     cleared_directories: list[str] = Field(default_factory=list)
 
 
@@ -286,3 +289,50 @@ class SuggestLearningOutcomesResponse(BaseModel):
     source: CourseGenerationSource
     status: CourseGenerationStatus
     learning_outcomes: list[str] = Field(default_factory=list)
+
+
+class CreatorCourseSetupChoices(BaseModel):
+    starter_type: StarterType = StarterType.partial_implementation
+    primary_database: str | None = None
+    cache_backend: str | None = None
+    tech_stack: list[str] = Field(default_factory=list)
+
+
+class CreatorCourseModulePlan(BaseModel):
+    module_slug: str
+    title: str
+    summary: str
+    learning_outcomes: list[str] = Field(default_factory=list)
+    creator_notes: list[str] = Field(default_factory=list)
+    checkpoint_module_ids: list[str] = Field(default_factory=list)
+    design_spec: AssignmentDesignSpec | None = None
+
+
+class CreatorCoursePlan(BaseModel):
+    title: str
+    summary: str
+    package_type: PackageType
+    creator_choices: CreatorCourseSetupChoices
+    shared_design_spec: AssignmentDesignSpec | None = None
+    modules: list[CreatorCourseModulePlan] = Field(default_factory=list, min_length=1)
+    creator_summary: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class GenerateCreatorCoursePlanRequest(BaseModel):
+    goal: str = Field(min_length=10)
+    learning_outcomes: list[str] = Field(default_factory=list)
+    title: str | None = None
+    package_type_hint: PackageType | None = None
+    creator_choices: CreatorCourseSetupChoices = Field(default_factory=CreatorCourseSetupChoices)
+
+
+class GenerateCreatorCoursePlanResponse(BaseModel):
+    source: CourseGenerationSource
+    status: CourseGenerationStatus
+    learning_outcomes: list[str] = Field(default_factory=list)
+    plan: CreatorCoursePlan
+
+
+class CreateCourseFromCreatorPlanRequest(BaseModel):
+    plan: CreatorCoursePlan

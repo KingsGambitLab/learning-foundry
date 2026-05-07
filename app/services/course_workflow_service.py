@@ -20,6 +20,7 @@ from app.domain.course import (
     CourseReviewReport,
     CourseRun,
     CourseRunList,
+    CourseRunSummary,
     CourseRunStage,
     CourseRunStatus,
     CreateCourseModuleRequest,
@@ -31,6 +32,14 @@ from app.domain.course import (
 from app.domain.registry import PackageType, RiskClass
 from app.domain.task_agent import AssignmentDesignSpec, RetrievalMode
 from app.domain.publish import PublishSnapshot, PublishedVersionList, PublishedVersionSummary
+from app.domain.testing import (
+    CreateCreatorFeedbackRequest,
+    CreateLearnerEvaluationReportRequest,
+    CreatorFeedbackList,
+    CreatorFeedbackRecord,
+    CreatorTestingView,
+    LearnerCourseEvaluationReport,
+)
 from app.domain.workflow import (
     ArtifactVisibility,
     BundleFileContent,
@@ -119,6 +128,9 @@ class CourseWorkflowService:
             deleted_learner_enrollments=counts["deleted_learner_enrollments"],
             deleted_learner_submissions=counts["deleted_learner_submissions"],
             deleted_learner_workspace_sessions=counts["deleted_learner_workspace_sessions"],
+            deleted_creator_feedback=counts.get("deleted_creator_feedback", 0),
+            deleted_learner_feedback=counts.get("deleted_learner_feedback", 0),
+            deleted_learner_eval_reports=counts.get("deleted_learner_eval_reports", 0),
             cleared_directories=cleared_directories,
         )
 
@@ -416,6 +428,152 @@ class CourseWorkflowService:
         course_run = self._compute_refreshed_run(self._require_run(course_run_id))
         linked_runs = self._linked_runs(course_run)
         return self._build_review_report(course_run, linked_runs)
+
+    def creator_view(self, course_run_id: str) -> CreatorTestingView:
+        course_run = self._compute_refreshed_run(self._require_run(course_run_id))
+        linked_runs = self._linked_runs(course_run)
+        review = self._build_review_report(course_run, linked_runs)
+        return CreatorTestingView(
+            course_run=CourseRunSummary.from_run(course_run),
+            review=review,
+            published_versions=self.list_published_versions(course_run_id),
+            creator_feedback=self.store.list_creator_feedback(course_run_id),
+            latest_learner_evaluation=self.store.get_latest_learner_eval_report(
+                course_run_id,
+                course_run.latest_publish_snapshot_id,
+            ),
+        )
+
+    def record_creator_feedback(
+        self,
+        course_run_id: str,
+        request: CreateCreatorFeedbackRequest,
+    ) -> CreatorFeedbackRecord:
+        course_run = self._compute_refreshed_run(self._require_run(course_run_id))
+        if request.module_slug is not None and all(module.module_slug != request.module_slug for module in course_run.modules):
+            raise ValueError(f"Unknown module '{request.module_slug}' for course '{course_run_id}'.")
+        valid_workflow_ids = {
+            workflow_id
+            for workflow_id in [course_run.shared_workflow_run_id, *[module.workflow_run_id for module in course_run.modules]]
+            if workflow_id is not None
+        }
+        if request.workflow_run_id is not None and request.workflow_run_id not in valid_workflow_ids:
+            raise ValueError(f"Workflow '{request.workflow_run_id}' is not linked to course '{course_run_id}'.")
+
+        feedback = CreatorFeedbackRecord(
+            id=f"creator_feedback_{uuid4().hex[:12]}",
+            course_run_id=course_run_id,
+            created_at=datetime.now(UTC),
+            category=request.category.strip() or "general",
+            summary=request.summary.strip(),
+            details=request.details.strip() if request.details else None,
+            rating=request.rating,
+            module_slug=request.module_slug,
+            workflow_run_id=request.workflow_run_id,
+            stage=course_run.stage.value,
+            status=course_run.status.value,
+            context=request.context,
+        )
+        self.store.save_creator_feedback(feedback)
+        self.store.append_course_event(
+            course_run_id,
+            "creator_feedback_recorded",
+            {
+                "feedback_id": feedback.id,
+                "category": feedback.category,
+                "module_slug": feedback.module_slug,
+                "workflow_run_id": feedback.workflow_run_id,
+                "rating": feedback.rating,
+            },
+        )
+        return feedback
+
+    def list_creator_feedback(self, course_run_id: str) -> CreatorFeedbackList:
+        self._require_run(course_run_id)
+        return CreatorFeedbackList(items=self.store.list_creator_feedback(course_run_id))
+
+    def record_learner_evaluation(
+        self,
+        course_run_id: str,
+        request: CreateLearnerEvaluationReportRequest,
+    ) -> LearnerCourseEvaluationReport:
+        course_run = self._require_run(course_run_id)
+        latest_snapshot = self.store.get_latest_publish_snapshot(course_run_id=course_run_id)
+        publish_snapshot_id = (
+            request.publish_snapshot_id
+            or course_run.latest_publish_snapshot_id
+            or (latest_snapshot.id if latest_snapshot is not None else None)
+        )
+        if publish_snapshot_id is None:
+            raise CourseWorkflowConflictError("This course does not have a publish snapshot to attach a learner evaluation report to.")
+        snapshot = self.store.get_publish_snapshot(publish_snapshot_id)
+        if snapshot is None or snapshot.course_run_id != course_run_id:
+            raise CourseWorkflowConflictError(
+                f"Publish snapshot '{publish_snapshot_id}' does not belong to course '{course_run_id}'."
+            )
+        if snapshot.learner_package is None:
+            raise CourseWorkflowConflictError(
+                f"Publish snapshot '{publish_snapshot_id}' does not have a learner package to evaluate."
+            )
+
+        learner_module_ids = {module.module_id for module in snapshot.learner_package.modules}
+        unknown_modules = [result.module_id for result in request.module_results if result.module_id not in learner_module_ids]
+        if unknown_modules:
+            raise CourseWorkflowConflictError(
+                f"Learner evaluation report includes unknown module ids for snapshot '{publish_snapshot_id}': {', '.join(unknown_modules)}."
+            )
+
+        learner_id = request.learner_id
+        if request.enrollment_id is not None:
+            enrollment = self.store.get_learner_enrollment(request.enrollment_id)
+            if enrollment is None:
+                raise KeyError(request.enrollment_id)
+            if enrollment.course_run_id != course_run_id:
+                raise CourseWorkflowConflictError(
+                    f"Enrollment '{request.enrollment_id}' does not belong to course '{course_run_id}'."
+                )
+            if enrollment.publish_snapshot_id != publish_snapshot_id:
+                raise CourseWorkflowConflictError(
+                    f"Enrollment '{request.enrollment_id}' is pinned to snapshot '{enrollment.publish_snapshot_id}', not '{publish_snapshot_id}'."
+                )
+            learner_id = learner_id or enrollment.learner_id
+
+        overall_status = (
+            "passed"
+            if all(
+                result.good_attempt.status == "passed" and result.progression_observed
+                for result in request.module_results
+            )
+            else "failed"
+        )
+        report = LearnerCourseEvaluationReport(
+            id=f"learner_eval_{uuid4().hex[:12]}",
+            course_run_id=course_run_id,
+            publish_snapshot_id=publish_snapshot_id,
+            learner_id=learner_id,
+            enrollment_id=request.enrollment_id,
+            created_at=datetime.now(UTC),
+            overall_status=overall_status,
+            notes=list(request.notes),
+            module_results=request.module_results,
+        )
+        self.store.save_learner_eval_report(report)
+        self.store.append_course_event(
+            course_run_id,
+            "learner_evaluation_recorded",
+            {
+                "report_id": report.id,
+                "publish_snapshot_id": publish_snapshot_id,
+                "overall_status": report.overall_status,
+                "module_count": len(report.module_results),
+                "enrollment_id": request.enrollment_id,
+            },
+        )
+        return report
+
+    def get_latest_learner_evaluation(self, course_run_id: str) -> LearnerCourseEvaluationReport | None:
+        course_run = self._require_run(course_run_id)
+        return self.store.get_latest_learner_eval_report(course_run_id, course_run.latest_publish_snapshot_id)
 
     def list_published_versions(self, course_run_id: str) -> PublishedVersionList:
         course_run = self._require_run(course_run_id)

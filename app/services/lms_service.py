@@ -30,6 +30,12 @@ from app.domain.learner import (
     WriteLearnerWorkspaceFileRequest,
 )
 from app.domain.publish import LearnerModulePackage, PublishSnapshot
+from app.domain.testing import (
+    CreateLearnerFeedbackRequest,
+    LearnerFeedbackList,
+    LearnerFeedbackRecord,
+    LearnerTestingView,
+)
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
@@ -165,6 +171,39 @@ class LMSService:
             modules=enrollment.modules,
             submissions=submissions,
         )
+
+    def get_learner_view(self, enrollment_id: str, module_id: str | None = None) -> LearnerTestingView:
+        return LearnerTestingView(
+            experience=self.get_module_experience(enrollment_id, module_id),
+            feedback=self.store.list_learner_feedback(enrollment_id),
+        )
+
+    def record_feedback(
+        self,
+        enrollment_id: str,
+        request: CreateLearnerFeedbackRequest,
+    ) -> LearnerFeedbackRecord:
+        enrollment = self.get_enrollment(enrollment_id)
+        module = self._resolve_target_module(enrollment, request.module_id)
+        feedback = LearnerFeedbackRecord(
+            id=f"learner_feedback_{uuid4().hex[:12]}",
+            enrollment_id=enrollment.id,
+            course_run_id=enrollment.course_run_id,
+            publish_snapshot_id=enrollment.publish_snapshot_id,
+            learner_id=enrollment.learner_id,
+            created_at=datetime.now(UTC),
+            summary=request.summary.strip(),
+            details=request.details.strip() if request.details else None,
+            rating=request.rating,
+            module_id=module.module_id,
+            context=request.context,
+        )
+        self.store.save_learner_feedback(feedback)
+        return feedback
+
+    def list_feedback(self, enrollment_id: str) -> LearnerFeedbackList:
+        self._require_enrollment(enrollment_id)
+        return LearnerFeedbackList(items=self.store.list_learner_feedback(enrollment_id))
 
     def launch_workspace(self, enrollment_id: str, request: LaunchWorkspaceRequest) -> LearnerEnrollment:
         enrollment, module, module_package, workspace_root = self._workspace_context(

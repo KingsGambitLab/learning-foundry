@@ -16,6 +16,7 @@ from app.domain.task_agent import (
     RuntimeDependencySpec,
     WorkspaceScope,
 )
+from app.domain.registry import StarterType
 
 
 class DesignSupportStatus(str, Enum):
@@ -206,6 +207,10 @@ def build_assignment_design(
     durable_state_required: bool = False,
     approval_flow_required: bool = False,
     execution_surface: ExecutionSurface = ExecutionSurface.http_service,
+    starter_type: StarterType = StarterType.partial_implementation,
+    primary_database: str | None = None,
+    cache_backend: str | None = None,
+    tech_stack: list[str] | None = None,
 ) -> AssignmentDesignSpec:
     visible_fixture_files = ["data/corpus.json"] if retrieval_mode != RetrievalMode.none else []
     shared_codebase = package_type == PackageType.progressive_codebase_course
@@ -226,8 +231,12 @@ def build_assignment_design(
         ),
         runtime_dependencies=RuntimeDependencySpec(
             execution_surface=execution_surface,
+            starter_type=starter_type,
             editable_files=["app.py"],
             visible_fixture_files=visible_fixture_files,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=list(tech_stack or []),
             local_run_command="python -m uvicorn app:app --host 127.0.0.1 --port 8000",
             visible_check_command="python checks/run_visible_checks.py",
             preview_command="python -m uvicorn app:app --host 127.0.0.1 --port 8000",

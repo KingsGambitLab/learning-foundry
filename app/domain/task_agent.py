@@ -205,8 +205,12 @@ class CourseStructureSpec(BaseModel):
 
 class RuntimeDependencySpec(BaseModel):
     execution_surface: ExecutionSurface
+    starter_type: StarterType = StarterType.partial_implementation
     editable_files: list[str] = Field(default_factory=list)
     visible_fixture_files: list[str] = Field(default_factory=list)
+    primary_database: str | None = None
+    cache_backend: str | None = None
+    tech_stack: list[str] = Field(default_factory=list)
     local_run_command: str | None = None
     visible_check_command: str | None = None
     preview_command: str | None = None

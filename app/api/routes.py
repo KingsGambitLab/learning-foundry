@@ -5,11 +5,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.domain.course import (
     CourseEvent,
     CourseGenerationStatus,
+    CreateCourseFromCreatorPlanRequest,
     LocalDraftResetResult,
     CourseReviewReport,
     CourseRun,
     CourseRunList,
     CreateCourseRunRequest,
+    GenerateCreatorCoursePlanRequest,
+    GenerateCreatorCoursePlanResponse,
     GenerateCourseFromBriefRequest,
     GenerateCourseFromBriefResponse,
     QueueCourseGenerationResponse,
@@ -41,6 +44,18 @@ from app.domain.learner import (
     PublishedCourseCatalog,
     SubmitModuleRequest,
     WriteLearnerWorkspaceFileRequest,
+)
+from app.domain.testing import (
+    CreateCreatorFeedbackRequest,
+    CreateLearnerEvaluationReportRequest,
+    CreateLearnerFeedbackRequest,
+    CreatorFeedbackList,
+    CreatorFeedbackRecord,
+    CreatorTestingView,
+    LearnerCourseEvaluationReport,
+    LearnerFeedbackList,
+    LearnerFeedbackRecord,
+    LearnerTestingView,
 )
 from app.domain.registry import DESIGN_CATALOG
 from app.domain.sandbox import SandboxAvailability
@@ -415,6 +430,17 @@ def suggest_learning_outcomes(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/v1/course-generation/creator-plan", response_model=GenerateCreatorCoursePlanResponse, tags=["course"])
+def generate_creator_course_plan(
+    payload: GenerateCreatorCoursePlanRequest,
+    request: Request,
+) -> GenerateCreatorCoursePlanResponse:
+    try:
+        return _course_generation_service(request).generate_creator_plan(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/v1/course-runs/generate", response_model=GenerateCourseFromBriefResponse, tags=["course"])
 def generate_course_run_from_brief(
     payload: GenerateCourseFromBriefRequest,
@@ -422,6 +448,17 @@ def generate_course_run_from_brief(
 ) -> GenerateCourseFromBriefResponse:
     try:
         return _course_generation_service(request).generate_course_run(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/v1/course-runs/from-creator-plan", response_model=CourseRun, tags=["course"])
+def create_course_run_from_creator_plan(
+    payload: CreateCourseFromCreatorPlanRequest,
+    request: Request,
+) -> CourseRun:
+    try:
+        return _course_generation_service(request).create_course_run_from_creator_plan(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -475,6 +512,72 @@ def review_course_run(course_run_id: str, request: Request) -> CourseReviewRepor
         return service.review_run(course_run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+
+
+@router.get("/v1/course-runs/{course_run_id}/creator-view", response_model=CreatorTestingView, tags=["course"])
+def get_creator_testing_view(course_run_id: str, request: Request) -> CreatorTestingView:
+    service = _course_workflow_service(request)
+    try:
+        return service.creator_view(course_run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+
+
+@router.get("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackList, tags=["course"])
+def list_creator_feedback(course_run_id: str, request: Request) -> CreatorFeedbackList:
+    service = _course_workflow_service(request)
+    try:
+        return service.list_creator_feedback(course_run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+
+
+@router.post("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackRecord, tags=["course"])
+def create_creator_feedback(
+    course_run_id: str,
+    payload: CreateCreatorFeedbackRequest,
+    request: Request,
+) -> CreatorFeedbackRecord:
+    service = _course_workflow_service(request)
+    try:
+        return service.record_creator_feedback(course_run_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"])
+def get_latest_learner_evaluation(
+    course_run_id: str,
+    request: Request,
+) -> LearnerCourseEvaluationReport:
+    service = _course_workflow_service(request)
+    try:
+        report = service.get_latest_learner_evaluation(course_run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"No learner evaluation report is recorded for '{course_run_id}'.")
+    return report
+
+
+@router.post("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"])
+def create_learner_evaluation(
+    course_run_id: str,
+    payload: CreateLearnerEvaluationReportRequest,
+    request: Request,
+) -> LearnerCourseEvaluationReport:
+    service = _course_workflow_service(request)
+    try:
+        return service.record_learner_evaluation(course_run_id, payload)
+    except KeyError as exc:
+        detail = exc.args[0] if exc.args else course_run_id
+        if detail == course_run_id:
+            raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
+        raise HTTPException(status_code=404, detail=f"Unknown enrollment '{detail}'.") from exc
+    except CourseWorkflowConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/v1/course-runs/{course_run_id}/published-versions", response_model=PublishedVersionList, tags=["course"])
@@ -674,6 +777,45 @@ def get_lms_module_experience(
     service = _lms_service(request)
     try:
         return service.get_module_experience(enrollment_id, module_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
+    except LMSConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/v1/lms/enrollments/{enrollment_id}/learner-view", response_model=LearnerTestingView, tags=["lms"])
+def get_lms_learner_view(
+    enrollment_id: str,
+    request: Request,
+    module_id: str | None = Query(None, description="Optional learner-facing module id."),
+) -> LearnerTestingView:
+    service = _lms_service(request)
+    try:
+        return service.get_learner_view(enrollment_id, module_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
+    except LMSConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackList, tags=["lms"])
+def list_lms_feedback(enrollment_id: str, request: Request) -> LearnerFeedbackList:
+    service = _lms_service(request)
+    try:
+        return service.list_feedback(enrollment_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
+
+
+@router.post("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackRecord, tags=["lms"])
+def create_lms_feedback(
+    enrollment_id: str,
+    payload: CreateLearnerFeedbackRequest,
+    request: Request,
+) -> LearnerFeedbackRecord:
+    service = _lms_service(request)
+    try:
+        return service.record_feedback(enrollment_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except LMSConflictError as exc:
