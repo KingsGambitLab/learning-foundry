@@ -982,6 +982,10 @@ def build_task_agent_scaffold(
         if hasattr(quality.test, "dataset_id"):
             quality.test.dataset_id = spec.eval_dataset.id
 
+    preferred_starter_type = design.runtime_dependencies.starter_type
+    for module in spec.modules:
+        module.starter_type = preferred_starter_type
+
     spec = _apply_overlays(spec, design.overlays)
     if design.course_structure.package_type == PackageType.survey_course:
         spec = _compress_to_survey(spec)
