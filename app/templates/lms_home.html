@@ -29,30 +29,6 @@
           <div id="page-message" class="message"></div>
           <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-          <div class="learner-toolbar">
-            <div class="view-tabs" role="tablist" aria-label="Learner views">
-              <button
-                id="learn-tab-button"
-                class="view-tab active"
-                type="button"
-                role="tab"
-                aria-selected="true"
-                aria-controls="learn-view"
-                data-view-tab="learn"
-              >Learn now</button>
-              <button
-                id="courses-tab-button"
-                class="view-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="courses-view"
-                data-view-tab="courses"
-              >My courses</button>
-            </div>
-            <button id="progress-toggle" class="button subtle" type="button" data-toggle-progress>Hide course progress</button>
-          </div>
-
           <div id="learner-shell" class="learner-shell">
             <div class="learner-main">
               <section id="learn-view" class="view-panel">
@@ -63,9 +39,21 @@
                     <p>We keep your active enrollment, workspace, and submission history pinned here so you can resume quickly.</p>
                   </div>
                 </section>
+
+                <section id="submission-history" class="panel submission-history-panel hidden">
+                  <div class="panel-header learner-panel-header">
+                    <div>
+                      <p class="card-eyebrow">Grading</p>
+                      <h2>Latest grade &amp; submission history</h2>
+                    </div>
+                  </div>
+                  <div class="panel-body" id="submission-history-body">
+                    <p class="empty">Open a course to see its grading history.</p>
+                  </div>
+                </section>
               </section>
 
-              <section id="courses-view" class="view-panel hidden">
+              <section id="courses-view" class="view-panel courses-footer">
                 <section id="my-courses-panel" class="panel">
                   <div class="panel-header learner-panel-header">
                     <div>
@@ -100,6 +88,17 @@
             </div>
 
             <aside id="course-sidebar" class="course-sidebar">
+              <button
+                id="sidebar-rail"
+                class="sidebar-rail"
+                type="button"
+                aria-label="Show modules"
+                title="Show modules"
+                data-toggle-progress
+              >
+                <span class="sidebar-rail-icon" aria-hidden="true">›</span>
+                <span class="sidebar-rail-label">Modules</span>
+              </button>
               <section id="experience-panel" class="panel hidden">
                 <div class="panel-header learner-panel-header">
                   <div>
@@ -114,7 +113,7 @@
                     aria-label="Hide modules"
                     title="Hide modules"
                     data-toggle-progress
-                  >×</button>
+                  >‹</button>
                 </div>
                 <div class="panel-body experience-layout">
                   <section class="summary-card experience-block">
@@ -127,11 +126,6 @@
                     <div id="module-timeline" class="module-rows">
                       <div class="empty">Open a course to see its module ladder.</div>
                     </div>
-                  </section>
-
-                  <section id="submission-history" class="summary-card experience-block">
-                    <h3>Submission history</h3>
-                    <p class="empty">Open a course to see its grading history.</p>
                   </section>
                 </div>
               </section>

@@ -9,13 +9,13 @@
   const coursesView = document.getElementById("courses-view");
   const courseSidebar = document.getElementById("course-sidebar");
   const learnerFocus = document.getElementById("learner-focus");
-  const progressToggle = document.getElementById("progress-toggle");
   const experiencePanel = document.getElementById("experience-panel");
   const experienceTitle = document.getElementById("experience-title");
   const experienceCaption = document.getElementById("experience-caption");
   const moduleListTitle = document.getElementById("module-list-title");
   const moduleTimeline = document.getElementById("module-timeline");
   const submissionHistory = document.getElementById("submission-history");
+  const submissionHistoryBody = document.getElementById("submission-history-body");
   const enrollmentList = document.getElementById("enrollment-list");
   const catalogBody = document.getElementById("catalog-body");
   const catalogCaption = document.getElementById("catalog-caption");
@@ -24,15 +24,11 @@
 
   const currentUrl = new URL(window.location.href);
   const selectionFromUrl = currentUrl.searchParams.get("enrollment");
-  const initialTabFromUrl = currentUrl.searchParams.get("tab");
   const initialProgressFromUrl = currentUrl.searchParams.get("progress");
-  const viewTabButtons = Array.from(document.querySelectorAll("[data-view-tab]"));
-  const hasInitialEnrollments = (state.enrollments?.enrollments || []).length > 0;
 
   const uiState = {
     currentExperience: null,
     currentEnrollmentId: selectionFromUrl,
-    activeTab: initialTabFromUrl === "courses" ? "courses" : (hasInitialEnrollments ? "learn" : "courses"),
     sidebarCollapsed: initialProgressFromUrl === "hidden",
     catalogExpanded: !((state.enrollments?.enrollments || []).length > 0),
     busyAction: null,
@@ -228,22 +224,13 @@
     } else {
       url.searchParams.delete("enrollment");
     }
-    url.searchParams.set("tab", uiState.activeTab);
+    url.searchParams.delete("tab");
     if (uiState.sidebarCollapsed) {
       url.searchParams.set("progress", "hidden");
     } else {
       url.searchParams.delete("progress");
     }
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-  }
-
-  function setActiveTab(nextTab) {
-    if (nextTab !== "learn" && nextTab !== "courses") {
-      return;
-    }
-    uiState.activeTab = nextTab;
-    syncUrlState();
-    renderAll();
   }
 
   function toggleSidebar(forceValue = null) {
@@ -295,10 +282,6 @@
   }
 
   function updateDocumentTitle() {
-    if (uiState.activeTab === "courses") {
-      document.title = "My Courses · Course Gen Codex";
-      return;
-    }
     const experience = uiState.currentExperience;
     if (!experience?.enrollment) {
       document.title = "Learner LMS · Course Gen Codex";
@@ -312,26 +295,11 @@
   }
 
   function renderChrome() {
-    const hasSidebar = Boolean(uiState.currentExperience);
-    const sidebarAvailable = hasSidebar && uiState.activeTab === "learn";
-    const sidebarHidden = !sidebarAvailable || uiState.sidebarCollapsed;
+    const sidebarAvailable = Boolean(uiState.currentExperience);
 
-    learnView.classList.toggle("hidden", uiState.activeTab !== "learn");
-    coursesView.classList.toggle("hidden", uiState.activeTab !== "courses");
-    learnerShell.classList.toggle("sidebar-hidden", sidebarHidden);
-    courseSidebar.classList.toggle("hidden", sidebarHidden);
-
-    const showToolbarToggle = sidebarAvailable && sidebarHidden;
-    progressToggle.classList.toggle("hidden", !showToolbarToggle);
-    progressToggle.disabled = !showToolbarToggle;
-    progressToggle.textContent = "Show modules";
-
-    viewTabButtons.forEach((button) => {
-      const active = button.dataset.viewTab === uiState.activeTab;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-selected", String(active));
-      button.tabIndex = active ? 0 : -1;
-    });
+    learnerShell.classList.toggle("sidebar-hidden", sidebarAvailable && uiState.sidebarCollapsed);
+    learnerShell.classList.toggle("no-sidebar", !sidebarAvailable);
+    courseSidebar.classList.toggle("hidden", !sidebarAvailable);
   }
 
   async function readResponseError(response) {
@@ -615,15 +583,9 @@
         <div class="hero-copy empty-state">
           <p class="eyebrow">Learner LMS</p>
           <h1>Pick a published course and start building.</h1>
-          <p>Enroll once and we will keep your workspace, grading history, and next module pinned here.</p>
+          <p>Enroll once and we will keep your workspace, grading history, and next module pinned here. ${escapeHtml(String(readyCourses))} learner-ready course${readyCourses === 1 ? "" : "s"} below.</p>
           <div class="focus-actions">
-            <button class="button primary" type="button" data-view-tab="courses">Browse published courses</button>
-          </div>
-        </div>
-        <div class="focus-side">
-          <div class="focus-card">
-            <h3>${escapeHtml(String(readyCourses))} learner-ready course${readyCourses === 1 ? "" : "s"}</h3>
-            <p>Ready-to-enroll courses stay green. Courses that are still being prepared stay visible but non-actionable until their learner workflow is complete.</p>
+            <a class="button primary" href="#catalog-panel">Browse published courses ↓</a>
           </div>
         </div>
       `;
@@ -658,25 +620,15 @@
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
+          <p class="course-chip">${escapeHtml(enrollment.course_title)}</p>
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(activeModule.title)}</h1>
-          <p class="focus-subtitle">${escapeHtml(enrollment.course_title)}</p>
           <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Keep building through the published learner modules with a persistent workspace and graded checkpoints.")}</p>
           <div class="focus-progress">
             <div class="progress-meter"><span style="width: ${progress.positionPercent}%"></span></div>
             <div class="progress-meta">
-              <span>${escapeHtml(`${progress.completed}/${progress.total} modules completed`)}</span>
+              <span><strong>${escapeHtml(`${progress.completed}/${progress.total}`)}</strong> modules passed</span>
               <span>${escapeHtml(`Updated ${formatRelative(enrollment.updated_at)}`)}</span>
-            </div>
-          </div>
-          <div class="focus-stats">
-            <div class="focus-stat">
-              <span>Progress</span>
-              <strong>${escapeHtml(`${progress.completed}/${progress.total} modules passed`)}</strong>
-            </div>
-            <div class="focus-stat">
-              <span>Latest grade</span>
-              <strong>${escapeHtml(latestScoreCopy)}</strong>
             </div>
           </div>
 
@@ -760,7 +712,8 @@
     if (!experience) {
       experiencePanel.classList.add("hidden");
       moduleTimeline.innerHTML = '<div class="empty">Open a course to see its module ladder.</div>';
-      submissionHistory.innerHTML = "<h3>Submission history</h3><p class=\"empty\">Open a course to see its grading history.</p>";
+      submissionHistory.classList.add("hidden");
+      submissionHistoryBody.innerHTML = "<p class=\"empty\">Open a course to see its grading history.</p>";
       return;
     }
 
@@ -768,6 +721,7 @@
     const progress = computeCourseProgress(experience);
 
     experiencePanel.classList.remove("hidden");
+    submissionHistory.classList.remove("hidden");
     experienceTitle.textContent = enrollment.course_title;
     experienceCaption.textContent = `${progress.completed}/${progress.total} modules passed. The current module stays highlighted until you submit and unlock the next one.`;
     moduleListTitle.textContent = `Module ladder · ${progress.total} total`;
@@ -804,19 +758,38 @@
       }))
       .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
+    const activeModule = experience.active_module;
+    const latestSubmission = activeModule?.latest_submission;
+    const latestCard = latestSubmission ? `
+      <div class="latest-grade-card ${latestSubmission.status === "passed" ? "passed" : "needs-work"}">
+        <p class="card-eyebrow">Latest grade · this module</p>
+        <div class="latest-grade-row">
+          <strong>${escapeHtml(`${latestSubmission.passed_tests}/${latestSubmission.total_tests} tests passed`)}</strong>
+          ${renderStatusPill(latestSubmission.status === "passed" ? "passed" : "blocked", titleCase(latestSubmission.status))}
+        </div>
+        <p class="latest-grade-meta">${escapeHtml(`Pass rate ${percent(latestSubmission.pass_rate)} · Submitted ${formatDate(latestSubmission.created_at)}`)}</p>
+      </div>
+    ` : `
+      <div class="latest-grade-card empty">
+        <p class="card-eyebrow">Latest grade · this module</p>
+        <p>Submit the current module to log your first grading result.</p>
+      </div>
+    `;
+
     if (!allSubmissions.length) {
-      submissionHistory.innerHTML = `
+      submissionHistoryBody.innerHTML = `
         <div class="submission-state">
-          <h3>Submission history</h3>
-          <p>No submissions yet. Use <strong>Submit for grading</strong> on the current module to log your first result and unlock the next step.</p>
+          ${latestCard}
+          <p>No prior submissions yet. Use <strong>Submit for grading</strong> on the current module to log your first result and unlock the next step.</p>
         </div>
       `;
       return;
     }
 
-    submissionHistory.innerHTML = `
+    submissionHistoryBody.innerHTML = `
       <div class="submission-state">
-        <h3>Submission history</h3>
+        ${latestCard}
+        <h3>All submissions</h3>
         <p>Each module keeps its most recent grading run here so you can see what passed and what unlocked next.</p>
         <div class="submission-list">
           ${allSubmissions.map((submission) => `
@@ -1016,7 +989,6 @@
       uiState.workspaceFeedback = null;
       await refreshEnrollments();
       await loadEnrollment(enrollment.id);
-      uiState.activeTab = "learn";
       uiState.sidebarCollapsed = false;
       syncUrlState();
       showToast("success", "Enrollment created", "Your current module is ready to open in the workspace.");
@@ -1150,14 +1122,9 @@
 
   document.addEventListener("click", async (event) => {
     const target = event.target instanceof Element
-      ? event.target.closest("[data-enroll-course],[data-open-enrollment],[data-action],[data-toggle-writeup],[data-view-tab],[data-toggle-progress]")
+      ? event.target.closest("[data-enroll-course],[data-open-enrollment],[data-action],[data-toggle-writeup],[data-toggle-progress]")
       : null;
     if (!(target instanceof HTMLElement)) {
-      return;
-    }
-
-    if (target.dataset.viewTab) {
-      setActiveTab(target.dataset.viewTab);
       return;
     }
 
@@ -1179,7 +1146,6 @@
 
     if (target.dataset.openEnrollment) {
       await loadEnrollment(target.dataset.openEnrollment);
-      uiState.activeTab = "learn";
       uiState.sidebarCollapsed = false;
       syncUrlState();
       renderAll();
