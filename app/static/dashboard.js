@@ -949,19 +949,13 @@
         const isLive = Boolean(status && status.available && status.source === "openai_live");
         generationBanner.className = `generation-banner ${isLive ? "live" : "fallback"}`;
         generationHeading.textContent = isLive
-          ? "Live planning is ready"
-          : "Course generation is falling back to deterministic planning";
-        generationBadge.textContent = isLive ? "Live OpenAI ready" : "Deterministic fallback";
+          ? `AI planning live${status?.model_id ? ` · ${status.model_id}` : ""}`
+          : "Using deterministic fallback planner";
+        generationBadge.textContent = isLive ? "Live" : "Fallback";
         generationBadge.className = `badge ${isLive ? "live" : "fallback"}`;
-        generationMessage.textContent = status?.message || "Generation status unavailable.";
+        generationMessage.textContent = status?.message || "";
 
-        const meta = [];
-        if (status?.provider) meta.push(`Provider: ${status.provider}`);
-        if (status?.model_id) meta.push(`Model: ${status.model_id}`);
-        meta.push(`sdk: ${status?.sdk_installed ? "installed" : "missing"}`);
-        meta.push(`api key: ${status?.api_key_present ? "ready" : "missing"}`);
-        if (status?.env_file) meta.push(`env file: ${status.env_file}`);
-        generationMeta.innerHTML = meta.map((item) => `<span class="status-pill">${escapeHtml(item)}</span>`).join("");
+        generationMeta.innerHTML = "";
         generationSetupToggle.classList.toggle("hidden", isLive);
         if (isLive) {
           generationSetup.classList.add("hidden");
@@ -1223,6 +1217,18 @@
         materializeButton.disabled = courseRun.stage === "drafting" || isBusy;
         publishButton.disabled = courseRun.stage !== "ready_to_publish" || isBusy;
         createRevisionButton.disabled = courseRun.status !== "published" || isBusy;
+
+        const isPublished = courseRun.status === "published";
+        const isReadyToPublish = courseRun.stage === "ready_to_publish";
+        publishButton.classList.toggle("primary", isReadyToPublish && !isBusy);
+        publishButton.classList.toggle("subtle", !(isReadyToPublish && !isBusy));
+        createRevisionButton.classList.toggle("primary", isPublished && !isBusy);
+        createRevisionButton.classList.toggle("subtle", !(isPublished && !isBusy));
+        materializeButton.classList.toggle("subtle", true);
+        materializeButton.classList.toggle("primary", false);
+        syncButton.classList.toggle("subtle", true);
+        syncButton.classList.toggle("primary", false);
+
         renderDraftSwitcherMenu(recentDraftRuns);
       }
 
@@ -1308,27 +1314,40 @@
             <p class="focus-footnote"><strong>Up next:</strong> ${escapeHtml(statusModel.nextTask)}</p>
           </div>
         `;
-        const primaryCalloutLabel = statusModel.owner === "You" ? "How to unblock this" : "What's happening now";
-        const secondaryCalloutLabel = statusModel.owner === "You" ? "Why we're waiting" : "Approved so far";
-        const secondaryCalloutBody = statusModel.owner === "You"
-          ? unblockModel.reason
-          : statusModel.approvedSoFar;
-        draftUnblockSummary.innerHTML = `
-          <div class="focus-callouts">
-            <div class="focus-callout summary-item-emphasis">
-              <span>${escapeHtml(primaryCalloutLabel)}</span>
-              <p>${escapeHtml(unblockModel.unblock)}</p>
-              ${statusModel.owner === "You" ? '<a class="button primary focus-callout-cta" href="#review-step-panel">Open the review step</a>' : ""}
+        if (statusModel.owner === "Done") {
+          draftUnblockSummary.innerHTML = `
+            <div class="focus-callouts focus-callouts-single">
+              <div class="focus-callout summary-item-emphasis">
+                <span>What to do next</span>
+                <p>${escapeHtml(unblockModel.unblock)}</p>
+                <button type="button" class="button primary focus-callout-cta" data-focus-action="start-new-version">Start a new version</button>
+              </div>
             </div>
-            <div class="focus-callout">
-              <span>${escapeHtml(secondaryCalloutLabel)}</span>
-              <p>${escapeHtml(secondaryCalloutBody)}</p>
+          `;
+        } else if (statusModel.owner === "You") {
+          draftUnblockSummary.innerHTML = `
+            <div class="focus-callouts">
+              <div class="focus-callout summary-item-emphasis">
+                <span>What to do</span>
+                <p>${escapeHtml(unblockModel.unblock)}</p>
+                <a class="button primary focus-callout-cta" href="#review-step-panel">Open the review step</a>
+              </div>
+              <div class="focus-callout">
+                <span>Why we're waiting</span>
+                <p>${escapeHtml(unblockModel.reason)}</p>
+              </div>
             </div>
-          </div>
-          <div class="focus-actions">
-            <a class="button subtle" href="#where-we-are-panel">Show full progress</a>
-          </div>
-        `;
+          `;
+        } else {
+          draftUnblockSummary.innerHTML = `
+            <div class="focus-callouts focus-callouts-single">
+              <div class="focus-callout">
+                <span>What's happening now</span>
+                <p>${escapeHtml(unblockModel.reason)}</p>
+              </div>
+            </div>
+          `;
+        }
       }
 
       function renderActivity(events) {
@@ -1572,6 +1591,14 @@
           : emptyReviewMarkup;
 
         publishButton.disabled = review.stage !== "ready_to_publish" || Boolean(currentCourseRun?.active_operation);
+
+        const reviewPanel = document.getElementById("review-step-panel");
+        if (reviewPanel instanceof HTMLDetailsElement) {
+          reviewPanel.open = pendingWorkflows.length > 0
+            || courseRun.active_operation
+            || courseRun.stage === "blocked";
+        }
+        document.body.classList.toggle("dashboard-published-state", courseRun.status === "published");
       }
 
       function renderPublishedVersions(versionList) {
@@ -2122,8 +2149,16 @@
         const target = event.target;
         if (!(target instanceof Element)) return;
         const anchor = target.closest('a[href^="#"]');
-        if (!(anchor instanceof HTMLAnchorElement)) return;
-        revealPanelFromHash(anchor.getAttribute("href"));
+        if (anchor instanceof HTMLAnchorElement) {
+          revealPanelFromHash(anchor.getAttribute("href"));
+        }
+        const focusAction = target.closest("[data-focus-action]");
+        if (focusAction instanceof HTMLElement) {
+          const action = focusAction.dataset.focusAction;
+          if (action === "start-new-version" && createRevisionButton && !createRevisionButton.disabled) {
+            createRevisionButton.click();
+          }
+        }
       });
 
       updateBriefCounters();

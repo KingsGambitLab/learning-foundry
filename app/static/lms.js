@@ -33,7 +33,7 @@
     currentExperience: null,
     currentEnrollmentId: selectionFromUrl,
     activeTab: initialTabFromUrl === "courses" ? "courses" : (hasInitialEnrollments ? "learn" : "courses"),
-    sidebarCollapsed: initialProgressFromUrl === "hidden" || !hasInitialEnrollments,
+    sidebarCollapsed: initialProgressFromUrl === "hidden",
     catalogExpanded: !((state.enrollments?.enrollments || []).length > 0),
     busyAction: null,
     busyTarget: null,
@@ -324,8 +324,8 @@
     progressToggle.classList.toggle("hidden", !sidebarAvailable);
     progressToggle.disabled = !sidebarAvailable;
     progressToggle.textContent = sidebarAvailable
-      ? (sidebarHidden ? "Show course progress" : "Hide course progress")
-      : "Course progress unavailable";
+      ? (sidebarHidden ? "Show modules" : "Hide modules")
+      : "Modules unavailable";
 
     viewTabButtons.forEach((button) => {
       const active = button.dataset.viewTab === uiState.activeTab;
@@ -650,12 +650,18 @@
       : "Not submitted yet";
     const workspaceRunning = activeModule?.workspace_session?.status === "running";
 
+    const eyebrowText = enrollment.status === "completed"
+      ? "Course complete"
+      : currentSubmission
+        ? `Module ${activeModule.module_index} · resume`
+        : `Module ${activeModule.module_index} of ${progress.total}`;
+
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
-          <p class="eyebrow">Continue where you left off</p>
+          <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(activeModule.title)}</h1>
-          <p class="focus-subtitle">${escapeHtml(enrollment.course_title)} · Module ${escapeHtml(String(activeModule.module_index))} of ${escapeHtml(String(progress.total))}</p>
+          <p class="focus-subtitle">${escapeHtml(enrollment.course_title)}</p>
           <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Keep building through the published learner modules with a persistent workspace and graded checkpoints.")}</p>
           <div class="focus-progress">
             <div class="progress-meter"><span style="width: ${progress.positionPercent}%"></span></div>
@@ -666,20 +672,12 @@
           </div>
           <div class="focus-stats">
             <div class="focus-stat">
-              <span>Module</span>
-              <strong>${escapeHtml(`${activeModule.module_index} of ${progress.total}`)}</strong>
-            </div>
-            <div class="focus-stat">
-              <span>Files to edit</span>
-              <strong>${escapeHtml(`${visibleFilesCount} visible file${visibleFilesCount === 1 ? "" : "s"}`)}</strong>
+              <span>Progress</span>
+              <strong>${escapeHtml(`${progress.completed}/${progress.total} modules passed`)}</strong>
             </div>
             <div class="focus-stat">
               <span>Latest grade</span>
               <strong>${escapeHtml(latestScoreCopy)}</strong>
-            </div>
-            <div class="focus-stat">
-              <span>Course status</span>
-              <strong>${escapeHtml(courseStatusCopy(enrollment))}</strong>
             </div>
           </div>
 
@@ -703,10 +701,10 @@
               <span class="learner-flow-index">1</span>
               <div class="learner-flow-body">
                 <div class="learner-flow-head">
-                  <h3>Open the workspace</h3>
+                  <h3>Open your workspace</h3>
                   ${renderWorkspaceStatusInline(experience)}
                 </div>
-                <p>Launch a cloud VS Code workspace pre-loaded with the module starter and your saved files.</p>
+                <p>Cloud VS Code with the module starter and your saved edits.</p>
                 <div class="focus-actions">
                   <button
                     class="button primary"
@@ -725,7 +723,7 @@
                   <h3>Run the visible checks</h3>
                   <span class="info-pill"><strong>In the workspace</strong></span>
                 </div>
-                <p>Use the visible test commands inside VS Code to debug locally. These are a subset — useful for iterating, but not the full grader.</p>
+                <p>Iterate locally with the visible tests. They're a subset of the real grader.</p>
               </div>
             </li>
             <li class="learner-flow-step ${canSubmit ? "" : "is-disabled"}">
@@ -735,7 +733,7 @@
                   <h3>Submit for grading</h3>
                   <span class="info-pill warn"><strong>Hidden grader</strong></span>
                 </div>
-                <p>Submitting runs the real grader, which is deeper than the visible checks. Pass it to unlock the next module.</p>
+                <p>The hidden grader is deeper than the visible checks. Passing unlocks the next module.</p>
                 <div class="focus-actions">
                   <button
                     class="button"
@@ -770,28 +768,28 @@
     experienceCaption.textContent = `${progress.completed}/${progress.total} modules passed. The current module stays highlighted until you submit and unlock the next one.`;
     moduleListTitle.textContent = `Module ladder · ${progress.total} total`;
 
-    moduleTimeline.innerHTML = experience.modules.map((module) => `
-      <div class="module-row ${enrollment.current_module_id === module.module_id && enrollment.status !== "completed" ? "is-current" : ""}">
-        <span class="module-row-index">${escapeHtml(String(module.module_index))}</span>
-        <div class="module-row-copy">
-          <div class="module-row-meta">
-            ${renderStatusPill(moduleStatusKind(module, enrollment), moduleStatusCopy(module, enrollment))}
-            ${module.latest_submission ? renderInfoPill("Last grade", `${module.latest_submission.passed_tests}/${module.latest_submission.total_tests}`) : ""}
+    moduleTimeline.innerHTML = experience.modules.map((module) => {
+      const isCurrent = enrollment.current_module_id === module.module_id && enrollment.status !== "completed";
+      const statusLabel = isCurrent
+        ? "Current"
+        : module.status === "locked"
+          ? "Locked"
+          : module.status === "passed"
+            ? "Passed"
+            : "Ready";
+      return `
+        <div class="module-row ${isCurrent ? "is-current" : ""} ${module.status === "locked" ? "is-locked" : ""}">
+          <span class="module-row-index">${escapeHtml(String(module.module_index))}</span>
+          <div class="module-row-copy">
+            <h4>${escapeHtml(module.title)}</h4>
+            <div class="module-row-meta">
+              ${renderStatusPill(moduleStatusKind(module, enrollment), statusLabel)}
+              ${module.latest_submission ? renderInfoPill("Last grade", `${module.latest_submission.passed_tests}/${module.latest_submission.total_tests}`) : ""}
+            </div>
           </div>
-          <h4>${escapeHtml(module.title)}</h4>
-          <p>${escapeHtml(module.module_id)}</p>
         </div>
-        <div class="module-row-action">${escapeHtml(
-          enrollment.current_module_id === module.module_id && enrollment.status !== "completed"
-            ? "Current module"
-            : module.status === "locked"
-              ? "Unlocks later"
-              : module.status === "passed"
-                ? "Completed"
-                : "Ready"
-        )}</div>
-      </div>
-    `).join("");
+      `;
+    }).join("");
 
     const allSubmissions = experience.modules
       .filter((module) => module.latest_submission)
