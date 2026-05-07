@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Course LMS</title>
+    <link rel="stylesheet" href="/static/app-shell.css" />
+    <link rel="stylesheet" href="/static/lms.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-shell">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark">CG</span>
+            <span class="brand-copy">
+              <span class="brand-label">Learner experience</span>
+              <span class="brand-title">Course Gen Codex</span>
+            </span>
+          </a>
+          <nav class="topnav" aria-label="Primary">
+            <a class="topnav-link active" href="/">Learner LMS</a>
+            <a class="topnav-link" href="/create-course">Course builder</a>
+            <a class="topnav-link" href="/docs">API docs</a>
+          </nav>
+        </header>
+
+        <main class="container">
+          <div id="page-message" class="message"></div>
+          <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+          <div class="learner-toolbar">
+            <div class="view-tabs" role="tablist" aria-label="Learner views">
+              <button
+                id="learn-tab-button"
+                class="view-tab active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="learn-view"
+                data-view-tab="learn"
+              >Learn now</button>
+              <button
+                id="courses-tab-button"
+                class="view-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="courses-view"
+                data-view-tab="courses"
+              >My courses</button>
+            </div>
+            <button id="progress-toggle" class="button subtle" type="button" data-toggle-progress>Hide course progress</button>
+          </div>
+
+          <div id="learner-shell" class="learner-shell">
+            <div class="learner-main">
+              <section id="learn-view" class="view-panel">
+                <section id="learner-focus" class="learner-focus">
+                  <div class="hero-copy">
+                    <p class="eyebrow">Learner LMS</p>
+                    <h1>Checking your latest course progress...</h1>
+                    <p>We keep your active enrollment, workspace, and submission history pinned here so you can resume quickly.</p>
+                  </div>
+                </section>
+              </section>
+
+              <section id="courses-view" class="view-panel hidden">
+                <section id="my-courses-panel" class="panel">
+                  <div class="panel-header learner-panel-header">
+                    <div>
+                      <p class="card-eyebrow">My courses</p>
+                      <h2>Keep building</h2>
+                      <p class="panel-copy">Resume the course you are actively working through, or reopen an older enrollment.</p>
+                    </div>
+                  </div>
+                  <div class="panel-body">
+                    <div id="enrollment-list" class="course-rows">
+                      <div class="empty">No enrollments yet.</div>
+                    </div>
+                  </div>
+                </section>
+
+                <section id="catalog-panel" class="panel">
+                  <div class="panel-header learner-panel-header">
+                    <div>
+                      <p class="card-eyebrow">Discover</p>
+                      <h2>Published courses</h2>
+                      <p id="catalog-caption" class="panel-copy">Browse published courses and enroll when you are ready to start a new codebase.</p>
+                    </div>
+                    <button id="catalog-toggle" class="button subtle" type="button">Hide catalog</button>
+                  </div>
+                  <div id="catalog-body" class="panel-body">
+                    <div id="catalog-list" class="catalog-grid">
+                      <div class="empty">Checking for published courses...</div>
+                    </div>
+                  </div>
+                </section>
+              </section>
+            </div>
+
+            <aside id="course-sidebar" class="course-sidebar">
+              <section id="experience-panel" class="panel hidden">
+                <div class="panel-header learner-panel-header">
+                  <div>
+                    <p class="card-eyebrow">Course progress</p>
+                    <h2 id="experience-title">Current module ladder</h2>
+                    <p id="experience-caption" class="panel-copy">Track what is ready now, what is locked, and what you have already passed.</p>
+                  </div>
+                </div>
+                <div class="panel-body experience-layout">
+                  <section class="summary-card experience-block">
+                    <div class="experience-section-header">
+                      <div>
+                        <p class="card-eyebrow">All modules</p>
+                        <h3 id="module-list-title">Module ladder</h3>
+                      </div>
+                    </div>
+                    <div id="module-timeline" class="module-rows">
+                      <div class="empty">Open a course to see its module ladder.</div>
+                    </div>
+                  </section>
+
+                  <section id="submission-history" class="summary-card experience-block">
+                    <h3>Submission history</h3>
+                    <p class="empty">Open a course to see its grading history.</p>
+                  </section>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script id="lms-state" type="application/json">__LMS_STATE_JSON__</script>
+    <script src="/static/lms.js" defer></script>
+  </body>
+</html>

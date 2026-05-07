@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Create Course Draft</title>
+    <link rel="stylesheet" href="/static/app-shell.css" />
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-shell">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark">CG</span>
+            <span class="brand-copy">
+              <span class="brand-label">Course generation</span>
+              <span class="brand-title">Course Gen Codex</span>
+            </span>
+          </a>
+          <nav class="topnav" aria-label="Primary">
+            <a class="topnav-link active" href="/create-course">Course builder</a>
+            <a class="topnav-link" href="/">Learner LMS</a>
+            <a class="topnav-link" href="/docs">API docs</a>
+          </nav>
+        </header>
+
+        <main class="container dashboard-shell">
+          <div class="author-overview">
+            <header class="page-intro">
+              <div class="page-intro-copy">
+                <p class="eyebrow">Authoring workspace</p>
+                <h1>Create and review learner-ready course drafts</h1>
+                <p class="page-subtitle">Write the brief, follow assignment checkpoints, and publish when the learner version is ready.</p>
+              </div>
+              <a class="page-intro-link" href="/docs">API reference</a>
+            </header>
+
+            <section class="workflow-progress" aria-live="polite">
+              <div class="workflow-progress-head">
+                <div class="workflow-progress-copy">
+                  <p class="section-kicker">Workflow progress</p>
+                  <h2 id="workflow-progress-title">Start a new brief</h2>
+                  <p id="workflow-progress-copy">Write the goal and outcomes to create the first draft.</p>
+                </div>
+                <div class="workflow-progress-meta">
+                  <span id="workflow-progress-next" class="status-pill">Next: Generate the course plan</span>
+                </div>
+              </div>
+              <ol class="workflow-stepper" aria-label="Course workflow">
+              <li class="workflow-step-card current" data-workflow-step="brief">
+                <span class="workflow-step-index">1</span>
+                <div>
+                  <strong>Brief</strong>
+                  <p>Define the goal and learning outcomes.</p>
+                </div>
+              </li>
+              <li class="workflow-step-card up-next" data-workflow-step="plan">
+                <span class="workflow-step-index">2</span>
+                <div>
+                  <strong>Plan</strong>
+                  <p>Generate the module ladder and assignment workflow.</p>
+                </div>
+              </li>
+              <li class="workflow-step-card up-next" data-workflow-step="review">
+                <span class="workflow-step-index">3</span>
+                <div>
+                  <strong>Review</strong>
+                  <p>Approve specs, checkpoints, and review bundles.</p>
+                  <div id="workflow-review-progress" class="workflow-step-progress hidden">
+                    <span id="workflow-progress-count">0 of 0 modules ready</span>
+                    <div class="workflow-step-progress-bar" aria-hidden="true">
+                      <span id="workflow-progress-bar"></span>
+                    </div>
+                  </div>
+                </div>
+              </li>
+              <li class="workflow-step-card up-next" data-workflow-step="publish">
+                <span class="workflow-step-index">4</span>
+                <div>
+                  <strong>Publish</strong>
+                  <p>Ship the learner-facing version when it is ready.</p>
+                </div>
+              </li>
+              </ol>
+            </section>
+          </div>
+
+          <div class="workspace-layout">
+            <aside class="workspace-rail">
+              <section class="panel rail-panel">
+                <div class="panel-header rail-panel-header">
+                  <div>
+                    <p class="section-kicker">Course drafts</p>
+                    <h2>Recent drafts</h2>
+                  </div>
+                  <button id="create-draft-shortcut" class="button subtle" type="button">New draft</button>
+                </div>
+                <div class="panel-body rail-panel-body">
+                  <label class="search-field">
+                    <span class="search-field-label">Search drafts</span>
+                    <input id="draft-search" type="search" placeholder="Search by title" />
+                  </label>
+                  <div id="recent-drafts" class="draft-rail-list">
+                    <div class="review-item"><p>Checking for existing drafts...</p></div>
+                  </div>
+                </div>
+                <div class="panel-footer rail-panel-footer">
+                  <button id="reset-local-button" class="button subtle" type="button">Clear local data</button>
+                </div>
+              </section>
+            </aside>
+
+            <section class="workspace-main">
+              <section id="draft-context-bar" class="draft-context-bar hidden" aria-label="Selected draft">
+                <div class="draft-context-breadcrumb">
+                  <button id="all-drafts-button" class="button subtle" type="button">← All drafts</button>
+                  <details id="draft-switcher" class="draft-switcher">
+                    <summary class="draft-switcher-summary">
+                      <span id="draft-switcher-title">Selected draft</span>
+                    </summary>
+                    <div id="draft-switcher-list" class="draft-switcher-menu">
+                      <div class="review-item"><p>Loading drafts...</p></div>
+                    </div>
+                  </details>
+                </div>
+                <div class="draft-context-actions">
+                  <button id="sync-button" class="button" type="button" disabled>Refresh draft</button>
+                  <button id="materialize-button" class="button" type="button" disabled>Prepare review bundle</button>
+                  <button id="publish-button" class="button primary" type="button" disabled>Publish this version</button>
+                  <button id="create-revision-button" class="button subtle" type="button" disabled>Start new version</button>
+                </div>
+              </section>
+
+              <section id="generation-banner" class="generation-banner">
+                <div class="generation-banner-copy">
+                  <p class="section-kicker">Generation status</p>
+                  <div class="generation-banner-headline">
+                    <h2 id="generation-heading">Checking configuration</h2>
+                    <div id="generation-badge" class="badge fallback">Checking configuration</div>
+                  </div>
+                  <p id="generation-message" class="generation-message"></p>
+                  <div id="generation-meta" class="generation-meta"></div>
+                </div>
+                <div class="generation-banner-actions">
+                  <button id="generation-setup-toggle" class="button subtle" type="button">Show setup steps</button>
+                  <a class="button subtle" href="/docs">API reference</a>
+                </div>
+                <div id="generation-setup" class="generation-setup hidden">
+                  <p>Enable live planning locally by setting an OpenAI key before starting the app.</p>
+                  <pre>export OPENAI_API_KEY=...
+# or
+export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
+                </div>
+              </section>
+
+              <div class="tab-strip" role="tablist" aria-label="Authoring views">
+                <button id="tab-create" class="tab-button active" type="button" aria-selected="true">Create</button>
+                <button id="tab-drafts" class="tab-button" type="button" aria-selected="false">Drafts</button>
+              </div>
+
+              <div id="form-message" class="message" role="status" aria-live="polite"></div>
+
+              <section id="tab-pane-create" class="tab-pane active">
+                <section class="panel create-panel">
+                  <div class="panel-header create-panel-header">
+                    <div>
+                      <p class="section-kicker">New course brief</p>
+                      <h2>Goal and learning outcomes</h2>
+                    </div>
+                    <div class="create-header-meta">
+                      <span id="goal-count" class="status-pill">0 characters</span>
+                      <span id="outcomes-count" class="status-pill">0 outcomes</span>
+                    </div>
+                  </div>
+                  <div class="panel-body create-panel-body">
+                    <form id="course-brief-form">
+                      <div class="create-form-grid">
+                        <label class="field field-goal">
+                          <span class="field-label-row">
+                            <span>Goal</span>
+                          </span>
+                          <textarea id="goal" name="goal" placeholder="Build a production-ready customer support agent that triages tickets, uses tools safely, and can be deployed in a real environment." required></textarea>
+                          <p class="field-hint">Describe the system the learner should build and what “working” means at the end.</p>
+                        </label>
+                        <label class="field field-outcomes">
+                          <span class="field-label-row">
+                            <span>Learning outcomes</span>
+                            <button id="suggest-outcomes-button" class="button subtle" type="button">Suggest outcomes</button>
+                          </span>
+                          <textarea id="outcomes" name="outcomes" placeholder="One outcome per line&#10;Tool selection and execution&#10;Approval gates and dry runs&#10;Observability and eval-driven iteration" required></textarea>
+                          <p class="field-hint">One outcome per line works best. Ask for a first draft, then edit freely.</p>
+                        </label>
+                      </div>
+                      <div class="create-actions">
+                        <button id="generate-button" type="submit" class="button primary">Start building</button>
+                        <p class="field-hint">We create the draft immediately, then move you into Drafts to follow progress and review checkpoints.</p>
+                      </div>
+                    </form>
+                  </div>
+                </section>
+              </section>
+
+              <section id="tab-pane-drafts" class="tab-pane">
+                <section id="draft-inbox-panel" class="panel draft-inbox-panel hidden">
+                  <div class="panel-body">
+                    <p class="section-kicker">Draft inbox</p>
+                    <h2>Choose a draft to continue</h2>
+                    <p class="field-hint">Open a draft from the list to review checkpoints, publish a version, or start the next revision.</p>
+                  </div>
+                </section>
+
+                <section id="results" class="results draft-results">
+                  <div class="draft-detail-grid">
+                    <aside class="draft-summary-column legacy-draft-sidebar">
+                      <section class="panel draft-focus-panel">
+                        <div class="panel-header">
+                          <h3>Current state</h3>
+                          <div id="draft-stage-badge" class="badge fallback">Waiting</div>
+                        </div>
+                        <div class="panel-body">
+                          <div class="draft-focus-stack">
+                            <div id="draft-status-summary" class="summary-list"></div>
+                            <div id="draft-unblock-summary" class="summary-list"></div>
+                          </div>
+                        </div>
+                      </section>
+
+                      <details id="where-we-are-panel" class="panel accordion-panel">
+                        <summary class="panel-header accordion-header">
+                          <h3>Where we are</h3>
+                        </summary>
+                        <div class="panel-body accordion-body">
+                          <div id="review-metrics" class="metrics-list"></div>
+                          <div id="progress-timeline" class="timeline-list"></div>
+                          <div class="section-stack">
+                            <div>
+                              <h4 class="section-heading">What happens next</h4>
+                              <div id="review-actions" class="review-list"></div>
+                            </div>
+                            <div>
+                              <h4 class="section-heading">Things to watch</h4>
+                              <div id="review-blockers" class="review-list"></div>
+                            </div>
+                          </div>
+                        </div>
+                      </details>
+                    </aside>
+
+                    <div class="draft-review-column">
+                      <details id="review-step-panel" class="panel accordion-panel review-panel" open>
+                        <summary class="panel-header accordion-header">
+                          <h3>Review this step</h3>
+                        </summary>
+                        <div class="panel-body accordion-body">
+                          <p class="field-hint review-step-copy">Review the current assignment step here, then approve it or request changes to keep the draft moving.</p>
+                          <div id="linked-workflows" class="module-list"></div>
+                        </div>
+                      </details>
+
+                      <details id="draft-overview-panel" class="panel accordion-panel legacy-draft-meta">
+                        <summary class="panel-header accordion-header">
+                          <div class="panel-heading-with-badge">
+                            <h3>Draft overview</h3>
+                            <div id="source-badge" class="badge fallback">Waiting</div>
+                          </div>
+                        </summary>
+                        <div class="panel-body accordion-body">
+                          <div id="course-summary" class="summary-list"></div>
+                          <div id="plan-summary" class="summary-list"></div>
+                          <div id="module-list" class="module-list"></div>
+                        </div>
+                      </details>
+
+                      <div class="draft-secondary-grid legacy-draft-meta">
+                        <details class="panel accordion-panel">
+                          <summary class="panel-header accordion-header">
+                            <h3>Published versions</h3>
+                          </summary>
+                          <div class="panel-body accordion-body">
+                            <div id="published-versions" class="module-list"></div>
+                          </div>
+                        </details>
+
+                        <details class="panel accordion-panel">
+                          <summary class="panel-header accordion-header">
+                            <h3>Recent activity</h3>
+                          </summary>
+                          <div class="panel-body accordion-body">
+                            <div id="draft-activity" class="review-list"></div>
+                          </div>
+                        </details>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </section>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script id="dashboard-state" type="application/json">__DASHBOARD_STATE_JSON__</script>
+    <script src="/static/dashboard.js" defer></script>
+  </body>
+</html>

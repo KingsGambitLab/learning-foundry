@@ -1,0 +1,20 @@
+[project]
+name = "course-gen-codex"
+version = "0.1.0"
+description = "Archetype-driven assignment generation MVP for engineering projects."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.136.1,<0.137.0",
+  "uvicorn>=0.46.0,<0.47.0",
+  "httpx>=0.28.1,<0.29.0",
+  "openai>=1.79.0,<2.0.0",
+  "langgraph>=0.6.0,<1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.api", "app.domain", "app.services", "app.storage"]

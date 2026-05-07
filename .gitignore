@@ -1,0 +1,12 @@
+.venv/
+.claude/
+__pycache__/
+.DS_Store
+.pytest_cache/
+*.pyc
+data/
+generated/
+generated-test-alignment/
+workspaces/
+learner_workspaces/
+archives/

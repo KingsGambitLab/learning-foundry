@@ -1,0 +1,691 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from app.domain.registry import PackageType, RiskClass
+from app.domain.grader import ModuleGraderPlan, TaskAgentGraderPlanCollection
+from app.domain.grading import LiveGradeTaskAgentRequest, LiveTaskAgentGradeReport, ModuleGradeReport, TaskAgentSubmission
+from app.domain.workflow import (
+    BundleFileContent,
+    DecisionOutcome,
+    DraftKind,
+    GateDecisionRequest,
+    HILGate,
+    MaterializedBundle,
+    MaterializeBundleRequest,
+    WorkflowArtifacts,
+    WorkflowNodeExecution,
+    WorkflowNodeKind,
+    WorkflowLoopPhaseSummary,
+    WorkflowLoopPolicy,
+    WorkflowReviewSummary,
+    WorkflowNodeStatus,
+    WorkflowRun,
+    WorkflowRunList,
+    WorkflowStage,
+    WorkflowStatus,
+)
+from app.domain.task_agent import AssignmentDesignSpec, TaskAgentServiceSpec
+from app.services.assignment_design_inference import (
+    DesignSupportStatus,
+    GenerationIntake,
+    infer_assignment_design,
+)
+from app.services.artifact_materializer import ArtifactMaterializer
+from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
+from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
+from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
+from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService, TaskAgentAuthoringStatus
+from app.services.spec_validation import validate_task_agent_spec
+from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
+from app.services.task_agent_grader import grade_task_agent_submission
+from app.storage.sqlite_store import SQLiteWorkflowStore
+
+
+class WorkflowConflictError(ValueError):
+    """Raised when a workflow transition is invalid."""
+
+
+class WorkflowService:
+    def __init__(
+        self,
+        store: SQLiteWorkflowStore,
+        materializer: ArtifactMaterializer | None = None,
+        runner: TaskAgentBlackBoxRunner | None = None,
+        node_runtime: LangGraphAssignmentGraph | None = None,
+        task_agent_authoring_service: OpenAITaskAgentAuthoringService | None = None,
+        workspace_manager: AssignmentWorkspaceManager | None = None,
+    ) -> None:
+        self.store = store
+        self.materializer = materializer or ArtifactMaterializer()
+        self.runner = runner or TaskAgentBlackBoxRunner()
+        self.node_runtime = node_runtime
+        self.task_agent_authoring_service = task_agent_authoring_service or OpenAITaskAgentAuthoringService(enabled=False)
+        self.workspace_manager = workspace_manager or AssignmentWorkspaceManager()
+
+    def list_runs(self, limit: int = 50) -> WorkflowRunList:
+        return WorkflowRunList(runs=self.store.list_runs(limit=limit))
+
+    def get_run(self, run_id: str) -> WorkflowRun | None:
+        return self.store.get_run(run_id)
+
+    def list_events(self, run_id: str):
+        return self.store.list_events(run_id)
+
+    def list_node_executions(self, run_id: str) -> list[WorkflowNodeExecution]:
+        run = self._require_run(run_id)
+        return run.artifacts.node_executions
+
+    def task_agent_authoring_status(self) -> TaskAgentAuthoringStatus:
+        return self.task_agent_authoring_service.status()
+
+    def get_workspace(self, run_id: str) -> MaterializedBundle:
+        run = self._require_run(run_id)
+        if run.artifacts.workspace_snapshot is None:
+            raise WorkflowConflictError("This run does not have a prepared workspace yet.")
+        return run.artifacts.workspace_snapshot
+
+    def read_workspace_file(self, run_id: str, relative_path: str) -> BundleFileContent:
+        run = self._require_run(run_id)
+        if run.artifacts.workspace_snapshot is None:
+            raise WorkflowConflictError("This run does not have a prepared workspace yet.")
+        return self.workspace_manager.read_workspace_file(run.artifacts.workspace_snapshot, relative_path)
+
+    def get_review_summary(self, run_id: str) -> WorkflowReviewSummary:
+        run = self._require_run(run_id)
+        self._refresh_review_summary(run)
+        self.store.save_run(run)
+        return run.artifacts.review_summary or self._empty_review_summary()
+
+    def materialize_run(self, run_id: str, request: MaterializeBundleRequest) -> WorkflowRun:
+        run = self._require_run(run_id)
+        if run.artifacts.task_agent_spec is not None:
+            validation = validate_task_agent_spec(run.artifacts.task_agent_spec)
+            run.artifacts.validation_summary = validation.model_dump(mode="json")
+            run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+            if not validation.valid:
+                self._refresh_review_summary(run)
+                self.store.save_run(run)
+                raise WorkflowConflictError("Task-agent draft is invalid. Fix validation errors before materializing artifacts.")
+
+        self._refresh_review_summary(run)
+        bundle = self.materializer.materialize_run(run, overwrite=request.overwrite)
+        run.artifacts.materialized_bundle = bundle
+        run.updated_at = datetime.now(UTC)
+        self.store.save_run(run)
+        self.store.append_event(
+            run.id,
+            "artifacts_materialized",
+            {"bundle_id": bundle.bundle_id, "file_count": len(bundle.files)},
+        )
+        return run
+
+    def read_bundle_file(self, run_id: str, relative_path: str) -> BundleFileContent:
+        run = self._require_run(run_id)
+        if run.artifacts.materialized_bundle is None:
+            raise WorkflowConflictError("This run has not been materialized yet.")
+        return self.materializer.read_bundle_file(run.artifacts.materialized_bundle, relative_path)
+
+    def create_run_from_explicit_plan(
+        self,
+        *,
+        intake: GenerationIntake,
+        design_spec: AssignmentDesignSpec,
+        reasons: list[str] | None = None,
+        warnings: list[str] | None = None,
+        notes: list[str] | None = None,
+    ) -> WorkflowRun:
+        reasons = reasons or []
+        warnings = warnings or []
+        notes = notes or []
+        status = (
+            DesignSupportStatus.manual_review
+            if design_spec.risk_class != RiskClass.standard
+            else DesignSupportStatus.supported
+        )
+        return self._create_run_from_design(
+            intake,
+            design_spec=design_spec,
+            status=status,
+            reasons=reasons or ["Created from an explicit assignment design specification."],
+            warnings=warnings,
+            notes=notes,
+        )
+
+    def list_task_agent_grader_plans(self, run_id: str) -> TaskAgentGraderPlanCollection:
+        spec = self._require_task_agent_spec(run_id)
+        return build_all_task_agent_grader_plans(spec)
+
+    def get_task_agent_grader_plan(self, run_id: str, module_id: str) -> ModuleGraderPlan:
+        spec = self._require_task_agent_spec(run_id)
+        return build_task_agent_grader_plan(spec, module_id)
+
+    def grade_task_agent_run(self, run_id: str, module_id: str, submission: TaskAgentSubmission) -> ModuleGradeReport:
+        spec = self._require_task_agent_spec(run_id)
+        report = grade_task_agent_submission(spec, module_id, submission)
+        self.store.append_event(
+            run_id,
+            "submission_graded",
+            {
+                "module_id": module_id,
+                "submission_id": submission.submission_id,
+                "status": report.status.value,
+                "passed_tests": report.passed_tests,
+                "total_tests": report.total_tests,
+            },
+        )
+        return report
+
+    def grade_task_agent_run_live(
+        self,
+        run_id: str,
+        module_id: str,
+        request: LiveGradeTaskAgentRequest,
+    ) -> LiveTaskAgentGradeReport:
+        spec = self._require_task_agent_spec(run_id)
+        report = self.runner.grade_live(spec, module_id, request)
+        self.store.append_event(
+            run_id,
+            "submission_graded_live",
+            {
+                "module_id": module_id,
+                "base_url": request.base_url,
+                "status": report.grade_report.status.value,
+                "passed_tests": report.grade_report.passed_tests,
+                "total_tests": report.grade_report.total_tests,
+            },
+        )
+        return report
+
+    def create_run(self, intake: GenerationIntake) -> WorkflowRun:
+        inferred = infer_assignment_design(
+            title=intake.title,
+            problem_statement=intake.problem_statement,
+            learning_outcomes=intake.learning_outcomes,
+            package_type_hint=intake.package_type_hint,
+        )
+        if inferred.design_spec is None:
+            return self._create_blocked_run(
+                intake,
+                notes=[
+                    *inferred.reasons,
+                    *inferred.warnings,
+                ] or ["The brief is outside the current learner-ready generation scope."],
+            )
+        return self._create_run_from_design(
+            intake,
+            design_spec=inferred.design_spec,
+            status=inferred.status,
+            reasons=inferred.reasons,
+            warnings=inferred.warnings,
+            notes=[],
+        )
+
+    def create_revision_from_run(self, run_id: str) -> WorkflowRun:
+        source = self._require_run(run_id)
+        now = datetime.now(UTC)
+        revision = source.model_copy(deep=True)
+        revision.id = f"run_{uuid4().hex[:12]}"
+        revision.created_at = now
+        revision.updated_at = now
+        revision.stage = WorkflowStage.needs_revision
+        revision.status = WorkflowStatus.active
+        revision.pending_gate = None
+        revision.artifacts.workspace_snapshot = None
+        revision.artifacts.materialized_bundle = None
+        revision.artifacts.node_executions = []
+        revision.artifacts.review_summary = None
+        revision.notes = [
+            *revision.notes,
+            f"Revision draft created from published workflow `{source.id}`.",
+        ]
+        revision.artifacts.notes = [
+            *revision.artifacts.notes,
+            f"Revision draft cloned from `{source.id}` and reset for a fresh author/reviewer pass.",
+        ]
+        self.store.save_run(revision)
+        self.store.append_event(
+            revision.id,
+            "run_revision_created",
+            {"source_run_id": source.id},
+        )
+        if revision.artifacts.task_agent_spec is not None and self.node_runtime is not None:
+            revision = self.execute_langgraph_nodes(revision.id)
+        else:
+            revision.stage = WorkflowStage.awaiting_hil_gate_1
+            revision.status = WorkflowStatus.awaiting_human
+            revision.pending_gate = HILGate.gate_1_spec_review
+            self.store.save_run(revision)
+        return revision
+
+    def _create_blocked_run(
+        self,
+        intake: GenerationIntake,
+        *,
+        notes: list[str],
+    ) -> WorkflowRun:
+        now = datetime.now(UTC)
+        run_id = f"run_{uuid4().hex[:12]}"
+        artifacts = WorkflowArtifacts(
+            draft_kind=DraftKind.scope_blocked,
+            notes=["No learner-ready scaffold was created for this brief."],
+        )
+        run = WorkflowRun(
+            id=run_id,
+            title=intake.title,
+            created_at=now,
+            updated_at=now,
+            stage=WorkflowStage.blocked,
+            status=WorkflowStatus.blocked,
+            pending_gate=None,
+            intake=intake,
+            artifacts=artifacts,
+            notes=notes,
+        )
+        self.store.save_run(run)
+        self.store.append_event(run.id, "run_created", {"status": run.status.value})
+        return run
+
+    def _create_run_from_design(
+        self,
+        intake: GenerationIntake,
+        *,
+        design_spec: AssignmentDesignSpec,
+        status: DesignSupportStatus,
+        reasons: list[str],
+        warnings: list[str],
+        notes: list[str],
+    ) -> WorkflowRun:
+        now = datetime.now(UTC)
+        run_id = f"run_{uuid4().hex[:12]}"
+        authoring_result = self.task_agent_authoring_service.generate_scaffold(
+            title=intake.title,
+            summary=intake.problem_statement,
+            design_spec=design_spec,
+        )
+        task_agent_spec = authoring_result.spec
+        origin_template = authoring_result.origin_template
+        validation = validate_task_agent_spec(task_agent_spec)
+        artifacts = WorkflowArtifacts(
+            draft_kind=DraftKind.task_agent_spec,
+            task_agent_spec=task_agent_spec,
+            validation_summary=validation.model_dump(mode="json"),
+            progression_preview=[summary.model_dump(mode="json") for summary in validation.module_gates],
+            artifact_plan=self._artifact_plan_for_task_agent(task_agent_spec),
+            origin_template=origin_template,
+            notes=[
+                "Draft scaffold created from the explicit assignment design spec.",
+                *authoring_result.notes,
+                "Edit the learner-ready assignment spec, revalidate it, then move through the HIL gates.",
+            ],
+        )
+
+        run = WorkflowRun(
+            id=run_id,
+            title=intake.title,
+            created_at=now,
+            updated_at=now,
+            stage=WorkflowStage.awaiting_hil_gate_1,
+            status=WorkflowStatus.awaiting_human,
+            pending_gate=HILGate.gate_1_spec_review,
+            intake=intake,
+            artifacts=artifacts,
+            notes=[*reasons, *warnings, *notes],
+        )
+        self.store.save_run(run)
+        self.store.append_event(
+            run.id,
+            "run_created",
+            {
+                "stage": run.stage.value,
+                "design_status": status.value,
+                "draft_kind": run.artifacts.draft_kind.value,
+                "origin_template": run.artifacts.origin_template,
+            },
+        )
+        if run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
+            run = self.execute_langgraph_nodes(run.id)
+        return run
+
+    def update_task_agent_spec(self, run_id: str, spec: TaskAgentServiceSpec) -> WorkflowRun:
+        run = self._require_run(run_id)
+        if run.stage == WorkflowStage.published or run.status == WorkflowStatus.published:
+            raise WorkflowConflictError("Published workflow runs are immutable. Create a new revision before editing the spec.")
+        if run.artifacts.task_agent_spec is None:
+            raise WorkflowConflictError("This run does not contain a task-agent draft spec.")
+
+        spec = ensure_task_agent_module_briefs(spec, overwrite=False)
+        validation = validate_task_agent_spec(spec)
+        run.artifacts.task_agent_spec = spec
+        run.artifacts.validation_summary = validation.model_dump(mode="json")
+        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+        run.updated_at = datetime.now(UTC)
+        self.store.save_run(run)
+        self.store.append_event(
+            run.id,
+            "task_agent_spec_updated",
+            {
+                "valid": validation.valid,
+                "error_count": len(validation.errors),
+                "warning_count": len(validation.warnings),
+            },
+        )
+        if self.node_runtime is not None:
+            run = self.execute_langgraph_nodes(run.id)
+        return run
+
+    def execute_langgraph_nodes(self, run_id: str) -> WorkflowRun:
+        run = self._require_run(run_id)
+        if run.stage == WorkflowStage.published or run.status == WorkflowStatus.published:
+            raise WorkflowConflictError("Published workflow runs are immutable. Create a new revision before rerunning authoring or review.")
+        if run.artifacts.task_agent_spec is None:
+            raise WorkflowConflictError("This run does not contain a task-agent draft spec.")
+        if self.node_runtime is None:
+            raise WorkflowConflictError("LangGraph node execution is not configured for this app instance.")
+
+        if run.artifacts.workspace_snapshot is None:
+            run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
+        run = self.node_runtime.execute(run)
+        validation = validate_task_agent_spec(run.artifacts.task_agent_spec)
+        run.artifacts.validation_summary = validation.model_dump(mode="json")
+        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+        self._refresh_review_summary(run)
+        if run.artifacts.workspace_snapshot is None:
+            run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
+        self._apply_node_stage(run)
+        run.updated_at = datetime.now(UTC)
+        self.store.save_run(run)
+        latest_node_by_kind = {
+            node.kind: node
+            for node in run.artifacts.node_executions
+        }
+        self.store.append_event(
+            run.id,
+            "langgraph_nodes_executed",
+            {
+                "node_count": len(run.artifacts.node_executions),
+                "failed_nodes": [
+                    kind.value
+                    for kind, node in latest_node_by_kind.items()
+                    if node.status != WorkflowNodeStatus.passed
+                ],
+                "stage": run.stage.value,
+                "pending_gate": run.pending_gate.value if run.pending_gate else None,
+                "workspace_root": run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot is not None else None,
+            },
+        )
+        return run
+
+    def apply_gate_decision(self, run_id: str, decision: GateDecisionRequest) -> WorkflowRun:
+        run = self._require_run(run_id)
+        if run.pending_gate != decision.gate:
+            raise WorkflowConflictError(
+                f"Run is waiting on '{run.pending_gate.value if run.pending_gate else None}', not '{decision.gate.value}'."
+            )
+
+        now = datetime.now(UTC)
+        if decision.decision == DecisionOutcome.reject:
+            run.stage = WorkflowStage.needs_revision
+            run.status = WorkflowStatus.awaiting_human
+            if decision.comment:
+                run.notes.append(decision.comment)
+                run.artifacts.notes.append("Human review feedback captured for the next authoring/review pass.")
+                run = self._apply_human_feedback_revision(run, decision.comment)
+            run.updated_at = now
+            self.store.save_run(run)
+            self.store.append_event(
+                run.id,
+                "gate_rejected",
+                {
+                    "gate": decision.gate.value,
+                    "comment": decision.comment or "",
+                    "rerun_requested": bool(decision.comment and self.node_runtime is not None),
+                },
+            )
+            if decision.comment and self.node_runtime is not None and run.artifacts.task_agent_spec is not None:
+                run = self.execute_langgraph_nodes(run.id)
+            return run
+
+        if decision.gate == HILGate.gate_1_spec_review:
+            if run.artifacts.task_agent_spec is not None:
+                validation = run.artifacts.validation_summary or {}
+                if not validation.get("valid", True):
+                    raise WorkflowConflictError("The task-agent draft is not valid yet. Fix validation errors before requesting review.")
+                author_node = self._node_by_kind(run, WorkflowNodeKind.authoring_runtime)
+                if author_node is None or author_node.status != WorkflowNodeStatus.passed:
+                    raise WorkflowConflictError("Authoring must pass Docker sandbox verification before the spec review gate can be approved.")
+            else:
+                raise WorkflowConflictError("This workflow does not have a reviewable assignment spec yet.")
+            run.stage = WorkflowStage.awaiting_hil_gate_2
+            run.pending_gate = HILGate.gate_2_progression_review
+        elif decision.gate == HILGate.gate_2_progression_review:
+            run.stage = WorkflowStage.awaiting_hil_gate_3
+            run.pending_gate = HILGate.gate_3_pre_publish
+        elif decision.gate == HILGate.gate_3_pre_publish:
+            run.stage = WorkflowStage.published
+            run.status = WorkflowStatus.published
+            run.pending_gate = None
+            run.artifacts.notes.append("Marked published by the HIL workflow.")
+        run.updated_at = now
+        if decision.comment:
+            run.notes.append(decision.comment)
+        self.store.save_run(run)
+        self.store.append_event(
+            run.id,
+            "gate_approved",
+            {"gate": decision.gate.value, "comment": decision.comment or "", "stage": run.stage.value},
+        )
+        return run
+
+    def _apply_human_feedback_revision(self, run: WorkflowRun, feedback: str) -> WorkflowRun:
+        spec = run.artifacts.task_agent_spec
+        if spec is None:
+            return run
+
+        revision = self.task_agent_authoring_service.revise_spec(
+            spec=spec,
+            title=run.title,
+            summary=run.intake.problem_statement,
+            package_type=spec.course_structure.package_type,
+            domain_pack=spec.domain_pack,
+            risk_class=spec.risk_class,
+            overlays=spec.overlays,
+            feedback=feedback,
+            origin_template=run.artifacts.origin_template,
+        )
+        run.artifacts.task_agent_spec = revision.spec
+        run.artifacts.origin_template = revision.origin_template
+        if revision.notes:
+            run.notes.extend(revision.notes)
+        return run
+
+    def _artifact_plan_for_task_agent(self, spec: TaskAgentServiceSpec) -> list[str]:
+        lines = [
+            "learner-ready spec with deterministic test bindings",
+            "module gate ladder derived from first_required_in markers",
+            "starter plan per module based on starter_type",
+            "per-module learning content and evaluation bundle",
+        ]
+        if spec.production_contract.supports_dry_run:
+            lines.append("dry-run and approval-gate contract in final artifact set")
+        return lines
+
+    def _require_run(self, run_id: str) -> WorkflowRun:
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        return run
+
+    def _require_task_agent_spec(self, run_id: str) -> TaskAgentServiceSpec:
+        run = self._require_run(run_id)
+        if run.artifacts.task_agent_spec is None:
+            raise WorkflowConflictError("This run does not contain a task-agent draft spec.")
+        return run.artifacts.task_agent_spec
+
+    def _node_by_kind(self, run: WorkflowRun, kind: WorkflowNodeKind) -> WorkflowNodeExecution | None:
+        for node in reversed(run.artifacts.node_executions):
+            if node.kind == kind:
+                return node
+        return None
+
+    def _refresh_review_summary(self, run: WorkflowRun) -> WorkflowReviewSummary:
+        policy = self._loop_policy()
+        if run.artifacts.task_agent_spec is None:
+            review_summary = WorkflowReviewSummary(
+                review_ready=False,
+                blockers=["No learner-ready assignment spec is attached to this workflow run."],
+                policy=policy,
+                authoring=WorkflowLoopPhaseSummary(
+                    attempts_used=0,
+                    max_attempts=policy.max_authoring_attempts,
+                    remaining_attempts=policy.max_authoring_attempts,
+                    latest_node_kind=None,
+                    latest_status=None,
+                    exhausted=False,
+                    passed=False,
+                ),
+                reviewer=WorkflowLoopPhaseSummary(
+                    attempts_used=0,
+                    max_attempts=policy.max_reviewer_attempts,
+                    remaining_attempts=policy.max_reviewer_attempts,
+                    latest_node_kind=None,
+                    latest_status=None,
+                    exhausted=False,
+                    passed=False,
+                ),
+            )
+            run.artifacts.review_summary = review_summary
+            return review_summary
+
+        authoring_nodes = [
+            node
+            for node in run.artifacts.node_executions
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.authoring_repair}
+        ]
+        reviewer_nodes = [
+            node
+            for node in run.artifacts.node_executions
+            if node.kind in {
+                WorkflowNodeKind.reviewer_runtime,
+                WorkflowNodeKind.reviewer_repair,
+                WorkflowNodeKind.reviewer_code,
+                WorkflowNodeKind.reviewer_pedagogy,
+                WorkflowNodeKind.reviewer_tests,
+            }
+        ]
+
+        authoring_summary = self._phase_summary(authoring_nodes, policy.max_authoring_attempts)
+        reviewer_summary = self._phase_summary(reviewer_nodes, policy.max_reviewer_attempts)
+        validation = run.artifacts.validation_summary or {}
+        valid = validation.get("valid", True)
+
+        reviewer_kinds = (
+            WorkflowNodeKind.reviewer_runtime,
+            WorkflowNodeKind.reviewer_code,
+            WorkflowNodeKind.reviewer_pedagogy,
+            WorkflowNodeKind.reviewer_tests,
+        )
+        authoring_runtime = self._node_by_kind(run, WorkflowNodeKind.authoring_runtime)
+        authoring_passed = authoring_runtime is not None and authoring_runtime.status == WorkflowNodeStatus.passed
+        reviewer_passed = all(
+            (node := self._node_by_kind(run, kind)) is not None and node.status == WorkflowNodeStatus.passed
+            for kind in reviewer_kinds
+        )
+
+        blockers: list[str] = []
+        if not valid:
+            blockers.append("Spec validation is still failing.")
+        if not authoring_passed:
+            if authoring_summary.exhausted:
+                blockers.append(
+                    f"Authoring loop exhausted after {authoring_summary.attempts_used}/{authoring_summary.max_attempts} attempts."
+                )
+            else:
+                blockers.append("Authoring runtime verification has not passed yet.")
+        if authoring_passed and not reviewer_passed:
+            if reviewer_summary.exhausted:
+                blockers.append(
+                    f"Reviewer loop exhausted after {reviewer_summary.attempts_used}/{reviewer_summary.max_attempts} attempts."
+                )
+            else:
+                blockers.append("Reviewer nodes have not all passed yet.")
+
+        review_summary = WorkflowReviewSummary(
+            review_ready=valid and authoring_passed and reviewer_passed,
+            blockers=blockers,
+            policy=policy,
+            authoring=authoring_summary,
+            reviewer=reviewer_summary,
+        )
+        run.artifacts.review_summary = review_summary
+        return review_summary
+
+    def _phase_summary(
+        self,
+        nodes: list[WorkflowNodeExecution],
+        max_attempts: int,
+    ) -> WorkflowLoopPhaseSummary:
+        if not nodes:
+            return WorkflowLoopPhaseSummary(
+                attempts_used=0,
+                max_attempts=max_attempts,
+                remaining_attempts=max_attempts,
+                latest_node_kind=None,
+                latest_status=None,
+                exhausted=False,
+                passed=False,
+            )
+
+        latest = nodes[-1]
+        attempts_used = max(node.attempt for node in nodes)
+        passed = latest.status == WorkflowNodeStatus.passed
+        remaining = max(max_attempts - attempts_used, 0)
+        exhausted = not passed and attempts_used >= max_attempts
+        return WorkflowLoopPhaseSummary(
+            attempts_used=attempts_used,
+            max_attempts=max_attempts,
+            remaining_attempts=remaining,
+            latest_node_kind=latest.kind,
+            latest_status=latest.status,
+            exhausted=exhausted,
+            passed=passed,
+        )
+
+    def _loop_policy(self) -> WorkflowLoopPolicy:
+        if self.node_runtime is not None:
+            return self.node_runtime.policy()
+        return WorkflowLoopPolicy(max_authoring_attempts=1, max_reviewer_attempts=1)
+
+    def _empty_review_summary(self) -> WorkflowReviewSummary:
+        policy = self._loop_policy()
+        return WorkflowReviewSummary(
+            review_ready=False,
+            blockers=["Workflow review has not run yet."],
+            policy=policy,
+            authoring=WorkflowLoopPhaseSummary(max_attempts=policy.max_authoring_attempts),
+            reviewer=WorkflowLoopPhaseSummary(max_attempts=policy.max_reviewer_attempts),
+        )
+
+    def _apply_node_stage(self, run: WorkflowRun) -> None:
+        summary = self._refresh_review_summary(run)
+        if summary.authoring.exhausted or summary.reviewer.exhausted:
+            run.stage = WorkflowStage.blocked
+            run.status = WorkflowStatus.blocked
+            run.pending_gate = None
+            return
+
+        if not summary.review_ready:
+            run.stage = WorkflowStage.needs_revision
+            run.status = WorkflowStatus.active
+            run.pending_gate = None
+            return
+
+        if run.stage == WorkflowStage.published:
+            return
+
+        if run.pending_gate is None or run.stage == WorkflowStage.needs_revision:
+            run.stage = WorkflowStage.awaiting_hil_gate_1
+            run.status = WorkflowStatus.awaiting_human
+            run.pending_gate = HILGate.gate_1_spec_review

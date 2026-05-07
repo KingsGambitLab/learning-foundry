@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API Docs</title>
+    <link rel="stylesheet" href="/static/app-shell.css" />
+    <link rel="stylesheet" href="/static/docs.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-shell">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark">CG</span>
+            <span class="brand-copy">
+              <span class="brand-label">API reference</span>
+              <span class="brand-title">Course Gen Codex</span>
+            </span>
+          </a>
+          <nav class="topnav" aria-label="Primary">
+            <a class="topnav-link" href="/">Learner LMS</a>
+            <a class="topnav-link" href="/create-course">Course builder</a>
+            <a class="topnav-link active" href="/docs">API docs</a>
+          </nav>
+        </header>
+
+        <main class="container docs-shell">
+          <section class="docs-intro">
+            <div class="docs-intro-copy">
+              <p class="eyebrow">API reference</p>
+              <h1>Inspect and test endpoints without leaving the product shell</h1>
+              <p class="docs-subtitle">Course generation, learner LMS, and workflow endpoints all live here with the same navigation and spacing as the rest of Course Gen Codex.</p>
+            </div>
+            <div id="docs-stats" class="docs-stats" aria-live="polite">
+              <div class="hero-stat docs-stat"><span>Operations</span><strong>--</strong></div>
+              <div class="hero-stat docs-stat"><span>Paths</span><strong>--</strong></div>
+              <div class="hero-stat docs-stat"><span>Schemas</span><strong>--</strong></div>
+              <div class="hero-stat docs-stat"><span>Sections</span><strong>--</strong></div>
+            </div>
+          </section>
+
+          <div class="docs-layout">
+            <aside class="docs-rail">
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="section-kicker">Reference map</p>
+                    <h2>Browse by section</h2>
+                  </div>
+                  <a class="button subtle" href="/openapi.json">OpenAPI JSON</a>
+                </div>
+                <div class="panel-body docs-rail-body">
+                  <p class="panel-copy">Use these groups to jump mentally between system health, authoring flows, registry data, and learner workflows.</p>
+                  <div id="docs-tag-list" class="docs-tag-list">
+                    <span class="small-pill">Loading sections…</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <p class="section-kicker">Tips</p>
+                    <h2>Good defaults</h2>
+                  </div>
+                </div>
+                <div class="panel-body docs-tip-list">
+                  <div class="review-item"><p>Filter narrows the reference faster than scanning every expanded group.</p></div>
+                  <div class="review-item"><p>Models stay collapsed by default so the endpoint list is easier to skim.</p></div>
+                  <div class="review-item"><p>Try a request here, then jump back to Learner LMS or Course builder in the top nav.</p></div>
+                </div>
+              </section>
+            </aside>
+
+            <section class="panel docs-panel">
+              <div class="panel-header docs-panel-header">
+                <div>
+                  <p class="section-kicker">Interactive reference</p>
+                  <h2 id="docs-panel-title">Loading API reference</h2>
+                </div>
+              </div>
+              <div class="panel-body docs-panel-body">
+                <div id="swagger-loading" class="docs-loading">Loading the interactive reference…</div>
+                <div id="swagger-ui"></div>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script id="docs-state" type="application/json">__DOCS_STATE_JSON__</script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="/static/docs.js" defer></script>
+  </body>
+</html>

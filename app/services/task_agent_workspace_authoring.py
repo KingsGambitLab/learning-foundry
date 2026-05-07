@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from enum import Enum
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+
+from app.domain.workflow import WorkflowNodeExecution, WorkflowRun
+from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
+from app.services.task_agent_starter_templates import (
+    render_task_agent_module_app,
+    render_task_agent_runtime_module,
+)
+
+
+class WorkspaceAuthoringSource(str, Enum):
+    deterministic_template = "deterministic_template"
+
+
+class WorkspaceAuthoringResult(BaseModel):
+    source: WorkspaceAuthoringSource = WorkspaceAuthoringSource.deterministic_template
+    updated_files: list[str] = Field(default_factory=list)
+    message: str
+
+
+class TaskAgentWorkspaceAuthoringService:
+    def __init__(self, workspace_manager: AssignmentWorkspaceManager | None = None) -> None:
+        self.workspace_manager = workspace_manager or AssignmentWorkspaceManager()
+
+    def ensure_workspace(self, run: WorkflowRun, *, overwrite: bool = False) -> WorkflowRun:
+        workspace = run.artifacts.workspace_snapshot
+        if overwrite or workspace is None or not Path(workspace.root_dir).exists():
+            run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
+        return run
+
+    def author_workspace(self, run: WorkflowRun) -> tuple[WorkflowRun, WorkspaceAuthoringResult]:
+        run = self.ensure_workspace(run)
+        updated_files = self._write_runtime_files(run)
+        return run, WorkspaceAuthoringResult(
+            updated_files=updated_files,
+            message=(
+                "Prepared shared runtime and starter app wrappers in the persistent workspace."
+                if updated_files
+                else "Persistent workspace already matched the current starter runtime templates."
+            ),
+        )
+
+    def repair_workspace(
+        self,
+        run: WorkflowRun,
+        latest_node: WorkflowNodeExecution,
+    ) -> tuple[WorkflowRun, bool, str]:
+        if run.artifacts.task_agent_spec is None:
+            return run, False, "No task-agent spec is available to repair the workspace."
+
+        run = self.ensure_workspace(run)
+        workspace = run.artifacts.workspace_snapshot
+        if workspace is None:
+            return run, False, "The workspace is missing and could not be prepared."
+
+        failed_modules = [
+            report.module_id
+            for report in (latest_node.sandbox_result.module_reports if latest_node.sandbox_result else [])
+            if not report.compile_succeeded or not report.runtime_succeeded
+        ]
+        updated_files = self._write_runtime_files(run, module_ids=failed_modules or None, force=True)
+        if updated_files:
+            return (
+                run,
+                True,
+                "Re-rendered the shared runtime and starter wrappers for the failed workspace modules.",
+            )
+        return run, False, "No workspace file changes were needed for the current sandbox failure."
+
+    def sync_workspace(self, run: WorkflowRun) -> WorkflowRun:
+        return self.ensure_workspace(run, overwrite=True)
+
+    def _write_runtime_files(
+        self,
+        run: WorkflowRun,
+        *,
+        module_ids: list[str] | None = None,
+        force: bool = False,
+    ) -> list[str]:
+        spec = run.artifacts.task_agent_spec
+        workspace = run.artifacts.workspace_snapshot
+        if spec is None or workspace is None:
+            return []
+
+        updated_files: list[str] = []
+        runtime_dir = Path(workspace.public_dir) / "runtime"
+        runtime_path = runtime_dir / "task_agent_runtime.py"
+        updated_files.extend(
+            self._write_if_needed(
+                runtime_path,
+                render_task_agent_runtime_module(),
+                workspace.root_dir,
+                force=force,
+            )
+        )
+
+        allowed_modules = set(module_ids or [module.id for module in spec.modules])
+        for module in spec.modules:
+            if module.id not in allowed_modules:
+                continue
+            module_app = Path(workspace.public_dir) / "starter" / module.id / "app.py"
+            updated_files.extend(
+                self._write_if_needed(
+                    module_app,
+                    render_task_agent_module_app(),
+                    workspace.root_dir,
+                    force=force,
+                )
+            )
+        return updated_files
+
+    def _write_if_needed(
+        self,
+        path: Path,
+        content: str,
+        workspace_root: str,
+        *,
+        force: bool,
+    ) -> list[str]:
+        if not force and path.exists():
+            current = path.read_text(encoding="utf-8")
+            if current == content:
+                return []
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return [str(path.relative_to(workspace_root))]
