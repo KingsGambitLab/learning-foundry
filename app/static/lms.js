@@ -395,8 +395,14 @@
     };
   }
 
-  function inlineCode(text) {
-    return text.replace(/`([^`]+)`/g, "<code>$1</code>");
+  function inlineFormat(text) {
+    let out = text;
+    out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+    out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    out = out.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+    out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+    out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return out;
   }
 
   function renderMarkdown(markdown) {
@@ -411,19 +417,25 @@
 
     function flushParagraph() {
       if (!paragraph.length) return;
-      html.push(`<p>${inlineCode(paragraph.join(" "))}</p>`);
+      const joined = paragraph.join(" ");
+      const boldOnly = joined.match(/^\s*\*\*(.+)\*\*\s*:?\s*$/);
+      if (boldOnly) {
+        html.push(`<h4>${inlineFormat(boldOnly[1])}</h4>`);
+      } else {
+        html.push(`<p>${inlineFormat(joined)}</p>`);
+      }
       paragraph = [];
     }
 
     function flushList() {
       if (!listItems.length) return;
-      html.push(`<ul>${listItems.map((item) => `<li>${inlineCode(item)}</li>`).join("")}</ul>`);
+      html.push(`<ul>${listItems.map((item) => `<li>${inlineFormat(item)}</li>`).join("")}</ul>`);
       listItems = [];
     }
 
     function flushOrderedList() {
       if (!orderedItems.length) return;
-      html.push(`<ol>${orderedItems.map((item) => `<li>${inlineCode(item)}</li>`).join("")}</ol>`);
+      html.push(`<ol>${orderedItems.map((item) => `<li>${inlineFormat(item)}</li>`).join("")}</ol>`);
       orderedItems = [];
     }
 
@@ -467,7 +479,7 @@
         flushList();
         flushOrderedList();
         const level = Math.min(4, headingMatch[1].length);
-        html.push(`<h${level}>${inlineCode(headingMatch[2])}</h${level}>`);
+        html.push(`<h${level}>${inlineFormat(headingMatch[2])}</h${level}>`);
         continue;
       }
 
@@ -479,7 +491,7 @@
         continue;
       }
 
-      const listMatch = trimmed.match(/^[-*]\s+(.*)$/);
+      const listMatch = trimmed.match(/^[-*•]\s+(.*)$/);
       if (listMatch) {
         flushParagraph();
         flushOrderedList();
@@ -609,6 +621,12 @@
         ? `Module ${activeModule.module_index} · resume`
         : `Module ${activeModule.module_index} of ${progress.total}`;
 
+    const visibleFilesPreview = (activeModule.visible_files || []).slice(0, 3);
+    const visibleFilesExtra = Math.max(0, (activeModule.visible_files || []).length - visibleFilesPreview.length);
+    const visibleFilesText = visibleFilesPreview.length
+      ? `${visibleFilesPreview.map((f) => `<code>${escapeHtml(f)}</code>`).join(", ")}${visibleFilesExtra ? ` <span class="quickref-more">+${visibleFilesExtra} more</span>` : ""}`
+      : `<span class="quickref-empty">No visible files listed yet</span>`;
+
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
@@ -616,6 +634,25 @@
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(activeModule.title)}</h1>
           <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Keep building through the published learner modules with a persistent workspace and graded checkpoints.")}</p>
+
+          <dl class="module-quickref" aria-label="Module at a glance">
+            <div class="quickref-row">
+              <dt>Files to edit</dt>
+              <dd>${visibleFilesText}</dd>
+            </div>
+            <div class="quickref-row">
+              <dt>Run visible checks</dt>
+              <dd>Inside the VS Code workspace, while you iterate.</dd>
+            </div>
+            <div class="quickref-row">
+              <dt>Submit</dt>
+              <dd>Use <strong>Submit for grading</strong> below — runs the hidden grader.</dd>
+            </div>
+            <div class="quickref-row">
+              <dt>Done when</dt>
+              <dd>The hidden grader passes; the next module unlocks automatically.</dd>
+            </div>
+          </dl>
 
           <div class="writeup-shell">
             <div class="experience-section-header">

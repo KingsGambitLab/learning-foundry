@@ -270,6 +270,66 @@
   gap: 10px;
 }
 
+.module-quickref {
+  margin: 0;
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.quickref-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 160px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 10px 14px;
+  align-items: baseline;
+}
+
+.quickref-row + .quickref-row {
+  border-top: 1px solid var(--line);
+}
+
+.quickref-row dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.quickref-row dd {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.quickref-row dd code {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.quickref-more {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.quickref-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .focus-stat {
   padding: 10px 14px;
   border: 1px solid var(--line);

@@ -158,10 +158,47 @@
         return `${count} ${count === 1 ? singular : plural}`;
       }
 
+      function formatRelativeTime(value) {
+        if (!value) return "—";
+        try {
+          const date = new Date(value);
+          const diffMs = date.getTime() - Date.now();
+          const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+          const absSec = Math.round(Math.abs(diffMs) / 1000);
+          if (absSec < 60) return formatter.format(Math.round(diffMs / 1000), "second");
+          const absMin = Math.round(absSec / 60);
+          if (absMin < 60) return formatter.format(Math.round(diffMs / 60000), "minute");
+          const absHr = Math.round(absMin / 60);
+          if (absHr < 48) return formatter.format(Math.round(diffMs / 3600000), "hour");
+          const absDay = Math.round(absHr / 24);
+          return formatter.format(Math.round(diffMs / 86400000), "day");
+        } catch (_e) {
+          return formatDate(value);
+        }
+      }
+
+      function draftIdentityBadges(run) {
+        const tags = [];
+        if (run.status === "published") tags.push(`<span class="draft-row-tag tag-live">Live</span>`);
+        else if (run.stage === "ready_to_publish") tags.push(`<span class="draft-row-tag tag-ready">Ready</span>`);
+        else if (run.active_operation) tags.push(`<span class="draft-row-tag tag-busy">${escapeHtml(friendlyOperation(run.active_operation))}</span>`);
+        else if (run.stage === "blocked" || run.last_error) tags.push(`<span class="draft-row-tag tag-blocked">Blocked</span>`);
+        else if (run.status === "awaiting_human" || run.stage === "awaiting_course_review") tags.push(`<span class="draft-row-tag tag-waiting">Needs you</span>`);
+        return tags.join("");
+      }
+
+      function draftSnippet(run) {
+        const goal = run.goal || run.summary || "";
+        if (!goal) return "";
+        const trimmed = goal.replace(/\s+/g, " ").trim();
+        return trimmed.length > 90 ? `${trimmed.slice(0, 87)}…` : trimmed;
+      }
+
       function buildDraftOptionMarkup(run, options = {}) {
         const summary = summarizeDraftListState(run);
         const isSelected = currentCourseRun?.id === run.id;
         const updated = formatDate(run.updated_at);
+        const updatedRelative = formatRelativeTime(run.updated_at);
         if (options.compact) {
           return `
             <button
@@ -170,27 +207,32 @@
               data-switch-course-run="${escapeHtml(run.id)}"
             >
               <span class="draft-switcher-option-title">${escapeHtml(run.title)}</span>
-              <span class="draft-switcher-option-meta">${escapeHtml(summary.label)} • ${escapeHtml(updated)}</span>
+              <span class="draft-switcher-option-meta">${escapeHtml(summary.label)} • ${escapeHtml(updatedRelative)}</span>
             </button>
           `;
         }
+        const snippet = draftSnippet(run);
         return `
           <button
             class="draft-row ${isSelected ? "selected" : ""}"
             type="button"
             data-load-course-run="${escapeHtml(run.id)}"
+            title="${escapeHtml(`Last updated ${updated}`)}"
           >
             <div class="draft-row-main">
-              <div>
+              <div class="draft-row-heading">
                 <h4>${escapeHtml(run.title)}</h4>
-                <p>${escapeHtml(summary.ownerCopy)}</p>
+                <div class="draft-row-tags">
+                  ${draftIdentityBadges(run)}
+                </div>
               </div>
               <span class="badge ${escapeHtml(summary.kind)}">${escapeHtml(summary.label)}</span>
             </div>
+            ${snippet ? `<p class="draft-row-snippet">${escapeHtml(snippet)}</p>` : ""}
             <div class="draft-row-meta">
-              <span><strong>Updated</strong> ${escapeHtml(updated)}</span>
-              <span><strong>Modules</strong> ${escapeHtml(String(run.module_count))}</span>
-              ${run.base_archetype ? `<span><strong>Build</strong> ${escapeHtml(friendlyBuildPattern(run.base_archetype))}</span>` : ""}
+              <span class="draft-row-updated">${escapeHtml(updatedRelative)}</span>
+              <span><strong>${escapeHtml(String(run.module_count))}</strong> module${run.module_count === 1 ? "" : "s"}</span>
+              ${run.base_archetype ? `<span>${escapeHtml(friendlyBuildPattern(run.base_archetype))}</span>` : ""}
             </div>
           </button>
         `;
@@ -232,6 +274,7 @@
         draftContextBar?.classList.toggle("loading", hasPendingDraft && !hasOpenDraft);
         draftInboxPanel?.classList.toggle("hidden", currentTab !== "drafts" || hasOpenDraft || hasPendingDraft);
         document.body.classList.toggle("dashboard-drafts-mode", currentTab === "drafts");
+        document.body.classList.toggle("dashboard-create-mode", currentTab === "create");
         document.body.classList.toggle("dashboard-has-active-draft", focusedDraftView);
         document.body.classList.toggle("dashboard-draft-loading", hasPendingDraft);
 
@@ -746,7 +789,7 @@
           const starters = (blueprint.starter_types || []).map(friendlyStarterType).join(", ");
           return `
             <div class="review-plain-summary">
-              <p class="review-plain-eyebrow">Plan blueprint review</p>
+              <p class="review-plain-eyebrow">Course blueprint</p>
               <h5>${escapeHtml(blueprint.title || "Course blueprint")}</h5>
               <p>${escapeHtml(blueprint.summary || "")}</p>
               <ul>
@@ -761,7 +804,7 @@
         if (!spec) {
           return `
             <div class="review-plain-summary">
-              <p>Review details are still loading. Refresh the draft before deciding on this step.</p>
+              <p>Loading the review snapshot. Refresh the draft if it doesn't appear in a moment.</p>
             </div>
           `;
         }
@@ -772,15 +815,15 @@
         const behaviors = spec.behaviors || [];
         const qualities = spec.qualities || [];
         const modules = spec.modules || [];
-        const headlineByGate = {
-          gate_1_spec_review: "Assignment spec ready for review",
-          gate_2_progression_review: "Module ladder ready for review",
-          gate_3_pre_publish: "Final pass before publish",
-        };
         const eyebrowByGate = {
-          gate_1_spec_review: "Spec review",
-          gate_2_progression_review: "Module ladder review",
-          gate_3_pre_publish: "Pre-publish review",
+          gate_1_spec_review: "First review",
+          gate_2_progression_review: "Module ladder check",
+          gate_3_pre_publish: "Last check before publish",
+        };
+        const headlineByGate = {
+          gate_1_spec_review: "Does this assignment shape match what you want learners to build?",
+          gate_2_progression_review: "Does this module ladder teach the work in the right order?",
+          gate_3_pre_publish: "Ready to ship this version?",
         };
 
         const moduleList = modules.length
@@ -790,16 +833,15 @@
           : "";
 
         const facts = [];
-        facts.push(`<li><strong>Build pattern:</strong> ${escapeHtml(friendlyBuildPattern(spec.archetype))}</li>`);
         facts.push(`<li><strong>Modules:</strong> ${modules.length}</li>`);
-        facts.push(`<li><strong>Tools:</strong> ${tools.length} total${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} writes data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
-        facts.push(`<li><strong>Checks:</strong> ${behaviors.length} visible behavior${behaviors.length === 1 ? "" : "s"} · ${qualities.length} quality bar${qualities.length === 1 ? "" : "s"}</li>`);
+        facts.push(`<li><strong>Tools the system can use:</strong> ${tools.length}${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} write data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
+        facts.push(`<li><strong>Checks:</strong> ${behaviors.length} learner-visible · ${qualities.length} quality bars</li>`);
 
         return `
           <div class="review-plain-summary">
             <p class="review-plain-eyebrow">${escapeHtml(eyebrowByGate[pendingGate] || "Review")}</p>
-            <h5>${escapeHtml(spec.title || headlineByGate[pendingGate] || "Review this step")}</h5>
-            <p>${escapeHtml(spec.summary || "")}</p>
+            <h5>${escapeHtml(headlineByGate[pendingGate] || spec.title || "Review this step")}</h5>
+            <p class="review-plain-spec-title"><strong>${escapeHtml(spec.title || "")}</strong>${spec.summary ? ` — ${escapeHtml(spec.summary)}` : ""}</p>
             <ul>${facts.join("")}</ul>
             ${pendingGate !== "gate_1_spec_review" ? moduleList : ""}
           </div>
@@ -1319,7 +1361,12 @@
           return;
         }
         generateButton.disabled = true;
-        setMessage(formMessage, "info", "Creating the draft from your plan...");
+        const originalLabel = generateButton.textContent;
+        generateButton.textContent = "Creating draft…";
+        if (creatorPlanPreview) {
+          creatorPlanPreview.classList.add("creator-plan-preview-creating");
+        }
+        setMessage(formMessage, "info", "Creating your draft from this plan…");
         try {
           const response = await fetch("/v1/course-runs/from-creator-plan", {
             method: "POST",
@@ -1330,18 +1377,27 @@
             throw new Error(await extractDetail(response));
           }
           const courseRun = await response.json();
+          generateButton.textContent = "Opening draft…";
+          resetCreatorFlow();
           await loadCourseDraft(courseRun.id, {
             silentMessage: true,
             historyMode: "push",
             tabAfterLoad: "drafts",
             scrollToResult: true,
           });
-          setMessage(formMessage, "success", "Draft created. Follow it in Drafts.");
-          resetCreatorFlow();
+          setMessage(
+            formMessage,
+            "success",
+            `Draft created: “${courseRun.title}”. Opened on the Drafts tab.`,
+          );
         } catch (error) {
           setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not create the draft.");
+          if (creatorPlanPreview) {
+            creatorPlanPreview.classList.remove("creator-plan-preview-creating");
+          }
         } finally {
           generateButton.disabled = false;
+          generateButton.textContent = originalLabel;
         }
       }
 
@@ -1976,6 +2032,29 @@
           reviewPanel.open = pendingWorkflows.length > 0
             || courseRun.active_operation
             || courseRun.stage === "blocked";
+        }
+        const reviewTitle = document.getElementById("review-step-title");
+        const reviewCopy = document.getElementById("review-step-copy");
+        if (reviewTitle && reviewCopy) {
+          if (pendingWorkflows.length > 0) {
+            reviewTitle.textContent = "Decision needed";
+            reviewCopy.textContent = "Approve if this matches what you want, or ask for specific changes below.";
+          } else if (courseRun.status === "published") {
+            reviewTitle.textContent = "Published";
+            reviewCopy.textContent = "Learners are pinned to this version's snapshot.";
+          } else if (courseRun.stage === "ready_to_publish") {
+            reviewTitle.textContent = "Ready to publish";
+            reviewCopy.textContent = "All checkpoints are approved. Use Publish this version when you're ready.";
+          } else if (courseRun.active_operation) {
+            reviewTitle.textContent = "Agent is working";
+            reviewCopy.textContent = "Nothing to review yet. We will surface the next checkpoint here.";
+          } else if (courseRun.stage === "blocked") {
+            reviewTitle.textContent = "Blocked";
+            reviewCopy.textContent = "The draft hit a problem. Use the activity feed below to see what happened.";
+          } else {
+            reviewTitle.textContent = "Review this step";
+            reviewCopy.textContent = "Approve to keep the draft moving, or request changes with what you want fixed.";
+          }
         }
         document.body.classList.toggle("dashboard-published-state", courseRun.status === "published");
       }
