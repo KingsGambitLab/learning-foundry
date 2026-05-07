@@ -143,6 +143,8 @@ class CourseGenerationService:
             creator_choices=request.creator_choices,
         )
         creator_plan = CreatorCoursePlan(
+            goal=request.goal,
+            learning_outcomes=normalized_outcomes,
             title=normalized_plan.title,
             summary=normalized_plan.summary,
             package_type=normalized_plan.package_type,
@@ -196,6 +198,19 @@ class CourseGenerationService:
                 modules=modules,
             )
         )
+        if len(course_run.modules) == len(plan.modules):
+            for stored_module, planned_module in zip(course_run.modules, plan.modules, strict=False):
+                stored_module.title = planned_module.title
+                stored_module.summary = planned_module.summary
+                stored_module.learning_outcomes = list(planned_module.learning_outcomes)
+                stored_module.notes = list(
+                    dict.fromkeys(
+                        [
+                            *stored_module.notes,
+                            *planned_module.creator_notes,
+                        ]
+                    )
+                )
         course_run.notes = list(
             dict.fromkeys(
                 [
@@ -207,12 +222,31 @@ class CourseGenerationService:
                 ]
             )
         )
+        course_run.goal = plan.goal
+        course_run.requested_learning_outcomes = list(plan.learning_outcomes)
+        course_run.generated_plan = GeneratedCoursePlan(
+            title=plan.title,
+            summary=plan.summary,
+            package_type=plan.package_type,
+            shared_design_spec=shared_design_spec,
+            modules=modules,
+            notes=list(
+                dict.fromkeys(
+                    [
+                        *plan.notes,
+                        "Creator-approved module plan.",
+                    ]
+                )
+            ),
+        )
         self.course_workflow_service.store.save_course_run(course_run)
         self.course_workflow_service.store.append_course_event(
             course_run.id,
             "creator_plan_accepted",
             {
                 "module_count": len(plan.modules),
+                "goal": plan.goal,
+                "learning_outcome_count": len(plan.learning_outcomes),
                 "starter_type": plan.creator_choices.starter_type.value,
                 "primary_database": plan.creator_choices.primary_database,
                 "cache_backend": plan.creator_choices.cache_backend,

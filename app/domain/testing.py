@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.domain.course import CourseReviewReport, CourseRunSummary
+from app.domain.course import CourseReviewReport, CourseRunSummary, CreatorCourseSetupChoices
 from app.domain.learner import LearnerModuleExperience
 from app.domain.publish import PublishedVersionList
+
+
+class TestingDiagnosticSeverity(str, Enum):
+    info = "info"
+    warning = "warning"
+    error = "error"
+
+
+class TestingDiagnostic(BaseModel):
+    code: str
+    severity: TestingDiagnosticSeverity
+    summary: str
+    detail: str | None = None
+    recommended_action: str | None = None
+    blocking: bool = False
+    context: dict = Field(default_factory=dict)
 
 
 class CreateCreatorFeedbackRequest(BaseModel):
@@ -107,11 +124,16 @@ class LearnerCourseEvaluationReport(BaseModel):
 class CreatorTestingView(BaseModel):
     course_run: CourseRunSummary
     review: CourseReviewReport
+    goal: str | None = None
+    requested_learning_outcomes: list[str] = Field(default_factory=list)
+    creator_choices: CreatorCourseSetupChoices | None = None
     published_versions: PublishedVersionList
+    diagnostics: list[TestingDiagnostic] = Field(default_factory=list)
     creator_feedback: list[CreatorFeedbackRecord] = Field(default_factory=list)
     latest_learner_evaluation: LearnerCourseEvaluationReport | None = None
 
 
 class LearnerTestingView(BaseModel):
     experience: LearnerModuleExperience
+    diagnostics: list[TestingDiagnostic] = Field(default_factory=list)
     feedback: list[LearnerFeedbackRecord] = Field(default_factory=list)

@@ -39,6 +39,8 @@ from app.domain.testing import (
     CreatorFeedbackRecord,
     CreatorTestingView,
     LearnerCourseEvaluationReport,
+    TestingDiagnostic,
+    TestingDiagnosticSeverity,
 )
 from app.domain.workflow import (
     ArtifactVisibility,
@@ -436,7 +438,11 @@ class CourseWorkflowService:
         return CreatorTestingView(
             course_run=CourseRunSummary.from_run(course_run),
             review=review,
+            goal=course_run.goal,
+            requested_learning_outcomes=list(course_run.requested_learning_outcomes),
+            creator_choices=self._creator_choices(course_run),
             published_versions=self.list_published_versions(course_run_id),
+            diagnostics=self._creator_diagnostics(course_run, review),
             creator_feedback=self.store.list_creator_feedback(course_run_id),
             latest_learner_evaluation=self.store.get_latest_learner_eval_report(
                 course_run_id,
@@ -1219,6 +1225,139 @@ class CourseWorkflowService:
         if any(module.draft_kind != DraftKind.task_agent_spec.value for module in course_run.modules):
             return "This course cannot publish yet because a linked assignment workflow does not have a learner-ready spec."
         return "All linked assignment workflow runs must be published before the course can be published."
+
+    def _creator_choices(self, course_run: CourseRun):
+        runtime_dependencies = (
+            course_run.shared_design_spec.runtime_dependencies
+            if course_run.shared_design_spec is not None
+            else None
+        )
+        if runtime_dependencies is None:
+            return None
+        from app.domain.course import CreatorCourseSetupChoices
+
+        return CreatorCourseSetupChoices(
+            starter_type=runtime_dependencies.starter_type,
+            primary_database=runtime_dependencies.primary_database,
+            cache_backend=runtime_dependencies.cache_backend,
+            tech_stack=list(runtime_dependencies.tech_stack),
+        )
+
+    def _creator_diagnostics(
+        self,
+        course_run: CourseRun,
+        review: CourseReviewReport,
+    ) -> list[TestingDiagnostic]:
+        diagnostics: list[TestingDiagnostic] = []
+
+        if course_run.active_operation is not None:
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="course_operation_in_progress",
+                    severity=TestingDiagnosticSeverity.info,
+                    summary=f"Course action `{course_run.active_operation.value}` is still running.",
+                    detail="The draft is being updated in the background. Wait for the current action to finish before starting another one.",
+                    recommended_action="Refresh the draft status after the current action completes.",
+                    blocking=False,
+                    context={"operation": course_run.active_operation.value},
+                )
+            )
+
+        if course_run.last_error:
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="course_action_failed",
+                    severity=TestingDiagnosticSeverity.error,
+                    summary="The last course action failed.",
+                    detail=course_run.last_error,
+                    recommended_action="Review the blocking reason, fix the linked draft issue, and retry the action.",
+                    blocking=True,
+                    context={"stage": course_run.stage.value, "status": course_run.status.value},
+                )
+            )
+
+        if review.blockers:
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="review_blocked",
+                    severity=TestingDiagnosticSeverity.error,
+                    summary="This draft still has blocking issues.",
+                    detail=review.blockers[0],
+                    recommended_action=review.next_actions[0] if review.next_actions else "Inspect the blocking module or linked workflow before continuing.",
+                    blocking=True,
+                    context={"blocker_count": len(review.blockers)},
+                )
+            )
+
+        pending_workflows = [
+            workflow
+            for workflow in review.linked_workflows
+            if workflow.pending_gate is not None
+        ]
+        if pending_workflows:
+            pending = pending_workflows[0]
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="linked_workflow_review_pending",
+                    severity=TestingDiagnosticSeverity.warning,
+                    summary="A linked assignment workflow is waiting on review.",
+                    detail=f"Workflow `{pending.title}` is paused at `{pending.pending_gate.value}`.",
+                    recommended_action="Review the linked assignment step and approve or request changes.",
+                    blocking=True,
+                    context={
+                        "workflow_run_id": pending.run_id,
+                        "pending_gate": pending.pending_gate.value,
+                    },
+                )
+            )
+
+        if (
+            course_run.stage == CourseRunStage.ready_to_publish
+            and course_run.latest_publish_snapshot_id is None
+        ):
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="ready_for_publish",
+                    severity=TestingDiagnosticSeverity.info,
+                    summary="The draft is ready for publish review.",
+                    detail="All linked assignment workflows are published and the course can be materialized or published.",
+                    recommended_action="Open the draft playground, test the learner path, then publish when it feels ready.",
+                    blocking=False,
+                )
+            )
+
+        latest_eval = self.store.get_latest_learner_eval_report(
+            course_run.id,
+            course_run.latest_publish_snapshot_id,
+        )
+        if latest_eval is not None and latest_eval.overall_status != "passed":
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="learner_eval_failed",
+                    severity=TestingDiagnosticSeverity.error,
+                    summary="The latest learner-path evaluation did not pass.",
+                    detail=f"Latest learner evaluation report `{latest_eval.id}` finished with `{latest_eval.overall_status}`.",
+                    recommended_action="Inspect the learner evaluation report before publishing this draft.",
+                    blocking=True,
+                    context={
+                        "report_id": latest_eval.id,
+                        "publish_snapshot_id": latest_eval.publish_snapshot_id,
+                    },
+                )
+            )
+
+        if not diagnostics:
+            diagnostics.append(
+                TestingDiagnostic(
+                    code="creator_view_healthy",
+                    severity=TestingDiagnosticSeverity.info,
+                    summary="No blocking backend issues are currently recorded for this draft.",
+                    detail="You can focus on reviewing the module plan, linked workflow details, and learner experience.",
+                    blocking=False,
+                )
+            )
+
+        return diagnostics
 
     def _default_course_summary(self, pattern: CoursePattern | None, title: str) -> str:
         if pattern is None:

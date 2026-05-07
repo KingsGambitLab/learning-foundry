@@ -503,9 +503,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("text/html", response.headers["content-type"])
         body = response.text
         self.assertIn("Course LMS", body)
-        self.assertIn("Published courses", body)
-        self.assertIn("My courses", body)
-        self.assertIn("Keep building", body)
+        self.assertIn("Learner LMS", body)
+        self.assertIn("Course builder", body)
         self.assertIn("Open a course to see its module ladder.", body)
         self.assertIn('/static/lms.css', body)
         self.assertIn('/static/lms.js', body)
@@ -535,6 +534,18 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn('/static/dashboard.js', body)
         self.assertIn('id="dashboard-state"', body)
         self.assertNotIn("Catalog Patterns", body)
+
+    def test_courses_renders_my_and_all_courses_page(self) -> None:
+        response = self.client.get("/courses")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+        body = response.text
+        self.assertIn("My courses", body)
+        self.assertIn("All courses", body)
+        self.assertIn('/static/lms.css', body)
+        self.assertIn('/static/lms-courses.js', body)
+        self.assertIn('id="lms-state"', body)
+        self.assertIn("/create-course", body)
 
     def test_dashboard_static_assets_are_served(self) -> None:
         script = self.client.get("/static/dashboard.js")
@@ -770,6 +781,17 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["plan"]["creator_choices"]["primary_database"], "postgres")
         self.assertEqual(body["plan"]["creator_choices"]["cache_backend"], "redis")
+        self.assertEqual(
+            body["plan"]["goal"],
+            "Build a flight booking system that is production ready. Mock external dependent services where required.",
+        )
+        self.assertEqual(
+            body["plan"]["learning_outcomes"],
+            [
+                "Keep seat inventory correct under load.",
+                "Explain the tradeoffs between different locking strategies.",
+            ],
+        )
         module_titles = [module["title"] for module in body["plan"]["modules"]]
         self.assertIn("Pessimistic locking in postgres", module_titles)
         self.assertIn("Optimistic locking and retries in postgres", module_titles)
@@ -804,6 +826,25 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["primary_database"], "postgres")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["cache_backend"], "redis")
         self.assertIsNotNone(body["shared_workflow_run_id"])
+        self.assertEqual(
+            body["goal"],
+            "Build a flight booking system that is production ready. Mock external dependent services where required.",
+        )
+        self.assertEqual(
+            body["requested_learning_outcomes"],
+            [
+                "Keep seat inventory correct under load.",
+                "Explain the tradeoffs between different locking strategies.",
+            ],
+        )
+        self.assertEqual(body["generated_plan"]["title"], body["title"])
+        creator_view = self.client.get(f"/v1/course-runs/{body['id']}/creator-view")
+        self.assertEqual(creator_view.status_code, 200)
+        creator_body = creator_view.json()
+        creator_module_titles = [module["title"] for module in creator_body["review"]["modules"]]
+        self.assertIn("Pessimistic locking in postgres", creator_module_titles)
+        self.assertIn("Optimistic locking and retries in postgres", creator_module_titles)
+        self.assertIn("Redis for availability reads", creator_module_titles)
 
     def test_normalize_plan_preserves_shared_design_spec_across_progressive_modules(self) -> None:
         service = app.state.course_generation_service
@@ -2192,11 +2233,33 @@ class CourseGenCodexApiTests(unittest.TestCase):
         creator_body = creator_view.json()
         self.assertEqual(creator_body["creator_feedback"][0]["summary"], "Module ladder feels close.")
         self.assertEqual(creator_body["latest_learner_evaluation"]["publish_snapshot_id"], snapshot_id)
+        self.assertIsNotNone(creator_body["creator_choices"])
+        self.assertGreaterEqual(len(creator_body["diagnostics"]), 1)
 
         learner_view = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/learner-view")
         self.assertEqual(learner_view.status_code, 200)
         learner_body = learner_view.json()
         self.assertEqual(learner_body["feedback"][0]["summary"], "The starter is easy to understand.")
+
+    def test_creator_view_exposes_machine_readable_diagnostics_for_blocked_draft(self) -> None:
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run_id = created.json()["id"]
+
+        stored = app.state.workflow_service.store.get_course_run(course_run_id)
+        assert stored is not None
+        stored.last_error = "Docker sandbox verification failed for the shared workflow."
+        app.state.workflow_service.store.save_course_run(stored)
+
+        creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
+        self.assertEqual(creator_view.status_code, 200)
+        body = creator_view.json()
+        diagnostic_codes = {item["code"] for item in body["diagnostics"]}
+        self.assertIn("course_action_failed", diagnostic_codes)
+        self.assertIn("review_blocked", diagnostic_codes)
 
     def test_create_revision_produces_new_draft_without_replacing_published_catalog_entry(self) -> None:
         app.state.lms_service = LMSService(

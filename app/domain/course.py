@@ -309,6 +309,8 @@ class CreatorCourseModulePlan(BaseModel):
 
 
 class CreatorCoursePlan(BaseModel):
+    goal: str | None = None
+    learning_outcomes: list[str] = Field(default_factory=list)
     title: str
     summary: str
     package_type: PackageType
