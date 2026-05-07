@@ -10,6 +10,7 @@ from app.domain.task_agent import (
     AssessmentStrategySpec,
     CapabilitySpec,
     CourseStructureSpec,
+    DataSourceSpec,
     ExecutionSurface,
     ProgressionMode,
     RetrievalMode,
@@ -30,6 +31,11 @@ class GenerationIntake(BaseModel):
     problem_statement: str
     learning_outcomes: list[str] = Field(default_factory=list)
     package_type_hint: PackageType | None = None
+    starter_type: StarterType | None = None
+    primary_database: str | None = None
+    cache_backend: str | None = None
+    tech_stack: list[str] = Field(default_factory=list)
+    data_sources: list[DataSourceSpec] = Field(default_factory=list)
 
 
 class AssignmentDesignInference(BaseModel):
@@ -211,29 +217,34 @@ def build_assignment_design(
     primary_database: str | None = None,
     cache_backend: str | None = None,
     tech_stack: list[str] | None = None,
+    data_sources: list[DataSourceSpec] | None = None,
 ) -> AssignmentDesignSpec:
-    visible_fixture_files = ["data/corpus.json"] if retrieval_mode != RetrievalMode.none else []
+    source_specs = list(data_sources or [])
+    visible_fixture_files = [
+        source.workspace_path
+        for source in source_specs
+        if source.learner_visible and source.workspace_path
+    ]
+    if not visible_fixture_files and retrieval_mode != RetrievalMode.none:
+        visible_fixture_files = ["data/corpus.json"]
     shared_codebase = package_type == PackageType.progressive_codebase_course
     return AssignmentDesignSpec(
-        course_structure=CourseStructureSpec(
-            package_type=package_type,
-            workspace_scope=(
-                WorkspaceScope.shared_course_workspace
-                if shared_codebase
-                else WorkspaceScope.per_module_workspace
+            course_structure=CourseStructureSpec(
+                package_type=package_type,
+                workspace_scope=(
+                    WorkspaceScope.shared_course_workspace
+                    if shared_codebase
+                    else WorkspaceScope.per_module_workspace
+                ),
+                progression_mode=ProgressionMode.independent_modules,
+                shared_codebase=shared_codebase,
             ),
-            progression_mode=(
-                ProgressionMode.cumulative_module_gates
-                if shared_codebase
-                else ProgressionMode.independent_modules
-            ),
-            shared_codebase=shared_codebase,
-        ),
         runtime_dependencies=RuntimeDependencySpec(
             execution_surface=execution_surface,
             starter_type=starter_type,
             editable_files=["app.py"],
             visible_fixture_files=visible_fixture_files,
+            data_sources=source_specs,
             primary_database=primary_database,
             cache_backend=cache_backend,
             tech_stack=list(tech_stack or []),
@@ -254,7 +265,7 @@ def build_assignment_design(
         assessment_strategy=AssessmentStrategySpec(
             public_checks_required=True,
             hidden_grader_required=True,
-            cumulative_module_gates=shared_codebase,
+            cumulative_module_gates=False,
             learner_submission_enabled=True,
         ),
         risk_class=risk_class,
@@ -267,10 +278,26 @@ def infer_assignment_design(
     *,
     title: str,
     problem_statement: str,
-    learning_outcomes: list[str],
+    learning_outcomes: list[str] | None = None,
     package_type_hint: PackageType | None = None,
+    starter_type: StarterType | None = None,
+    primary_database: str | None = None,
+    cache_backend: str | None = None,
+    tech_stack: list[str] | None = None,
+    data_sources: list[DataSourceSpec] | None = None,
 ) -> AssignmentDesignInference:
-    text = " ".join([title, problem_statement, *learning_outcomes]).lower()
+    source_signal = " ".join(
+        item
+        for item in [
+            *(source.title for source in data_sources or []),
+            *(source.description or "" for source in data_sources or []),
+            primary_database or "",
+            cache_backend or "",
+            *(tech_stack or []),
+        ]
+        if item
+    )
+    text = " ".join([title, problem_statement, source_signal]).lower()
     package_type = infer_package_type(text=text, package_type_hint=package_type_hint)
     risk_class = infer_risk_class(text)
     overlays = infer_overlays(text)
@@ -312,6 +339,11 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=False,
             approval_flow_required=False,
+            starter_type=starter_type or StarterType.partial_implementation,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=tech_stack,
+            data_sources=data_sources,
         )
     elif any(keyword in text for keyword in RANKED_RETRIEVAL_KEYWORDS):
         reasons.append("The brief centers on retrieval quality over a visible corpus.")
@@ -328,6 +360,11 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=False,
             approval_flow_required=False,
+            starter_type=starter_type or StarterType.partial_implementation,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=tech_stack,
+            data_sources=data_sources,
         )
     elif any(keyword in text for keyword in STATEFUL_KEYWORDS):
         reasons.append("The brief depends on correctness under persistent mutable state and concurrency.")
@@ -344,6 +381,11 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=True,
             approval_flow_required=False,
+            starter_type=starter_type or StarterType.partial_implementation,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=tech_stack,
+            data_sources=data_sources,
         )
     else:
         reasons.append("The brief fits the general learner-ready service pipeline with bounded workflows and observable behavior.")
@@ -360,6 +402,11 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required="state" in text or "resume" in text or "durable" in text,
             approval_flow_required="approval" in text or "escalat" in text or "handoff" in text,
+            starter_type=starter_type or StarterType.partial_implementation,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=tech_stack,
+            data_sources=data_sources,
         )
 
     status = DesignSupportStatus.supported

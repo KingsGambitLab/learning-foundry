@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 
+from app.domain.ai import AIUsageSummary
 from app.domain.course import (
     CourseGenerationSource,
     CourseGenerationStatus,
@@ -14,6 +14,12 @@ from app.domain.course import (
     SuggestLearningOutcomesRequest,
 )
 from app.services.assignment_design_inference import infer_assignment_design
+from app.services.openai_runtime_support import (
+    extract_openai_usage,
+    load_openai_env_file,
+    resolve_openai_env_file,
+    strip_quotes,
+)
 
 
 class OpenAICoursePlannerUnavailable(RuntimeError):
@@ -34,7 +40,7 @@ class OpenAICoursePlanner:
         client_factory=None,
     ) -> None:
         self.enabled = enabled
-        self.env_file = env_file or os.environ.get("COURSE_GEN_OPENAI_ENV_FILE") or os.environ.get("OPENAI_ENV_FILE")
+        self.env_file = resolve_openai_env_file(env_file)
         self.model = model
         self.client_factory = client_factory
 
@@ -88,7 +94,10 @@ class OpenAICoursePlanner:
             env_file=self.env_file,
         )
 
-    def plan_course(self, request: GenerateCourseFromBriefRequest) -> tuple[GeneratedCoursePlan, CourseGenerationStatus]:
+    def plan_course(
+        self,
+        request: GenerateCourseFromBriefRequest,
+    ) -> tuple[GeneratedCoursePlan, CourseGenerationStatus, AIUsageSummary | None]:
         status = self.status()
         if not status.available:
             raise OpenAICoursePlannerUnavailable(status.message)
@@ -119,24 +128,29 @@ class OpenAICoursePlanner:
             raw_text = getattr(response, "output_text", "")
             raw_plan = self._extract_json(raw_text)
             plan = self._normalize_raw_plan(request, raw_plan)
+            usage = extract_openai_usage(response, status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
             raise OpenAICourseGenerationError(str(exc)) from exc
 
-        return plan, CourseGenerationStatus(
-            provider="openai",
-            available=True,
-            source=CourseGenerationSource.openai_live,
-            message=f"Generated course plan with OpenAI model `{status.model_id}`.",
-            sdk_installed=True,
-            api_key_present=True,
-            model_id=status.model_id,
-            env_file=status.env_file,
+        return (
+            plan,
+            CourseGenerationStatus(
+                provider="openai",
+                available=True,
+                source=CourseGenerationSource.openai_live,
+                message=f"Generated course plan with OpenAI model `{status.model_id}`.",
+                sdk_installed=True,
+                api_key_present=True,
+                model_id=status.model_id,
+                env_file=status.env_file,
+            ),
+            usage,
         )
 
     def suggest_learning_outcomes(
         self,
         request: SuggestLearningOutcomesRequest,
-    ) -> tuple[list[str], CourseGenerationStatus]:
+    ) -> tuple[list[str], CourseGenerationStatus, AIUsageSummary | None]:
         status = self.status()
         if not status.available:
             raise OpenAICoursePlannerUnavailable(status.message)
@@ -172,18 +186,23 @@ class OpenAICoursePlanner:
             ][:6]
             if not outcomes:
                 raise ValueError("The OpenAI response did not contain any learning outcomes.")
+            usage = extract_openai_usage(response, status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
             raise OpenAICourseGenerationError(str(exc)) from exc
 
-        return outcomes, CourseGenerationStatus(
-            provider="openai",
-            available=True,
-            source=CourseGenerationSource.openai_live,
-            message=f"Suggested learning outcomes with OpenAI model `{status.model_id}`.",
-            sdk_installed=True,
-            api_key_present=True,
-            model_id=status.model_id,
-            env_file=status.env_file,
+        return (
+            outcomes,
+            CourseGenerationStatus(
+                provider="openai",
+                available=True,
+                source=CourseGenerationSource.openai_live,
+                message=f"Suggested learning outcomes with OpenAI model `{status.model_id}`.",
+                sdk_installed=True,
+                api_key_present=True,
+                model_id=status.model_id,
+                env_file=status.env_file,
+            ),
+            usage,
         )
 
     def _normalize_raw_plan(
@@ -198,8 +217,12 @@ class OpenAICoursePlanner:
         shared_design_spec = infer_assignment_design(
             title=title,
             problem_statement=request.goal,
-            learning_outcomes=request.learning_outcomes,
             package_type_hint=request.package_type_hint,
+            starter_type=request.creator_setup.starter_type,
+            primary_database=request.creator_setup.primary_database,
+            cache_backend=request.creator_setup.cache_backend,
+            tech_stack=list(request.creator_setup.tech_stack),
+            data_sources=list(request.creator_setup.data_sources),
         ).design_spec
         if shared_design_spec is None:
             raise ValueError("This brief is outside the current learner-ready generation scope.")
@@ -220,8 +243,12 @@ class OpenAICoursePlanner:
             module_design_spec = infer_assignment_design(
                 title=module_title,
                 problem_statement=module_summary,
-                learning_outcomes=module_outcomes or request.learning_outcomes,
                 package_type_hint=request.package_type_hint,
+                starter_type=request.creator_setup.starter_type,
+                primary_database=request.creator_setup.primary_database,
+                cache_backend=request.creator_setup.cache_backend,
+                tech_stack=list(request.creator_setup.tech_stack),
+                data_sources=list(request.creator_setup.data_sources),
             ).design_spec or shared_design_spec
             modules.append(
                 CreateCourseModuleRequest(
@@ -249,14 +276,22 @@ class OpenAICoursePlanner:
 
     def _prompt_payload(self, request: GenerateCourseFromBriefRequest) -> dict[str, Any]:
         hint = request.package_type_hint.value if request.package_type_hint else "infer from the brief"
+        creator_setup = {
+            "starter_type": request.creator_setup.starter_type.value if request.creator_setup.starter_type else None,
+            "primary_database": request.creator_setup.primary_database,
+            "cache_backend": request.creator_setup.cache_backend,
+            "tech_stack": list(request.creator_setup.tech_stack),
+            "data_sources": [source.model_dump(mode="json") for source in request.creator_setup.data_sources],
+        }
         return {
             "goal": request.goal,
-            "learning_outcomes": request.learning_outcomes,
             "title_hint": request.title,
             "package_type_hint": hint,
+            "creator_setup": creator_setup,
             "constraints": [
                 "Produce 4 to 8 modules for progressive courses, or 3 to 6 modules for survey courses.",
-                "Every module needs a concrete title, summary, and one to three outcomes.",
+                "Use the creator setup as a real input to the module plan and runtime assumptions.",
+                "Every module needs a concrete title, summary, and one to three learning outcomes derived from the work learners will do.",
                 "Prefer progressive codebase courses when one evolving system is the teaching shape.",
                 "Prefer survey courses when modules are independent systems.",
                 "Keep modules tightly tied to the work the learner will actually build.",
@@ -306,7 +341,7 @@ class OpenAICoursePlanner:
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}
         if self.env_file:
-            config.update(self._load_env_file(self.env_file))
+            config.update(load_openai_env_file(self.env_file))
         for key in (
             "OPENAI_API_KEY",
             "OPENAI_MODEL",
@@ -321,26 +356,10 @@ class OpenAICoursePlanner:
         return config
 
     def _load_env_file(self, path: str) -> dict[str, str]:
-        env: dict[str, str] = {}
-        env_path = Path(path).expanduser()
-        if not env_path.exists():
-            return env
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            env[key.strip()] = self._strip_quotes(value.strip())
-        return env
+        return load_openai_env_file(path)
 
     def _strip_quotes(self, value: str) -> str:
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            return value[1:-1]
-        return value
+        return strip_quotes(value)
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         text = text.strip()

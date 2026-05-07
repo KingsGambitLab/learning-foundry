@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.registry import PackageType, RiskClass
 from app.domain.grader import ModuleGraderPlan, TaskAgentGraderPlanCollection
 from app.domain.grading import LiveGradeTaskAgentRequest, LiveTaskAgentGradeReport, ModuleGradeReport, TaskAgentSubmission
@@ -35,6 +36,7 @@ from app.services.assignment_design_inference import (
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
+from app.services.failure_context_builder import build_failure_context
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
 from app.services.learner_brief_builder import ensure_task_agent_module_briefs
 from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService, TaskAgentAuthoringStatus
@@ -203,8 +205,12 @@ class WorkflowService:
         inferred = infer_assignment_design(
             title=intake.title,
             problem_statement=intake.problem_statement,
-            learning_outcomes=intake.learning_outcomes,
             package_type_hint=intake.package_type_hint,
+            starter_type=intake.starter_type,
+            primary_database=intake.primary_database,
+            cache_backend=intake.cache_backend,
+            tech_stack=intake.tech_stack,
+            data_sources=intake.data_sources,
         )
         if inferred.design_spec is None:
             return self._create_blocked_run(
@@ -311,6 +317,7 @@ class WorkflowService:
         artifacts = WorkflowArtifacts(
             draft_kind=DraftKind.task_agent_spec,
             task_agent_spec=task_agent_spec,
+            ai_usage=authoring_result.usage or AIUsageSummary(),
             validation_summary=validation.model_dump(mode="json"),
             progression_preview=[summary.model_dump(mode="json") for summary in validation.module_gates],
             artifact_plan=self._artifact_plan_for_task_agent(task_agent_spec),
@@ -343,6 +350,11 @@ class WorkflowService:
                 "design_status": status.value,
                 "draft_kind": run.artifacts.draft_kind.value,
                 "origin_template": run.artifacts.origin_template,
+                "ai_usage": (
+                    authoring_result.usage.model_dump(mode="json")
+                    if authoring_result.usage is not None
+                    else None
+                ),
             },
         )
         if run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
@@ -359,6 +371,7 @@ class WorkflowService:
         spec = ensure_task_agent_module_briefs(spec, overwrite=False)
         validation = validate_task_agent_spec(spec)
         run.artifacts.task_agent_spec = spec
+        self._invalidate_generated_artifacts(run, reason="task-agent spec update")
         run.artifacts.validation_summary = validation.model_dump(mode="json")
         run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
         run.updated_at = datetime.now(UTC)
@@ -484,6 +497,7 @@ class WorkflowService:
         if spec is None:
             return run
 
+        latest_node = run.artifacts.node_executions[-1] if run.artifacts.node_executions else None
         revision = self.task_agent_authoring_service.revise_spec(
             spec=spec,
             title=run.title,
@@ -493,13 +507,29 @@ class WorkflowService:
             risk_class=spec.risk_class,
             overlays=spec.overlays,
             feedback=feedback,
+            failure_context=build_failure_context(run, latest_node) if latest_node is not None else None,
             origin_template=run.artifacts.origin_template,
         )
         run.artifacts.task_agent_spec = revision.spec
         run.artifacts.origin_template = revision.origin_template
+        self._invalidate_generated_artifacts(run, reason="human-feedback revision")
+        run.artifacts.ai_usage = merge_ai_usage(run.artifacts.ai_usage, revision.usage)
         if revision.notes:
             run.notes.extend(revision.notes)
         return run
+
+    def _invalidate_generated_artifacts(self, run: WorkflowRun, *, reason: str) -> None:
+        invalidated: list[str] = []
+        if run.artifacts.workspace_snapshot is not None:
+            invalidated.append("workspace snapshot")
+        if run.artifacts.materialized_bundle is not None:
+            invalidated.append("materialized bundle")
+        run.artifacts.workspace_snapshot = None
+        run.artifacts.materialized_bundle = None
+        if invalidated:
+            run.artifacts.notes.append(
+                f"Invalidated the {' and '.join(invalidated)} after {reason} so the next execution rematerializes learner-facing artifacts from the latest spec."
+            )
 
     def _artifact_plan_for_task_agent(self, spec: TaskAgentServiceSpec) -> list[str]:
         lines = [

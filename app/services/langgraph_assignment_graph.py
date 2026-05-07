@@ -18,7 +18,9 @@ from app.domain.workflow import (
     WorkflowRun,
 )
 from app.services.docker_sandbox_runner import DockerSandboxRunner
-from app.services.grader_planner import build_all_task_agent_grader_plans
+from app.services.failure_context_builder import build_failure_context
+from app.services.grader_planner import build_all_task_agent_review_area_plans
+from app.services.review_area_coverage import summarize_review_area_hidden_coverage
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_repair_service import TaskAgentRepairService
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
@@ -115,7 +117,15 @@ class LangGraphAssignmentGraph:
                 "end": END,
             },
         )
-        graph.add_edge("reviewer_pedagogy", "reviewer_tests")
+        graph.add_conditional_edges(
+            "reviewer_pedagogy",
+            self._after_reviewer_pedagogy,
+            {
+                "reviewer_repair": "reviewer_repair",
+                "reviewer_tests": "reviewer_tests",
+                "end": END,
+            },
+        )
         graph.add_conditional_edges(
             "reviewer_tests",
             self._after_reviewer_tests,
@@ -147,6 +157,14 @@ class LangGraphAssignmentGraph:
         latest = state["node_executions"][-1]
         if latest.status == WorkflowNodeStatus.passed:
             return "reviewer_pedagogy"
+        if state["reviewer_attempt"] < self.max_reviewer_attempts:
+            return "reviewer_repair"
+        return "end"
+
+    def _after_reviewer_pedagogy(self, state: AssignmentGraphState) -> ReviewerRoute:
+        latest = state["node_executions"][-1]
+        if latest.status == WorkflowNodeStatus.passed:
+            return "reviewer_tests"
         if state["reviewer_attempt"] < self.max_reviewer_attempts:
             return "reviewer_repair"
         return "end"
@@ -208,8 +226,17 @@ class LangGraphAssignmentGraph:
 
     def _authoring_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         latest = state["node_executions"][-1]
-        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(state["run"], latest)
-        run, spec_repaired, spec_message = self.repair_service.apply(run, latest)
+        failure_context = build_failure_context(state["run"], latest)
+        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(
+            state["run"],
+            latest,
+            failure_context=failure_context,
+        )
+        run, spec_repaired, spec_message = self.repair_service.apply(
+            run,
+            latest,
+            failure_context=failure_context,
+        )
         if spec_repaired:
             run = self.workspace_authoring_service.sync_workspace(run)
         repaired = workspace_repaired or spec_repaired
@@ -277,8 +304,17 @@ class LangGraphAssignmentGraph:
 
     def _reviewer_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         latest = state["node_executions"][-1]
-        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(state["run"], latest)
-        run, spec_repaired, spec_message = self.repair_service.apply(run, latest)
+        failure_context = build_failure_context(state["run"], latest)
+        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(
+            state["run"],
+            latest,
+            failure_context=failure_context,
+        )
+        run, spec_repaired, spec_message = self.repair_service.apply(
+            run,
+            latest,
+            failure_context=failure_context,
+        )
         if spec_repaired:
             run = self.workspace_authoring_service.sync_workspace(run)
         repaired = workspace_repaired or spec_repaired
@@ -401,7 +437,7 @@ class LangGraphAssignmentGraph:
                     category="pedagogy_review",
                     severity=ReviewerFindingSeverity.warning,
                     title="Short progressive ladder",
-                    detail="Progressive courses are easier to teach when they have at least three meaningful checkpoints.",
+                    detail="Progressive courses are easier to teach when they have at least three meaningful review areas.",
                 )
             )
         else:
@@ -410,7 +446,7 @@ class LangGraphAssignmentGraph:
                     category="pedagogy_review",
                     severity=ReviewerFindingSeverity.info,
                     title="Progression ladder present",
-                    detail=f"The assignment defines {module_count} module checkpoint(s).",
+                    detail=f"The assignment defines {module_count} learner review area(s).",
                 )
             )
 
@@ -422,7 +458,29 @@ class LangGraphAssignmentGraph:
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.warning,
                         title=f"{module.id} has no active gate",
-                        detail="Each module should light up at least one behavior or quality checkpoint.",
+                        detail="Each module should light up at least one behavior or quality bar.",
+                    )
+                )
+            if not module.learning_outcomes:
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=f"{module.id} is missing learning outcomes",
+                        detail="Derive concrete module outcomes from the learner task before sending this draft to human review.",
+                    )
+                )
+            elif any(
+                phrase in outcome.lower()
+                for outcome in module.learning_outcomes
+                for phrase in ["understand", "learn about", "be familiar"]
+            ):
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.warning,
+                        title=f"{module.id} outcomes are vague",
+                        detail="Rewrite learning outcomes as observable capabilities, not general understanding goals.",
                     )
                 )
             brief = module.learner_brief
@@ -466,6 +524,24 @@ class LangGraphAssignmentGraph:
                         detail="Rewrite the learner brief in task language instead of referencing hidden checkpoints or active checks.",
                     )
                 )
+            elif module.learning_outcomes:
+                alignment_text = " ".join(
+                    [brief.task_to_build, *brief.definition_of_done, *brief.example_scenarios]
+                ).lower()
+                if not any(
+                    token in alignment_text
+                    for outcome in module.learning_outcomes
+                    for token in outcome.lower().replace("`", "").replace("/", " ").split()
+                    if len(token.strip(".,:;()[]{}")) >= 5
+                ):
+                    findings.append(
+                        ReviewerFinding(
+                            category="pedagogy_review",
+                            severity=ReviewerFindingSeverity.warning,
+                            title=f"{module.id} outcomes may not match the learner task",
+                            detail="The stated outcomes do not obviously match the current learner brief. Review them before approval.",
+                        )
+                    )
 
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or any(
@@ -489,7 +565,11 @@ class LangGraphAssignmentGraph:
         assert spec is not None
 
         validation = validate_task_agent_spec(spec)
-        grader_plans = build_all_task_agent_grader_plans(spec)
+        grader_plans = build_all_task_agent_review_area_plans(spec)
+        hidden_coverage = {
+            summary.module_id: summary
+            for summary in summarize_review_area_hidden_coverage(spec)
+        }
         findings: list[ReviewerFinding] = []
         learner_checks_valid = True
 
@@ -513,14 +593,18 @@ class LangGraphAssignmentGraph:
                 )
             )
 
-        if grader_plans.module_plans:
-            final_plan = grader_plans.module_plans[-1]
+        for plan in grader_plans.module_plans:
+            coverage = hidden_coverage.get(plan.module_id)
+            hidden_case_count = len(coverage.hidden_case_ids) if coverage is not None else 0
             findings.append(
                 ReviewerFinding(
                     category="tests_review",
                     severity=ReviewerFindingSeverity.info,
-                    title="Final module test load",
-                    detail=f"The final checkpoint activates {final_plan.total_tests} tests.",
+                    title=f"Hidden grader coverage ready for {plan.module_id}",
+                    detail=(
+                        f"This review area activates {plan.total_tests} hidden test(s) across "
+                        f"{hidden_case_count} tagged eval case(s)."
+                    ),
                 )
             )
 

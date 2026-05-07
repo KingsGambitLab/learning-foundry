@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import os
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.ai import AIUsageSummary
 from app.domain.registry import PackageType, RiskClass
 from app.domain.task_agent import (
     AssignmentDesignSpec,
@@ -28,8 +28,15 @@ from app.domain.task_agent import (
     ConfidenceCalibrationJudgeTestParams,
     EscalationPrecisionTestParams,
 )
+from app.domain.workflow import FailureContext
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.openai_runtime_support import (
+    extract_openai_usage,
+    load_openai_env_file,
+    resolve_openai_env_file,
+    strip_quotes,
+)
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
 
 
@@ -96,6 +103,7 @@ class TaskAgentAuthoringResult(BaseModel):
     source: TaskAgentAuthoringSource
     notes: list[str] = Field(default_factory=list)
     status: TaskAgentAuthoringStatus
+    usage: AIUsageSummary | None = None
 
 
 def _matches_schema_rule(schema: dict[str, Any], value: Any) -> bool:
@@ -127,7 +135,7 @@ class OpenAITaskAgentAuthoringService:
         client_factory=None,
     ) -> None:
         self.enabled = enabled
-        self.env_file = env_file or os.environ.get("COURSE_GEN_OPENAI_ENV_FILE") or os.environ.get("OPENAI_ENV_FILE")
+        self.env_file = resolve_openai_env_file(env_file)
         self.model = model
         self.client_factory = client_factory
 
@@ -198,10 +206,11 @@ class OpenAITaskAgentAuthoringService:
                 source=TaskAgentAuthoringSource.deterministic_fallback,
                 notes=[status.message],
                 status=status,
+                usage=None,
             )
 
         try:
-            customization = self._generate_customization(
+            customization, usage = self._generate_customization(
                 base_spec=base_spec,
                 origin_template=origin_template,
                 title=title,
@@ -229,6 +238,7 @@ class OpenAITaskAgentAuthoringService:
                     *customization.notes[:3],
                 ],
                 status=status,
+                usage=usage,
             )
         except Exception as exc:  # pragma: no cover - exact SDK failures vary by environment
             fallback_status = TaskAgentAuthoringStatus(
@@ -246,6 +256,7 @@ class OpenAITaskAgentAuthoringService:
                 source=TaskAgentAuthoringSource.deterministic_fallback,
                 notes=[fallback_status.message],
                 status=fallback_status,
+                usage=None,
             )
 
     def revise_spec(
@@ -259,6 +270,7 @@ class OpenAITaskAgentAuthoringService:
         risk_class: RiskClass,
         overlays: list[str],
         feedback: str,
+        failure_context: FailureContext | None = None,
         origin_template: str | None = None,
     ) -> TaskAgentAuthoringResult:
         status = self.status()
@@ -270,10 +282,11 @@ class OpenAITaskAgentAuthoringService:
                 source=TaskAgentAuthoringSource.deterministic_fallback,
                 notes=[status.message],
                 status=status,
+                usage=None,
             )
 
         try:
-            customization = self._generate_customization(
+            customization, usage = self._generate_customization(
                 base_spec=spec,
                 origin_template=origin,
                 title=title,
@@ -284,6 +297,7 @@ class OpenAITaskAgentAuthoringService:
                 overlays=overlays,
                 model_id=status.model_id or "gpt-5.4",
                 feedback=feedback,
+                failure_context=failure_context,
             )
             revised_spec = self._apply_customization(spec, customization)
             revised_spec = ensure_task_agent_module_briefs(revised_spec, overwrite=True)
@@ -302,6 +316,7 @@ class OpenAITaskAgentAuthoringService:
                     *customization.notes[:3],
                 ],
                 status=status,
+                usage=usage,
             )
         except Exception as exc:  # pragma: no cover - exact SDK failures vary by environment
             fallback_status = TaskAgentAuthoringStatus(
@@ -319,6 +334,7 @@ class OpenAITaskAgentAuthoringService:
                 source=TaskAgentAuthoringSource.deterministic_fallback,
                 notes=[fallback_status.message],
                 status=fallback_status,
+                usage=None,
             )
 
     def _generate_customization(
@@ -334,7 +350,8 @@ class OpenAITaskAgentAuthoringService:
         overlays: list[str],
         model_id: str,
         feedback: str | None = None,
-    ) -> TaskAgentCustomization:
+        failure_context: FailureContext | None = None,
+    ) -> tuple[TaskAgentCustomization, AIUsageSummary | None]:
         config = self._config()
         client = self._client(
             api_key=config.get("OPENAI_API_KEY", ""),
@@ -350,6 +367,7 @@ class OpenAITaskAgentAuthoringService:
             risk_class=risk_class,
             overlays=overlays,
             feedback=feedback,
+            failure_context=failure_context,
         )
         response = client.responses.create(
             model=model_id,
@@ -358,18 +376,18 @@ class OpenAITaskAgentAuthoringService:
                     "role": "system",
                     "content": (
                         "You customize learner-ready backend assignments for software engineering courses. "
-                        "Return JSON only. Do not rename module ids, tool ids, or eval case ids. "
-                        "Keep the assignment production-minded, teachable, and safety-aware. "
-                        "Preserve grounded contracts, citations, abstention behavior, and approval gates whenever they apply. "
-                        "If human review feedback is provided, revise the current assignment to address it directly."
-                    ),
+                            "Return JSON only. Do not rename module ids, tool ids, or eval case ids. "
+                            "Keep the assignment production-minded, teachable, and safety-aware. "
+                            "Preserve grounded contracts, citations, abstention behavior, and approval gates whenever they apply. "
+                            "If human review feedback or failure context is provided, revise the current assignment to address it directly."
+                        ),
                 },
                 {"role": "user", "content": json.dumps(prompt, indent=2)},
             ],
             temperature=0.2,
         )
         payload = self._extract_json(getattr(response, "output_text", ""))
-        return TaskAgentCustomization.model_validate(payload)
+        return TaskAgentCustomization.model_validate(payload), extract_openai_usage(response, model_id)
 
     def _apply_customization(
         self,
@@ -564,6 +582,7 @@ class OpenAITaskAgentAuthoringService:
         risk_class: RiskClass,
         overlays: list[str],
         feedback: str | None = None,
+        failure_context: FailureContext | None = None,
     ) -> dict[str, Any]:
         output_fields = list((base_spec.output_schema.get("properties") or {}).keys())[:3]
         example_expected_output = {field: f"<{field}>" for field in output_fields}
@@ -600,7 +619,7 @@ class OpenAITaskAgentAuthoringService:
                             "requires_approval": False,
                             "must_use_any_of_tools": ["existing_tool_id"],
                             "must_not_use_tools": ["existing_tool_id"],
-                            "tags": ["optional"]
+                            "tags": ["module_1"]
                         }
                     ],
                     "quality_targets": {
@@ -613,6 +632,7 @@ class OpenAITaskAgentAuthoringService:
                     },
                     "notes": ["short notes"]
                 },
+                "eval_case_tag_rule": "Every eval case should carry one or more review-area module ids so hidden grader feedback can map back to a learner-visible deliverable.",
             },
             "base_spec": {
                 "summary": base_spec.summary,
@@ -644,6 +664,7 @@ class OpenAITaskAgentAuthoringService:
                         "requires_approval": case.requires_approval,
                         "must_use_any_of_tools": case.must_use_any_of_tools,
                         "must_not_use_tools": case.must_not_use_tools,
+                        "tags": case.tags,
                     }
                     for case in base_spec.eval_dataset.cases
                 ],
@@ -657,6 +678,8 @@ class OpenAITaskAgentAuthoringService:
         }
         if feedback:
             payload["human_review_feedback"] = feedback
+        if failure_context is not None:
+            payload["failure_context"] = failure_context.model_dump(mode="json")
         return payload
 
     def _client(self, *, api_key: str, base_url: str | None):
@@ -671,7 +694,7 @@ class OpenAITaskAgentAuthoringService:
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}
         if self.env_file:
-            config.update(self._load_env_file(self.env_file))
+            config.update(load_openai_env_file(self.env_file))
         for key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"):
             value = os.environ.get(key)
             if value:
@@ -683,26 +706,10 @@ class OpenAITaskAgentAuthoringService:
         return config
 
     def _load_env_file(self, path: str) -> dict[str, str]:
-        env: dict[str, str] = {}
-        env_path = Path(path).expanduser()
-        if not env_path.exists():
-            return env
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            env[key.strip()] = self._strip_quotes(value.strip())
-        return env
+        return load_openai_env_file(path)
 
     def _strip_quotes(self, value: str) -> str:
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            return value[1:-1]
-        return value
+        return strip_quotes(value)
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         if not text:

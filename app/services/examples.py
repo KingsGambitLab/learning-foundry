@@ -75,7 +75,7 @@ def get_support_triage_example() -> TaskAgentServiceSpec:
         course_structure=CourseStructureSpec(
             package_type=PackageType.progressive_codebase_course,
             workspace_scope=WorkspaceScope.shared_course_workspace,
-            progression_mode=ProgressionMode.cumulative_module_gates,
+            progression_mode=ProgressionMode.independent_modules,
             shared_codebase=True,
         ),
         runtime_dependencies=RuntimeDependencySpec(
@@ -99,7 +99,7 @@ def get_support_triage_example() -> TaskAgentServiceSpec:
         assessment_strategy=AssessmentStrategySpec(
             public_checks_required=True,
             hidden_grader_required=True,
-            cumulative_module_gates=True,
+            cumulative_module_gates=False,
             learner_submission_enabled=True,
         ),
         supported_modes=[

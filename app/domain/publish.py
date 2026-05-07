@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.domain.learner import LearnerWorkspaceScope
 from app.domain.registry import PackageType
@@ -16,20 +16,19 @@ class LearnerPackageFile(BaseModel):
 
 
 class LearnerModulePackage(BaseModel):
-    module_id: str
-    course_module_slug: str | None = None
+    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    course_deliverable_slug: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("course_deliverable_slug", "course_module_slug"),
+    )
     title: str
     objective: str
-    module_index: int
+    deliverable_index: int = Field(validation_alias=AliasChoices("deliverable_index", "module_index"))
     learner_brief: LearnerModuleBrief
     public_checks: list[PublicCheckSpec] = Field(default_factory=list)
     content_markdown: str
     starter_readme: str
     learning_outcomes: list[str] = Field(default_factory=list)
-    checkpoint_module_ids: list[str] = Field(default_factory=list)
-    checkpoint_titles: list[str] = Field(default_factory=list)
-    entry_checkpoint_id: str | None = None
-    completion_checkpoint_id: str | None = None
     active_test_ids: list[str] = Field(default_factory=list)
     completion_rule: str
     visible_files: list[str] = Field(default_factory=list)
@@ -43,7 +42,11 @@ class LearnerCoursePackage(BaseModel):
     package_type: PackageType
     published_at: datetime
     workspace_scope: LearnerWorkspaceScope
-    modules: list[LearnerModulePackage] = Field(default_factory=list)
+    project_brief_markdown: str = ""
+    deliverables: list[LearnerModulePackage] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("deliverables", "modules"),
+    )
     notes: list[str] = Field(default_factory=list)
 
 
@@ -97,7 +100,7 @@ class PublishedVersionSummary(BaseModel):
     is_latest: bool = False
     default_for_new_enrollments: bool = False
     learner_count: int = 0
-    module_count: int = 0
+    deliverable_count: int = Field(default=0, validation_alias=AliasChoices("deliverable_count", "module_count"))
     compatibility: str = "new_enrollments_only"
     changes: list[str] = Field(default_factory=list)
 

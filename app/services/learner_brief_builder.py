@@ -10,6 +10,7 @@ from app.domain.task_agent import (
     TaskAgentServiceSpec,
     TaskEvalCase,
 )
+from app.services.review_area_coverage import apply_inferred_review_area_case_tags
 
 
 def ensure_task_agent_module_briefs(
@@ -22,6 +23,9 @@ def ensure_task_agent_module_briefs(
             module.learner_brief = build_task_agent_module_brief(spec, module)
         if overwrite or not module.public_checks:
             module.public_checks = build_task_agent_public_checks(spec, module)
+        if overwrite or not module.learning_outcomes:
+            module.learning_outcomes = build_task_agent_module_learning_outcomes(spec, module)
+    apply_inferred_review_area_case_tags(spec)
     return spec
 
 
@@ -38,12 +42,12 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
 
     if module_index == 1:
         why_this_module_matters = (
-            "This is the first learner-visible checkpoint. Get the service returning correct, structured results "
+            "This is the first learner-visible review area. Get the service returning correct, structured results "
             "before you worry about richer controls."
         )
     else:
         why_this_module_matters = (
-            "This module builds on the working service from earlier checkpoints and adds one production-facing "
+            "This module builds on the working service from earlier review areas and adds one production-facing "
             "capability without changing the overall contract."
         )
 
@@ -74,7 +78,7 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
 
     non_goals = [
         "Do not redesign the project structure or edit the runtime helpers unless the brief explicitly asks for it.",
-        "Do not optimize for later modules before this checkpoint works end to end.",
+        "Do not optimize for later modules before this module works end to end.",
     ]
 
     keyword_map: list[tuple[str, list[str], list[str], list[str]]] = [
@@ -183,11 +187,11 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
                 "Ship a solution that feels production-ready, not just barely correct on one path.",
             ],
             [
-                "Use the earlier checkpoints as building blocks; this is mostly about integration and polish.",
+                "Use the earlier modules as building blocks; this is mostly about integration and polish.",
                 "Keep the public contract stable while improving quality across the visible scenarios.",
             ],
             [
-                "Do not throw away earlier checkpoint behavior to chase a single metric.",
+                "Do not throw away earlier module behavior to chase a single metric.",
             ],
         ),
     ]
@@ -215,10 +219,14 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
     task_outputs = _schema_fields(spec.output_schema)
     examples = _example_scenarios(spec.eval_dataset.cases)
     title_lower = module.title.lower()
+    visible_sources = _learner_visible_data_sources(spec)
+    primary_source = visible_sources[0] if visible_sources else None
+    source_title = primary_source.title if primary_source is not None else "the visible corpus"
+    source_path = primary_source.workspace_path if primary_source is not None else "data/corpus.json"
 
     if module_index == 1:
         why_this_module_matters = (
-            "This first checkpoint gets the learner-visible question answering contract into a usable state. "
+            "This first review area gets the learner-visible question answering contract into a usable state. "
             "Start by returning grounded answers with clear citation output before you optimize retrieval depth."
         )
     else:
@@ -228,9 +236,9 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
         )
 
     task_to_build = (
-        "Edit `app.py` to answer questions from the learner-visible corpus and return a grounded response through "
+        f"Edit `app.py` to answer questions from `{source_path}` and return a grounded response through "
         "the public `/run` endpoint. Keep the response schema stable, cite supporting documents, and abstain when "
-        "the corpus does not support a confident answer."
+        f"{source_title} does not support a confident answer."
     )
 
     definition_of_done = [
@@ -251,15 +259,15 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
 
     implementation_hints = [
         "Start in `app.py`; treat `runtime/` helpers and `starter_manifest.json` as read-only support files.",
-        "Use `data/corpus.json` as your visible corpus fixture instead of calling external services.",
+        f"Use `{source_path}` as the learner-visible data source instead of calling external services.",
         "Keep citation ids stable and learner-readable so the grader can verify what evidence you used.",
-        "Prefer explicit abstention rules over guessing when the corpus does not support the question.",
+        f"Prefer explicit abstention rules over guessing when {source_title} does not support the question.",
     ]
 
     non_goals = [
         "Do not add network calls or external vector databases in this learner starter.",
-        "Do not fabricate citations or answer beyond what the visible corpus supports.",
-        "Do not redesign the project structure before this checkpoint works end to end.",
+        f"Do not fabricate citations or answer beyond what {source_title} supports.",
+        "Do not redesign the project structure before this module works end to end.",
     ]
 
     keyword_map: list[tuple[str, list[str], list[str], list[str]]] = [
@@ -279,11 +287,11 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
         (
             "retrieval",
             [
-                "Search the visible corpus before composing the answer.",
+                f"Search {source_title} before composing the answer.",
                 "Pick the passages that best support the final answer instead of dumping every match.",
             ],
             [
-                "Normalize the incoming query before comparing it with the corpus fixture.",
+                f"Normalize the incoming query before comparing it with `{source_path}`.",
                 "Keep retrieval logic deterministic so grader failures are easier to debug.",
             ],
             [
@@ -293,7 +301,7 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
         (
             "abstention",
             [
-                "When the visible corpus lacks support, return an abstained answer instead of guessing.",
+                f"When {source_title} lacks support, return an abstained answer instead of guessing.",
             ],
             [
                 "Treat missing support as a normal outcome and make that branch obvious in the code.",
@@ -355,6 +363,80 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
         implementation_hints=_dedupe(implementation_hints, limit=5),
         non_goals=_dedupe(non_goals, limit=4),
     )
+
+
+def _learner_visible_data_sources(spec: TaskAgentServiceSpec):
+    return [
+        source
+        for source in spec.runtime_dependencies.data_sources
+        if source.learner_visible and source.workspace_path
+    ]
+
+
+def build_task_agent_module_learning_outcomes(
+    spec: TaskAgentServiceSpec,
+    module: ModuleSpec,
+) -> list[str]:
+    brief = module.learner_brief or build_task_agent_module_brief(spec, module)
+    public_checks = module.public_checks or build_task_agent_public_checks(spec, module)
+    title_lower = module.title.lower()
+
+    outcomes: list[str] = []
+    if "structured output" in title_lower or "run contract" in title_lower:
+        outcomes.extend(
+            [
+                "Implement a stable `/run` contract with the required structured response fields.",
+                "Return learner-visible results that match the published output schema on each supported case.",
+            ]
+        )
+    elif "tool" in title_lower:
+        outcomes.extend(
+            [
+                "Choose and invoke the right tools for each supported workflow path.",
+                "Keep the run contract stable while tool usage becomes observable and debuggable.",
+            ]
+        )
+    elif "retrieval" in title_lower or "citation" in title_lower or "grounded" in title_lower:
+        outcomes.extend(
+            [
+                "Use the learner-visible data source to return relevant evidence for each request.",
+                "Keep grounded answers faithful to retrieved evidence instead of guessing.",
+            ]
+        )
+    elif "cache" in title_lower:
+        outcomes.extend(
+            [
+                "Use the configured cache to improve read performance without breaking correctness.",
+                "Explain the freshness and invalidation tradeoffs introduced by the cache layer.",
+            ]
+        )
+    elif "lock" in title_lower or "concurrency" in title_lower or "retry" in title_lower:
+        outcomes.extend(
+            [
+                "Protect the critical workflow path under concurrent requests and duplicate submissions.",
+                "Use locking, retries, or version-aware writes to keep core invariants intact.",
+            ]
+        )
+    elif "observability" in title_lower or "trace" in title_lower:
+        outcomes.extend(
+            [
+                "Make the module observable enough to explain what happened during a run.",
+                "Emit traces or diagnostics that turn failing scenarios into debuggable evidence.",
+            ]
+        )
+
+    outcomes.extend(_outcomes_from_definition_of_done(brief.definition_of_done))
+    outcomes.extend(check.learner_goal for check in public_checks[:2])
+
+    if not outcomes:
+        outcomes.extend(
+            [
+                f"Build the module so it can {module.objective.strip().rstrip('.').lower()}.",
+                "Use the learner-visible checks to prove the module behaves correctly before submission.",
+            ]
+        )
+
+    return _dedupe(outcomes, limit=4)
 
 
 def build_task_agent_public_checks(
@@ -580,6 +662,25 @@ def _preview_mapping(payload: dict) -> str:
     for key, value in list(payload.items())[:3]:
         preview_parts.append(f"{key}={value!r}")
     return "{" + ", ".join(preview_parts) + "}"
+
+
+def _outcomes_from_definition_of_done(items: Iterable[str]) -> list[str]:
+    outcomes: list[str] = []
+    for item in items:
+        cleaned = item.strip().rstrip(".")
+        if not cleaned:
+            continue
+        if cleaned.lower().startswith("`/run`"):
+            outcomes.append("Keep the public contract stable while extending the module behavior.")
+            continue
+        if cleaned.lower().startswith("the response includes"):
+            outcomes.append("Return responses that satisfy the learner-visible contract consistently.")
+            continue
+        if cleaned.lower().startswith("the service keeps"):
+            outcomes.append("Preserve the working service surface while improving the module internals.")
+            continue
+        outcomes.append(cleaned)
+    return outcomes
 
 
 def _dedupe(items: Iterable[str], *, limit: int | None = None) -> list[str]:

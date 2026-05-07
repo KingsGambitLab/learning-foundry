@@ -93,35 +93,27 @@ class PublishSnapshotService:
         spec = workflow_run.artifacts.task_agent_spec
         assert spec is not None
 
-        module_packages: list[LearnerModulePackage] = []
-        checkpoint_groups = self._checkpoint_groups(course_run, spec)
-        spec_modules_by_id = {module.id: module for module in spec.modules}
+        deliverable_packages: list[LearnerModulePackage] = []
+        spec_modules = list(spec.modules)
         for index, course_module in enumerate(course_run.modules, start=1):
-            checkpoint_ids = checkpoint_groups[index - 1]
-            checkpoint_modules = [
-                spec_modules_by_id[checkpoint_id]
-                for checkpoint_id in checkpoint_ids
-                if checkpoint_id in spec_modules_by_id
-            ]
-            checkpoint_titles = [module.title for module in checkpoint_modules]
-            entry_checkpoint_id = checkpoint_ids[0] if checkpoint_ids else None
-            completion_checkpoint_id = checkpoint_ids[-1] if checkpoint_ids else None
-            gate = spec.gate_for(completion_checkpoint_id) if completion_checkpoint_id else None
+            spec_module = spec_modules[index - 1] if index - 1 < len(spec_modules) else None
+            gate = spec.gate_for(spec_module.id) if spec_module is not None else None
             learner_brief = combine_learner_module_briefs(
                 fallback_task=(
                     f"Extend the learner-visible starter so it satisfies {course_module.summary.rstrip('.').lower()}."
                 ),
                 fallback_why=course_module.summary,
                 briefs=[
-                    module.learner_brief
-                    for module in checkpoint_modules
-                    if module.learner_brief is not None
+                    aligned_module.learner_brief
+                    for aligned_module in [spec_module]
+                    if aligned_module is not None and aligned_module.learner_brief is not None
                 ],
             )
             public_checks = combine_public_checks(
                 check
-                for module in checkpoint_modules
-                for check in module.public_checks
+                for aligned_module in [spec_module]
+                if aligned_module is not None
+                for check in aligned_module.public_checks
             )
             content_markdown = self._learner_module_markdown(
                 course_module=course_module,
@@ -137,26 +129,22 @@ class PublishSnapshotService:
             seed_files = self._workspace_seed_files(
                 spec=spec,
                 workflow_run_id=workflow_run.id,
-                entry_checkpoint_id=entry_checkpoint_id,
+                spec_module_id=(spec_module.id if spec_module is not None else None),
                 content_markdown=content_markdown,
                 starter_readme=starter_readme,
             )
-            module_packages.append(
+            deliverable_packages.append(
                 LearnerModulePackage(
-                    module_id=course_module.module_slug,
-                    course_module_slug=course_module.module_slug,
+                    deliverable_id=course_module.deliverable_slug,
+                    course_deliverable_slug=course_module.deliverable_slug,
                     title=course_module.title,
                     objective=course_module.summary,
-                    module_index=index,
+                    deliverable_index=index,
                     learner_brief=learner_brief,
                     public_checks=public_checks,
                     content_markdown=content_markdown,
                     starter_readme=starter_readme,
                     learning_outcomes=list(course_module.learning_outcomes),
-                    checkpoint_module_ids=checkpoint_ids,
-                    checkpoint_titles=checkpoint_titles,
-                    entry_checkpoint_id=entry_checkpoint_id,
-                    completion_checkpoint_id=completion_checkpoint_id,
                     active_test_ids=list(gate.active_test_ids) if gate is not None else [],
                     completion_rule=(
                         learner_brief.definition_of_done[0]
@@ -175,41 +163,46 @@ class PublishSnapshotService:
             package_type=course_run.package_type,
             published_at=datetime.now(UTC),
             workspace_scope=LearnerWorkspaceScope.shared_course,
-            modules=module_packages,
+            project_brief_markdown=self._project_brief_markdown(course_run, deliverable_packages),
+            deliverables=deliverable_packages,
             notes=[
-                "Learner-visible package derived from the published course module ladder.",
-                "Each learner module is pinned to one or more hidden assignment checkpoints so grading can evolve without changing the learner-facing course structure.",
-                "Module progression is pinned to this snapshot so authors can keep iterating on future drafts without affecting active learners.",
+                "Learner-visible package derived from the published project deliverables.",
+                "Each deliverable is backed by the matching review area in the shared assignment spec.",
+                "Active learners stay pinned to this snapshot while authors keep iterating on future drafts.",
             ],
         )
 
-    def _checkpoint_groups(self, course_run: CourseRun, spec) -> list[list[str]]:
-        course_modules = course_run.modules
-        checkpoint_ids = [module.id for module in spec.modules]
-        if not course_modules:
-            return []
-        if not checkpoint_ids:
-            return [[] for _ in course_modules]
-
-        explicit_groups = [list(module.checkpoint_module_ids) for module in course_modules]
-        if all(group for group in explicit_groups):
-            ordered_groups: list[list[str]] = []
-            assigned: list[str] = []
-            for group in explicit_groups:
-                ordered = [checkpoint_id for checkpoint_id in checkpoint_ids if checkpoint_id in group]
-                ordered_groups.append(ordered)
-                assigned.extend(ordered)
-            if len(assigned) == len(set(assigned)) and assigned == checkpoint_ids:
-                return ordered_groups
-
-        total_course_modules = len(course_modules)
-        total_checkpoints = len(checkpoint_ids)
-        groups: list[list[str]] = []
-        for index in range(total_course_modules):
-            start = (index * total_checkpoints) // total_course_modules
-            end = ((index + 1) * total_checkpoints) // total_course_modules
-            groups.append(checkpoint_ids[start:end])
-        return groups
+    def _project_brief_markdown(
+        self,
+        course_run: CourseRun,
+        deliverables: list[LearnerModulePackage],
+    ) -> str:
+        lines = [
+            f"# {course_run.title}",
+            "",
+            course_run.goal or course_run.summary,
+            "",
+            "## What we are building",
+            "",
+            course_run.summary or "Build the shared project in the workspace.",
+            "",
+            "## What review will look at",
+            "",
+        ]
+        for index, deliverable in enumerate(deliverables, start=1):
+            lines.append(f"{index}. **{deliverable.title}** - {deliverable.objective}")
+        lines.extend(
+            [
+                "",
+                "## How to work",
+                "",
+                "- Open the shared VS Code workspace.",
+                "- Run the visible checks while you iterate.",
+                "- Submit the whole project for review.",
+                "- Use the deliverable scorecard to see which areas still need work.",
+            ]
+        )
+        return "\n".join(lines).strip() + "\n"
 
     def _learner_module_markdown(
         self,
@@ -246,73 +239,50 @@ class PublishSnapshotService:
         *,
         spec,
         workflow_run_id: str,
-        entry_checkpoint_id: str | None,
+        spec_module_id: str | None,
         content_markdown: str,
         starter_readme: str,
     ) -> list[LearnerPackageFile]:
         seed_files: list[LearnerPackageFile] = [
-            LearnerPackageFile(
-                relative_path="README.md",
-                media_type="text/markdown",
-                content=starter_readme,
-            ),
-            LearnerPackageFile(
-                relative_path="module_content.md",
-                media_type="text/markdown",
-                content=content_markdown,
-            ),
             self._read_seed_file(workflow_run_id, "runtime/__init__.py", "public/runtime/__init__.py"),
             self._read_seed_file(workflow_run_id, "runtime/task_agent_runtime.py", "public/runtime/task_agent_runtime.py"),
             self._read_seed_file(workflow_run_id, "runtime/requirements.txt", "public/runtime/requirements.txt"),
         ]
-        if entry_checkpoint_id is None:
+        if spec_module_id is None:
             return seed_files
         seed_files[:0] = [
-            self._read_seed_file(workflow_run_id, "app.py", f"public/starter/{entry_checkpoint_id}/app.py"),
+            self._read_seed_file(workflow_run_id, "app.py", f"public/starter/{spec_module_id}/app.py"),
             self._read_seed_file(
                 workflow_run_id,
                 "starter_manifest.json",
-                f"public/starter/{entry_checkpoint_id}/starter_manifest.json",
+                f"public/starter/{spec_module_id}/starter_manifest.json",
             ),
             self._read_seed_file(
                 workflow_run_id,
                 "checks/run_visible_checks.py",
-                f"public/starter/{entry_checkpoint_id}/checks/run_visible_checks.py",
+                f"public/starter/{spec_module_id}/checks/run_visible_checks.py",
             ),
             self._read_seed_file(
                 workflow_run_id,
                 ".vscode/tasks.json",
-                f"public/starter/{entry_checkpoint_id}/.vscode/tasks.json",
+                f"public/starter/{spec_module_id}/.vscode/tasks.json",
             ),
         ]
-        if "data/corpus.json" in set(spec.runtime_dependencies.visible_fixture_files):
-            seed_files.append(
-                LearnerPackageFile(
-                    relative_path="data/corpus.json",
-                    media_type="application/json",
-                    content=json.dumps(
-                        [
-                            {
-                                "doc_id": "doc:ada_lovelace",
-                                "title": "Ada Lovelace",
-                                "content": "Ada Lovelace was born in London, England.",
-                            },
-                            {
-                                "doc_id": "doc:alan_turing",
-                                "title": "Alan Turing",
-                                "content": "Alan Turing was an English mathematician and computer scientist.",
-                            },
-                            {
-                                "doc_id": "doc:grounding_policy",
-                                "title": "Grounding policy",
-                                "content": "Answer only from the visible corpus and abstain when support is missing.",
-                            },
-                        ],
-                        indent=2,
+        seen_paths = {file.relative_path for file in seed_files}
+        for relative_path in spec.runtime_dependencies.visible_fixture_files:
+            if not relative_path or relative_path in seen_paths:
+                continue
+            try:
+                seed_files.append(
+                    self._read_seed_file(
+                        workflow_run_id,
+                        relative_path,
+                        f"public/starter/{spec_module_id}/{relative_path}",
                     )
-                    + "\n",
                 )
-            )
+                seen_paths.add(relative_path)
+            except FileNotFoundError:
+                continue
         return seed_files
 
     def _read_seed_file(

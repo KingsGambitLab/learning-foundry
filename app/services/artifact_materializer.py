@@ -20,6 +20,7 @@ from app.services.learner_brief_builder import (
     render_learner_module_markdown,
     render_learner_starter_readme,
 )
+from app.services.creator_asset_service import CreatorAssetService
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_manifest,
     render_task_agent_module_app,
@@ -34,9 +35,14 @@ def default_generated_dir() -> Path:
 
 
 class ArtifactMaterializer:
-    def __init__(self, base_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        base_dir: str | Path | None = None,
+        creator_asset_service: CreatorAssetService | None = None,
+    ) -> None:
         self.base_dir = Path(base_dir or default_generated_dir())
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.creator_asset_service = creator_asset_service
 
     def materialize_run(self, run: WorkflowRun, overwrite: bool = True) -> MaterializedBundle:
         bundle_root = self.base_dir / run.id
@@ -312,6 +318,12 @@ class ArtifactMaterializer:
                 files,
                 bundle_root,
             )
+            self._write_visible_fixture_files(
+                spec=spec,
+                module_dir=module_dir,
+                files=files,
+                bundle_root=bundle_root,
+            )
 
     def _task_agent_readme(self, spec: TaskAgentServiceSpec) -> str:
         tool_lines = "\n".join(
@@ -370,6 +382,79 @@ class ArtifactMaterializer:
                 ]
             )
         return "\n".join(lines) + "\n"
+
+    def _write_visible_fixture_files(
+        self,
+        *,
+        spec: TaskAgentServiceSpec,
+        module_dir: Path,
+        files: list[BundleFile],
+        bundle_root: Path,
+    ) -> None:
+        visible_paths = list(dict.fromkeys(spec.runtime_dependencies.visible_fixture_files))
+        sources_by_path = {
+            source.workspace_path: source
+            for source in spec.runtime_dependencies.data_sources
+            if source.learner_visible and source.workspace_path
+        }
+        for relative_path in visible_paths:
+            if not relative_path:
+                continue
+            content = self._visible_fixture_content(relative_path, sources_by_path.get(relative_path))
+            self._write_text(
+                module_dir / relative_path,
+                content,
+                ArtifactVisibility.public,
+                files,
+                bundle_root,
+            )
+
+    def _visible_fixture_content(self, relative_path: str, source) -> str:
+        if source is not None and source.asset_id and self.creator_asset_service is not None:
+            try:
+                _record, content = self.creator_asset_service.read_asset_text(source.asset_id)
+                return content if content.endswith("\n") else content + "\n"
+            except (FileNotFoundError, KeyError):
+                pass
+
+        if relative_path == "data/corpus.json":
+            return json.dumps(
+                [
+                    {
+                        "doc_id": "doc:ada_lovelace",
+                        "title": "Ada Lovelace",
+                        "content": "Ada Lovelace was born in London, England.",
+                    },
+                    {
+                        "doc_id": "doc:alan_turing",
+                        "title": "Alan Turing",
+                        "content": "Alan Turing was an English mathematician and computer scientist.",
+                    },
+                    {
+                        "doc_id": "doc:grounding_policy",
+                        "title": "Grounding policy",
+                        "content": "Answer only from the visible corpus and abstain when support is missing.",
+                    },
+                ],
+                indent=2,
+            ) + "\n"
+
+        description = (getattr(source, "description", None) or "Visible learner fixture.").strip()
+        suffix = Path(relative_path).suffix.lower()
+        if suffix == ".json":
+            return json.dumps(
+                {
+                    "title": getattr(source, "title", "Uploaded data source"),
+                    "description": description,
+                    "items": [],
+                },
+                indent=2,
+            ) + "\n"
+        if suffix == ".csv":
+            return "id,value\n"
+        if suffix in {".md", ".markdown"}:
+            return f"# {getattr(source, 'title', 'Uploaded data source')}\n\n{description}\n"
+        return description + "\n"
 
     def _module_content(self, spec: TaskAgentServiceSpec, module_id: str) -> str:
         module = next(item for item in spec.modules if item.id == module_id)

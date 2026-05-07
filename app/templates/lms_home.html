@@ -37,7 +37,20 @@
                   <div class="hero-copy">
                     <p class="eyebrow">Learner LMS</p>
                     <h1>Checking your latest course progress...</h1>
-                    <p>We keep your active enrollment, workspace, and submission history pinned here so you can resume quickly.</p>
+                    <p>We keep your shared workspace, project brief, and review feedback pinned here so you can resume quickly.</p>
+                  </div>
+                </section>
+
+                <section id="deliverables-panel" class="panel hidden">
+                  <div class="panel-header learner-panel-header">
+                    <div>
+                      <p class="card-eyebrow">Project review</p>
+                      <h2 id="deliverables-title">Deliverables</h2>
+                      <p id="deliverables-caption" class="panel-copy">Review will score the whole project, then group feedback by deliverable.</p>
+                    </div>
+                  </div>
+                  <div class="panel-body" id="deliverables-body">
+                    <p class="empty">Open a course to see its deliverables.</p>
                   </div>
                 </section>
 
@@ -45,7 +58,7 @@
                   <div class="panel-header learner-panel-header">
                     <div>
                       <p class="card-eyebrow">Grading</p>
-                      <h2>Latest grade &amp; submission history</h2>
+                      <h2>Latest review &amp; submission history</h2>
                     </div>
                   </div>
                   <div class="panel-body" id="submission-history-body">
@@ -53,52 +66,7 @@
                   </div>
                 </section>
               </section>
-
             </div>
-
-            <aside id="course-sidebar" class="course-sidebar">
-              <button
-                id="sidebar-rail"
-                class="sidebar-rail"
-                type="button"
-                aria-label="Show modules"
-                title="Show modules"
-                data-toggle-progress
-              >
-                <span class="sidebar-rail-icon" aria-hidden="true">›</span>
-                <span class="sidebar-rail-label">Modules</span>
-              </button>
-              <section id="experience-panel" class="panel hidden">
-                <div class="panel-header learner-panel-header">
-                  <div>
-                    <p class="card-eyebrow">Course progress</p>
-                    <h2 id="experience-title">Current module ladder</h2>
-                    <p id="experience-caption" class="panel-copy">Track what is ready now, what is locked, and what you have already passed.</p>
-                  </div>
-                  <button
-                    id="sidebar-collapse"
-                    class="sidebar-collapse"
-                    type="button"
-                    aria-label="Hide modules"
-                    title="Hide modules"
-                    data-toggle-progress
-                  >‹</button>
-                </div>
-                <div class="panel-body experience-layout">
-                  <section class="summary-card experience-block">
-                    <div class="experience-section-header">
-                      <div>
-                        <p class="card-eyebrow">All modules</p>
-                        <h3 id="module-list-title">Module ladder</h3>
-                      </div>
-                    </div>
-                    <div id="module-timeline" class="module-rows">
-                      <div class="empty">Open a course to see its module ladder.</div>
-                    </div>
-                  </section>
-                </div>
-              </section>
-            </aside>
           </div>
         </main>
       </div>

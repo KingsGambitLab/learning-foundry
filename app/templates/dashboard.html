@@ -60,7 +60,7 @@
                 <span class="workflow-step-index">2</span>
                 <div>
                   <strong>Plan</strong>
-                  <p>Generate the module ladder and assignment workflow.</p>
+                  <p>Generate the project deliverables and assignment workflow.</p>
                 </div>
               </li>
               <li class="workflow-step-card up-next" data-workflow-step="review">
@@ -69,7 +69,7 @@
                   <strong>Review</strong>
                   <p>Approve specs, checkpoints, and review bundles.</p>
                   <div id="workflow-review-progress" class="workflow-step-progress hidden">
-                    <span id="workflow-progress-count">0 of 0 modules ready</span>
+                    <span id="workflow-progress-count">0 of 0 deliverables ready</span>
                     <div class="workflow-step-progress-bar" aria-hidden="true">
                       <span id="workflow-progress-bar"></span>
                     </div>
@@ -126,8 +126,13 @@
                   </details>
                 </div>
                 <div class="draft-context-actions">
-                  <button id="sync-button" class="button" type="button" disabled>Refresh draft</button>
-                  <button id="materialize-button" class="button" type="button" disabled>Prepare review bundle</button>
+                  <button
+                    id="materialize-button"
+                    class="button"
+                    type="button"
+                    title="Create the review package and learner-facing files used for preview and publishing."
+                    disabled
+                  >Build review package</button>
                   <button id="publish-button" class="button primary" type="button" disabled>Publish this version</button>
                   <button id="create-revision-button" class="button subtle" type="button" disabled>Start new version</button>
                 </div>
@@ -148,7 +153,7 @@
                   <a class="button subtle" href="/docs">API reference</a>
                 </div>
                 <div id="generation-setup" class="generation-setup hidden">
-                  <p>Enable live planning locally by setting an OpenAI key before starting the app.</p>
+                  <p>Enable live planning for this server instance by setting an OpenAI key before starting the app.</p>
                   <pre>export OPENAI_API_KEY=...
 # or
 export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
@@ -235,14 +240,40 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                           </select>
                         </label>
                       </div>
+                      <section class="creator-data-source-panel">
+                        <div class="field-label-row">
+                          <span>Optional data sources</span>
+                          <span id="creator-data-source-count" class="status-pill">0 attached</span>
+                        </div>
+                        <p class="field-hint">Upload learner-visible files like policies, docs, CSVs, or JSON fixtures. We’ll use them while planning the course and later seed them into the workspace.</p>
+                        <div class="creator-data-source-upload-row">
+                          <label class="field">
+                            <span>How should learners use this file?</span>
+                            <select id="creator-data-source-purpose">
+                              <option value="reference_data" selected>Reference data</option>
+                              <option value="retrieval">Retrieval or grounded answers</option>
+                              <option value="seed_state">Seed state</option>
+                              <option value="external_mock">External mock data</option>
+                            </select>
+                          </label>
+                          <label class="field creator-file-input-field">
+                            <span>Choose one or more files</span>
+                            <input id="creator-data-source-file" type="file" multiple accept=".json,.csv,.txt,.md,.markdown,.yml,.yaml" />
+                          </label>
+                          <button id="creator-upload-data-source" class="button subtle" type="button">Upload files</button>
+                        </div>
+                        <p class="field-hint">Prototype support is text-based files only. We’ll place them under <code>data/</code> inside the learner workspace.</p>
+                        <div id="creator-selected-data-sources" class="creator-data-source-list"></div>
+                        <div id="creator-asset-library" class="creator-asset-library"></div>
+                      </section>
                       <div class="creator-pane-actions">
                         <button class="button subtle" type="button" data-creator-prev="2">Back</button>
-                        <button id="creator-step-3-next" class="button primary" type="button">Generate module plan</button>
+                        <button id="creator-step-3-next" class="button primary" type="button">Generate deliverable plan</button>
                       </div>
                     </section>
 
                     <section id="creator-pane-4" class="creator-pane" hidden>
-                      <p class="field-hint creator-pane-intro">Here is the proposed module ladder. Review the structure and accept it to create the draft.</p>
+                      <p class="field-hint creator-pane-intro">Here is the proposed deliverable plan. Review the structure and accept it to create the draft.</p>
                       <div id="creator-plan-preview" class="creator-plan-preview"></div>
                       <div class="creator-pane-actions">
                         <button class="button subtle" type="button" data-creator-prev="3">Back</button>

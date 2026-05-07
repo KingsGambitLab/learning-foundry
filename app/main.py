@@ -14,6 +14,7 @@ from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_generation_service import CourseGenerationService
 from app.services.course_workflow_service import CourseWorkflowService
+from app.services.creator_asset_service import CreatorAssetService
 from app.services.dashboard_page import build_dashboard_state, render_author_dashboard
 from app.services.docs_page import build_docs_state, render_docs_page
 from app.services.docker_sandbox_runner import DockerSandboxRunner
@@ -29,14 +30,17 @@ from app.storage.sqlite_store import SQLiteWorkflowStore
 
 
 def _ensure_lms_service(app: FastAPI) -> LMSService:
+    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or SQLiteWorkflowStore()
+    if (not hasattr(app.state, "creator_asset_service")) or app.state.creator_asset_service.store is not store:
+        app.state.creator_asset_service = CreatorAssetService(store)
     if not hasattr(app.state, "learner_studio_service"):
         app.state.learner_studio_service = LearnerStudioService(
             runner=getattr(app.state, "task_agent_blackbox_runner", TaskAgentBlackBoxRunner()),
         )
     if not hasattr(app.state, "workflow_service"):
         app.state.workflow_service = WorkflowService(
-            SQLiteWorkflowStore(),
-            ArtifactMaterializer(),
+            store,
+            ArtifactMaterializer(creator_asset_service=app.state.creator_asset_service),
             getattr(app.state, "task_agent_blackbox_runner", TaskAgentBlackBoxRunner()),
             getattr(app.state, "assignment_node_runtime", None),
             getattr(app.state, "task_agent_authoring_service", OpenAITaskAgentAuthoringService(enabled=False)),
@@ -53,6 +57,9 @@ def _ensure_lms_service(app: FastAPI) -> LMSService:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or SQLiteWorkflowStore()
+    if (not hasattr(app.state, "creator_asset_service")) or app.state.creator_asset_service.store is not store:
+        app.state.creator_asset_service = CreatorAssetService(store)
     if not hasattr(app.state, "assignment_workspace_manager"):
         app.state.assignment_workspace_manager = AssignmentWorkspaceManager()
     if not hasattr(app.state, "docker_sandbox_runner"):
@@ -80,8 +87,8 @@ async def lifespan(app: FastAPI):
         )
     if not hasattr(app.state, "workflow_service"):
         app.state.workflow_service = WorkflowService(
-            SQLiteWorkflowStore(),
-            ArtifactMaterializer(),
+            store,
+            ArtifactMaterializer(creator_asset_service=app.state.creator_asset_service),
             app.state.task_agent_blackbox_runner,
             app.state.assignment_node_runtime,
             app.state.task_agent_authoring_service,
@@ -92,6 +99,7 @@ async def lifespan(app: FastAPI):
             app.state.workflow_service.store,
             app.state.workflow_service,
             CourseArtifactMaterializer(),
+            creator_asset_service=app.state.creator_asset_service,
         )
     if not hasattr(app.state, "course_generation_service"):
         app.state.course_generation_service = CourseGenerationService(

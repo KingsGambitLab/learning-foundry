@@ -73,12 +73,69 @@ def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, module_id: str) -> 
     )
 
 
+def build_task_agent_review_area_plan(spec: TaskAgentServiceSpec, module_id: str) -> ModuleGraderPlan:
+    module = next((item for item in spec.modules if item.id == module_id), None)
+    if module is None:
+        raise ValueError(f"unknown module id: {module_id}")
+
+    behaviors_by_id = {behavior.id: behavior for behavior in spec.behaviors}
+    qualities_by_id = {quality.id: quality for quality in spec.qualities}
+    active_behavior_ids = [
+        behavior.id
+        for behavior in spec.behaviors
+        if behavior.first_required_in == module_id
+    ]
+    active_quality_ids = [
+        quality.id
+        for quality in spec.qualities
+        if quality.first_required_in == module_id
+    ]
+
+    entries: list[GraderPlanEntry] = []
+    for behavior_id in active_behavior_ids:
+        entries.append(_behavior_entry(spec, behaviors_by_id[behavior_id]))
+    for quality_id in active_quality_ids:
+        entries.append(_quality_entry(spec, qualities_by_id[quality_id]))
+
+    endpoint_paths = sorted({path for entry in entries for path in entry.dependencies.endpoint_paths})
+    tool_ids = sorted({tool_id for entry in entries for tool_id in entry.dependencies.tool_ids})
+    controls = sorted(
+        {control for entry in entries for control in entry.controls},
+        key=lambda item: item.value,
+    )
+
+    return ModuleGraderPlan(
+        module_id=module.id,
+        module_title=module.title,
+        module_objective=module.objective,
+        starter_type=module.starter_type.value,
+        overlay_ids=module.overlay_ids,
+        cumulative_modules=[module.id],
+        active_behavior_ids=active_behavior_ids,
+        active_quality_ids=active_quality_ids,
+        total_tests=len(entries),
+        endpoint_paths=endpoint_paths,
+        tool_ids=tool_ids,
+        controls=controls,
+        entries=entries,
+    )
+
+
 def build_all_task_agent_grader_plans(spec: TaskAgentServiceSpec) -> TaskAgentGraderPlanCollection:
     return TaskAgentGraderPlanCollection(
         title=spec.title,
         eval_dataset_id=spec.eval_dataset.id,
         system_profile=spec.capabilities.summary_labels(),
         module_plans=[build_task_agent_grader_plan(spec, module.id) for module in spec.modules],
+    )
+
+
+def build_all_task_agent_review_area_plans(spec: TaskAgentServiceSpec) -> TaskAgentGraderPlanCollection:
+    return TaskAgentGraderPlanCollection(
+        title=spec.title,
+        eval_dataset_id=spec.eval_dataset.id,
+        system_profile=spec.capabilities.summary_labels(),
+        module_plans=[build_task_agent_review_area_plan(spec, module.id) for module in spec.modules],
     )
 
 

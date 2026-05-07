@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from typing import Any
 
 import httpx
@@ -85,20 +86,29 @@ def _run_scenario(client: httpx.Client, scenario: dict[str, Any]) -> dict[str, A
     plan = planned["plan"]
     if plan.get("goal") != scenario["goal"]:
         raise SmokeError(f"Creator plan lost the original goal for scenario '{scenario['slug']}'.")
-    if plan.get("learning_outcomes") != scenario["learning_outcomes"]:
-        raise SmokeError(f"Creator plan lost normalized outcomes for scenario '{scenario['slug']}'.")
-    if not plan.get("modules"):
-        raise SmokeError(f"Creator plan returned no modules for scenario '{scenario['slug']}'.")
+    if not planned.get("learning_outcomes"):
+        raise SmokeError(f"Creator plan returned no derived outcomes for scenario '{scenario['slug']}'.")
+    if not plan.get("deliverables"):
+        raise SmokeError(f"Creator plan returned no deliverables for scenario '{scenario['slug']}'.")
 
     created = _request_json(
         client,
         "POST",
-        "/v1/course-runs/from-creator-plan",
+        "/v1/course-runs/from-creator-plan-async",
         json={"plan": plan},
     )
-    course_run_id = created["id"]
+    course_run_id = created["course_run"]["id"]
 
-    creator_view = _request_json(client, "GET", f"/v1/course-runs/{course_run_id}/creator-view")
+    deadline = time.time() + 30
+    creator_view: dict[str, Any] | None = None
+    while time.time() < deadline:
+        creator_view = _request_json(client, "GET", f"/v1/course-runs/{course_run_id}/creator-view")
+        course_run = creator_view["course_run"]
+        if course_run.get("shared_workflow_run_id") or course_run.get("deliverables"):
+            break
+        time.sleep(0.25)
+    if creator_view is None:
+        raise SmokeError(f"Creator view never loaded for scenario '{scenario['slug']}'.")
     diagnostics = creator_view.get("diagnostics", [])
     if not diagnostics:
         raise SmokeError(f"Creator view returned no diagnostics for scenario '{scenario['slug']}'.")
@@ -109,7 +119,7 @@ def _run_scenario(client: httpx.Client, scenario: dict[str, Any]) -> dict[str, A
         "title": creator_view["course_run"]["title"],
         "stage": creator_view["course_run"]["stage"],
         "status": creator_view["course_run"]["status"],
-        "module_titles": [module["title"] for module in creator_view["review"]["modules"]],
+        "deliverable_titles": [deliverable["title"] for deliverable in creator_view["review"]["deliverables"]],
         "diagnostic_codes": [item["code"] for item in diagnostics],
     }
 

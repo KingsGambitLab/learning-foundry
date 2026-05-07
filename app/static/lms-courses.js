@@ -72,10 +72,10 @@
   }
 
   function computeProgress(item) {
-    const total = Number(item.module_count || 0);
-    const completed = Number(item.completed_module_count || 0);
+    const total = Number(item.deliverable_count || 0);
+    const completed = Number(item.completed_deliverable_count || 0);
     const positionPercent = total
-      ? Math.round(((item.status === "completed" ? total : Number(item.current_module_index || 0) || completed) / total) * 100)
+      ? Math.round(((item.status === "completed" ? total : Number(item.current_deliverable_index || 0) || completed) / total) * 100)
       : 0;
     return { total, completed, positionPercent: Math.max(0, Math.min(positionPercent, 100)) };
   }
@@ -154,15 +154,15 @@
 
     enrollmentList.innerHTML = enrollments.map((item) => {
       const progress = computeProgress(item);
-      const summaryLine = item.current_module_title
-        ? `Module ${item.current_module_index} · ${item.current_module_title}`
+      const summaryLine = item.current_deliverable_title
+        ? `Deliverable ${item.current_deliverable_index} · ${item.current_deliverable_title}`
         : "Course complete";
       return `
         <div class="course-row">
           <div class="course-row-main">
             <div class="course-row-meta">
               ${renderStatusPill(courseStatusKind(item), courseStatusCopy(item))}
-              ${renderInfoPill("Modules", `${item.completed_module_count}/${item.module_count}`)}
+              ${renderInfoPill("Deliverables", `${item.completed_deliverable_count}/${item.deliverable_count}`)}
             </div>
             <h3>${escapeHtml(item.course_title)}</h3>
             <p>${escapeHtml(summaryLine)}</p>
@@ -200,14 +200,14 @@
       const reasonCopy = course.supported_for_lms
         ? (isAlreadyEnrolled
           ? "You are already enrolled in this course."
-          : "Enroll now and jump straight into the current module workspace.")
+          : "Enroll now and jump straight into the shared project workspace.")
         : (course.support_reason || "This course is being prepared and is not ready for learners yet.");
       return `
         <div class="catalog-card ${isBlocked ? "is-blocked" : ""}">
           <div class="catalog-card-main">
             <div class="catalog-card-meta">
               ${renderStatusPill(course.supported_for_lms ? "ready" : "not-ready", course.supported_for_lms ? "Ready to enroll" : "Not learner-ready")}
-              ${renderInfoPill("Modules", String(course.module_count))}
+              ${renderInfoPill("Deliverables", String(course.deliverable_count))}
               ${renderInfoPill("Published", formatDate(course.published_at))}
             </div>
             <h3>${escapeHtml(course.title)}</h3>

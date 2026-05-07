@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.domain.course import CourseReviewReport, CourseRunSummary, CreatorCourseSetupChoices
 from app.domain.learner import LearnerModuleExperience
@@ -31,9 +31,17 @@ class CreateCreatorFeedbackRequest(BaseModel):
     details: str | None = None
     category: str = "general"
     rating: int | None = Field(default=None, ge=1, le=5)
-    module_slug: str | None = None
+    deliverable_slug: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_slug", "module_slug"))
     workflow_run_id: str | None = None
     context: dict = Field(default_factory=dict)
+
+    @property
+    def module_slug(self) -> str | None:
+        return self.deliverable_slug
+
+    @module_slug.setter
+    def module_slug(self, value: str | None) -> None:
+        self.deliverable_slug = value
 
 
 class CreatorFeedbackRecord(BaseModel):
@@ -44,11 +52,19 @@ class CreatorFeedbackRecord(BaseModel):
     summary: str
     details: str | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
-    module_slug: str | None = None
+    deliverable_slug: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_slug", "module_slug"))
     workflow_run_id: str | None = None
     stage: str | None = None
     status: str | None = None
     context: dict = Field(default_factory=dict)
+
+    @property
+    def module_slug(self) -> str | None:
+        return self.deliverable_slug
+
+    @module_slug.setter
+    def module_slug(self, value: str | None) -> None:
+        self.deliverable_slug = value
 
 
 class CreatorFeedbackList(BaseModel):
@@ -59,7 +75,7 @@ class CreateLearnerFeedbackRequest(BaseModel):
     summary: str = Field(min_length=3)
     details: str | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
-    module_id: str | None = None
+    deliverable_id: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_id", "module_id"))
     context: dict = Field(default_factory=dict)
 
 
@@ -73,7 +89,7 @@ class LearnerFeedbackRecord(BaseModel):
     summary: str
     details: str | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
-    module_id: str | None = None
+    deliverable_id: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_id", "module_id"))
     context: dict = Field(default_factory=dict)
 
 
@@ -89,13 +105,19 @@ class LearnerEvalSubmissionSummary(BaseModel):
 
 
 class LearnerModuleEvaluationResult(BaseModel):
-    module_id: str
+    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
     title: str
-    module_index: int = Field(ge=1)
+    deliverable_index: int = Field(
+        ge=1,
+        validation_alias=AliasChoices("deliverable_index", "module_index"),
+    )
     learner_visible_files: list[str] = Field(default_factory=list)
     bad_attempt: LearnerEvalSubmissionSummary
     good_attempt: LearnerEvalSubmissionSummary
-    next_module_id: str | None = None
+    next_deliverable_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("next_deliverable_id", "next_module_id"),
+    )
     progression_observed: bool = False
     course_completed: bool = False
     notes: list[str] = Field(default_factory=list)
@@ -106,7 +128,11 @@ class CreateLearnerEvaluationReportRequest(BaseModel):
     learner_id: str | None = None
     enrollment_id: str | None = None
     notes: list[str] = Field(default_factory=list)
-    module_results: list[LearnerModuleEvaluationResult] = Field(default_factory=list, min_length=1)
+    deliverable_results: list[LearnerModuleEvaluationResult] = Field(
+        default_factory=list,
+        min_length=1,
+        validation_alias=AliasChoices("deliverable_results", "module_results"),
+    )
 
 
 class LearnerCourseEvaluationReport(BaseModel):
@@ -118,7 +144,10 @@ class LearnerCourseEvaluationReport(BaseModel):
     created_at: datetime
     overall_status: str
     notes: list[str] = Field(default_factory=list)
-    module_results: list[LearnerModuleEvaluationResult] = Field(default_factory=list)
+    deliverable_results: list[LearnerModuleEvaluationResult] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("deliverable_results", "module_results"),
+    )
 
 
 class CreatorTestingView(BaseModel):

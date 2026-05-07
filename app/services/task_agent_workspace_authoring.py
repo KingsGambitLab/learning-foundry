@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.domain.workflow import WorkflowNodeExecution, WorkflowRun
+from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.task_agent_starter_templates import (
     render_task_agent_module_app,
@@ -49,6 +49,7 @@ class TaskAgentWorkspaceAuthoringService:
         self,
         run: WorkflowRun,
         latest_node: WorkflowNodeExecution,
+        failure_context: FailureContext | None = None,
     ) -> tuple[WorkflowRun, bool, str]:
         if run.artifacts.task_agent_spec is None:
             return run, False, "No task-agent spec is available to repair the workspace."
@@ -58,17 +59,65 @@ class TaskAgentWorkspaceAuthoringService:
         if workspace is None:
             return run, False, "The workspace is missing and could not be prepared."
 
-        failed_modules = [
+        failed_modules = {
             report.module_id
             for report in (latest_node.sandbox_result.module_reports if latest_node.sandbox_result else [])
             if not report.compile_succeeded or not report.runtime_succeeded
-        ]
-        updated_files = self._write_runtime_files(run, module_ids=failed_modules or None, force=True)
-        if updated_files:
+        }
+        if failure_context is not None and failure_context.sandbox is not None:
+            failed_modules.update(failure_context.sandbox.failed_modules)
+        finding_text = " ".join(
+            f"{finding.title} {finding.detail}"
+            for finding in (failure_context.findings if failure_context is not None else latest_node.findings)
+        ).lower()
+        full_repair = (
+            not failed_modules
+            or "placeholder starter" in finding_text
+            or "starter endpoints remain" in finding_text
+            or (
+                failure_context is not None
+                and failure_context.sandbox is not None
+                and bool(
+                    failure_context.sandbox.build_stderr_excerpt
+                    or failure_context.sandbox.run_stderr_excerpt
+                )
+            )
+        )
+        if full_repair:
+            run = self.sync_workspace(run)
+            reason = ""
+            if failure_context is not None and failure_context.sandbox is not None:
+                if failure_context.sandbox.error:
+                    reason = f" Latest sandbox error: {failure_context.sandbox.error}"
+                elif failure_context.sandbox.build_stderr_excerpt or failure_context.sandbox.run_stderr_excerpt:
+                    reason = " Latest sandbox stderr was carried into the repair step."
             return (
                 run,
                 True,
-                "Re-rendered the shared runtime and starter wrappers for the failed workspace modules.",
+                "Rematerialized the full learner workspace to resync runtime and learner-facing artifacts."
+                + reason,
+            )
+        updated_files = self._write_runtime_files(
+            run,
+            module_ids=sorted(failed_modules),
+            force=True,
+        )
+        if updated_files:
+            reason = ""
+            if failure_context is not None and failure_context.sandbox is not None:
+                if failure_context.sandbox.error:
+                    reason = f" Latest sandbox error: {failure_context.sandbox.error}"
+                elif failure_context.sandbox.build_stderr_excerpt or failure_context.sandbox.run_stderr_excerpt:
+                    reason = " Latest sandbox stderr was carried into the repair step."
+            return (
+                run,
+                True,
+                (
+                    "Re-rendered the shared runtime and starter wrappers for the failed workspace modules."
+                    if not full_repair
+                    else "Re-rendered the shared runtime and starter wrappers across the workspace."
+                )
+                + reason,
             )
         return run, False, "No workspace file changes were needed for the current sandbox failure."
 

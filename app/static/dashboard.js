@@ -56,6 +56,12 @@
       const creatorAddOutcome = document.getElementById("creator-add-outcome");
       const creatorOutcomesList = document.getElementById("creator-outcomes-list");
       const creatorPlanPreview = document.getElementById("creator-plan-preview");
+      const creatorDataSourceCount = document.getElementById("creator-data-source-count");
+      const creatorDataSourcePurpose = document.getElementById("creator-data-source-purpose");
+      const creatorDataSourceFileInput = document.getElementById("creator-data-source-file");
+      const creatorUploadDataSourceButton = document.getElementById("creator-upload-data-source");
+      const creatorSelectedDataSources = document.getElementById("creator-selected-data-sources");
+      const creatorAssetLibrary = document.getElementById("creator-asset-library");
       const creatorStepTitle = document.getElementById("creator-step-title");
       const creatorPanes = Array.from(document.querySelectorAll(".creator-pane"));
       const creatorStepper = document.getElementById("creator-stepper");
@@ -63,7 +69,8 @@
         step: 1,
         goal: "",
         outcomes: [],
-        choices: { starter_type: "partial_implementation", primary_database: "postgres", cache_backend: "redis", tech_stack: [] },
+        choices: { starter_type: "partial_implementation", primary_database: "postgres", cache_backend: "redis", tech_stack: [], data_sources: [] },
+        assets: [],
         plan: null,
       };
       const results = document.getElementById("results");
@@ -82,7 +89,6 @@
       const draftActivity = document.getElementById("draft-activity");
       const linkedWorkflows = document.getElementById("linked-workflows");
       const recentDrafts = document.getElementById("recent-drafts");
-      const syncButton = document.getElementById("sync-button");
       const materializeButton = document.getElementById("materialize-button");
       const publishButton = document.getElementById("publish-button");
       const createRevisionButton = document.getElementById("create-revision-button");
@@ -105,6 +111,24 @@
 
       function pill(text) {
         return `<span class="small-pill">${escapeHtml(text)}</span>`;
+      }
+
+      function formatUsd(value) {
+        const amount = Number(value || 0);
+        if (!Number.isFinite(amount) || amount <= 0) return "$0.00";
+        if (amount >= 100) return `$${amount.toFixed(0)}`;
+        if (amount >= 10) return `$${amount.toFixed(2)}`;
+        if (amount >= 1) return `$${amount.toFixed(3)}`;
+        return `$${amount.toFixed(4)}`;
+      }
+
+      function usageSpendLabel(usage) {
+        const spend = Number(usage?.estimated_cost_usd || 0);
+        const requests = Number(usage?.request_count || 0);
+        if (!requests) {
+          return "AI spend: $0.00";
+        }
+        return `AI spend: ${formatUsd(spend)} across ${pluralize(requests, "request")}`;
       }
 
       function escapeHtml(value) {
@@ -207,7 +231,7 @@
               data-switch-course-run="${escapeHtml(run.id)}"
             >
               <span class="draft-switcher-option-title">${escapeHtml(run.title)}</span>
-              <span class="draft-switcher-option-meta">${escapeHtml(summary.label)} • ${escapeHtml(updatedRelative)}</span>
+              <span class="draft-switcher-option-meta">${escapeHtml(summary.label)} • ${escapeHtml(updatedRelative)} • ${escapeHtml(formatUsd(run.ai_usage?.estimated_cost_usd || 0))}</span>
             </button>
           `;
         }
@@ -231,7 +255,8 @@
             ${snippet ? `<p class="draft-row-snippet">${escapeHtml(snippet)}</p>` : ""}
             <div class="draft-row-meta">
               <span class="draft-row-updated">${escapeHtml(updatedRelative)}</span>
-              <span><strong>${escapeHtml(String(run.module_count))}</strong> module${run.module_count === 1 ? "" : "s"}</span>
+              <span><strong>${escapeHtml(String(run.deliverable_count))}</strong> deliverable${run.deliverable_count === 1 ? "" : "s"}</span>
+              <span>${escapeHtml(usageSpendLabel(run.ai_usage))}</span>
               ${run.base_archetype ? `<span>${escapeHtml(friendlyBuildPattern(run.base_archetype))}</span>` : ""}
             </div>
           </button>
@@ -310,8 +335,8 @@
 
       function friendlyCourseShape(packageType) {
         const labels = {
-          progressive_codebase_course: "One codebase across modules",
-          survey_course: "Separate assignment per module",
+          progressive_codebase_course: "One codebase across deliverables",
+          survey_course: "Separate assignment per deliverable",
         };
         return labels[packageType] || titleCase(packageType);
       }
@@ -353,7 +378,7 @@
       function friendlyGate(gate) {
         const labels = {
           gate_1_spec_review: "Review assignment spec",
-          gate_2_progression_review: "Review module ladder",
+          gate_2_progression_review: "Review deliverables",
           gate_3_pre_publish: "Final assignment review",
         };
         return labels[gate] || titleCase(gate);
@@ -391,7 +416,7 @@
         const labels = {
           generation: "Building the first draft",
           revision: "Creating a new version draft",
-          materialize: "Preparing the review bundle",
+          materialize: "Preparing the review package",
           publish: "Publishing this course version",
         };
         return labels[operation] || titleCase(operation);
@@ -430,7 +455,7 @@
           course_run_published: "Course published",
           course_publish_completed: "Publish finished",
           course_publish_failed: "Publish failed",
-          course_run_synced: "Draft refreshed",
+          course_run_synced: "Draft updated",
         };
         return labels[eventType] || titleCase(eventType);
       }
@@ -470,10 +495,10 @@
             return `${milestones.join(", ")} approved so far.`;
           }
         }
-        const readyModules = review?.counts?.ready_modules ?? 0;
-        const totalModules = review?.counts?.total_modules ?? courseRun.modules.length;
+        const readyModules = review?.counts?.ready_deliverables ?? 0;
+        const totalModules = review?.counts?.total_deliverables ?? courseRun.deliverables.length;
         const publishedWorkflows = review?.counts?.published_workflow_runs ?? 0;
-        return `${readyModules} of ${totalModules} modules are publish-ready; ${publishedWorkflows} linked assignment workflow${publishedWorkflows === 1 ? "" : "s"} published.`;
+        return `${readyModules} of ${totalModules} deliverables are publish-ready; ${publishedWorkflows} linked assignment workflow${publishedWorkflows === 1 ? "" : "s"} published.`;
       }
 
       function findLastCompleted(events) {
@@ -506,7 +531,7 @@
         if (pendingWorkflow) {
           const gate = pendingWorkflow.pending_gate;
           const nextByGate = {
-            gate_1_spec_review: "Once you approve this, we move into the module ladder review for the assignment.",
+            gate_1_spec_review: "Once you approve this, we move into the deliverables review for the assignment.",
             gate_2_progression_review: "Once you approve this, we run the final assignment checks before publish.",
             gate_3_pre_publish: "Once you approve this, the linked assignment workflow can publish and the course can move toward publish.",
           };
@@ -575,12 +600,12 @@
           const gate = pendingWorkflow.pending_gate;
           const whyByGate = {
             gate_1_spec_review: "The linked assignment finished authoring and reviewer checks, and it now needs your spec review before we continue.",
-            gate_2_progression_review: "The assignment spec is approved, and the module ladder now needs your review before we continue.",
+            gate_2_progression_review: "The assignment spec is approved, and the deliverable plan now needs your review before we continue.",
             gate_3_pre_publish: "The assignment has cleared earlier gates and needs a final review before it can publish.",
           };
           const unblockByGate = {
-            gate_1_spec_review: "Read the assignment spec snapshot below. Approve if the contract, tools, module ladder, and grader checks match your intent. Otherwise request changes and describe what to fix.",
-            gate_2_progression_review: "Review the proposed module ladder and gating. Approve if the progression teaches the right checkpoints. Otherwise request changes with a note.",
+            gate_1_spec_review: "Read the assignment spec snapshot below. Approve if the contract, tools, deliverables, and grader checks match your intent. Otherwise request changes and describe what to fix.",
+            gate_2_progression_review: "Review the proposed deliverables and review flow. Approve if the plan teaches the right engineering work. Otherwise request changes with a note.",
             gate_3_pre_publish: "Do a final pass on the assignment package. Approve if it is ready to publish, or request changes with the exact issue you want fixed.",
           };
           return {
@@ -606,7 +631,7 @@
         if (courseRun.stage === "blocked" || courseRun.last_error) {
           return {
             reason: courseRun.last_error || "The draft hit a blocker during generation or review.",
-            unblock: "Refresh the draft, inspect the recent activity, and then request changes or start a new version depending on what you want to fix.",
+            unblock: "This page updates automatically. Inspect the recent activity, then request changes or start a new version depending on what you want to fix.",
           };
         }
 
@@ -622,8 +647,8 @@
           { title: "Brief captured", detail: "Goal and outcomes are stored on the draft.", state: "done" },
           {
             title: "Course plan drafted",
-            detail: courseRun.generated_plan ? "Module ladder and course shape are ready to read." : "We are still drafting the module ladder.",
-            state: courseRun.generated_plan || courseRun.modules.length ? "done" : "current",
+            detail: courseRun.generated_plan ? "Deliverables and course shape are ready to read." : "We are still drafting the deliverable plan.",
+            state: courseRun.generated_plan || courseRun.deliverables.length ? "done" : "current",
           },
           {
             title: "Assignment workflows prepared",
@@ -637,7 +662,7 @@
               : "We are either checking the assignment work or this step is complete.",
             state: workflows.some((workflow) => workflow.pending_gate)
               ? "current"
-              : ((review?.counts?.ready_modules ?? 0) > 0 || courseRun.stage === "ready_to_publish" || courseRun.status === "published")
+              : ((review?.counts?.ready_deliverables ?? 0) > 0 || courseRun.stage === "ready_to_publish" || courseRun.status === "published")
                 ? "done"
                 : "up-next",
           },
@@ -804,7 +829,7 @@
         if (!spec) {
           return `
             <div class="review-plain-summary">
-              <p>Loading the review snapshot. Refresh the draft if it doesn't appear in a moment.</p>
+              <p>Loading the review snapshot. This page will keep updating while the package is prepared.</p>
             </div>
           `;
         }
@@ -822,7 +847,7 @@
         };
         const headlineByGate = {
           gate_1_spec_review: "Does this assignment shape match what you want learners to build?",
-          gate_2_progression_review: "Does this module ladder teach the work in the right order?",
+          gate_2_progression_review: "Do these deliverables cover the right engineering work?",
           gate_3_pre_publish: "Ready to ship this version?",
         };
 
@@ -833,7 +858,7 @@
           : "";
 
         const facts = [];
-        facts.push(`<li><strong>Modules:</strong> ${modules.length}</li>`);
+        facts.push(`<li><strong>Deliverables:</strong> ${modules.length}</li>`);
         facts.push(`<li><strong>Tools the system can use:</strong> ${tools.length}${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} write data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
         facts.push(`<li><strong>Checks:</strong> ${behaviors.length} learner-visible · ${qualities.length} quality bars</li>`);
 
@@ -854,7 +879,7 @@
         if (!spec && !blueprint) {
           return `
             <div class="review-item">
-              <p>Review details are not available for this workflow yet. Refresh the draft before approving or requesting changes.</p>
+              <p>Review details are not available for this workflow yet. This page will keep updating before you decide on the step.</p>
             </div>
           `;
         }
@@ -1021,7 +1046,7 @@
         ];
 
         if (pendingGate !== "gate_1_spec_review") {
-          expandedSections.push(renderSpecSection("Module ladder", modules.map((module, index) => `
+          expandedSections.push(renderSpecSection("Deliverables", modules.map((module, index) => `
             <div class="review-item">
               <p><strong>${escapeHtml(`${index + 1}. ${module.title}`)}</strong></p>
               <p>${escapeHtml(module.objective)}</p>
@@ -1030,7 +1055,7 @@
                 ${(module.overlay_ids || []).map((overlay) => pill(friendlyFocusArea(overlay))).join("")}
               </div>
             </div>
-          `).concat(!modules.length ? [`<div class="review-item"><p>No module ladder is attached yet.</p></div>`] : [])));
+          `).concat(!modules.length ? [`<div class="review-item"><p>No deliverable plan is attached yet.</p></div>`] : [])));
           expandedSections.push(renderSpecSection("Progression gates", [
             ...behaviors
               .filter((behavior) => behavior.first_required_in)
@@ -1076,14 +1101,29 @@
       function renderGenerationStatus(status) {
         const isLive = Boolean(status && status.available && status.source === "openai_live");
         generationBanner.className = `generation-banner ${isLive ? "live" : "fallback"}`;
-        generationHeading.textContent = isLive
-          ? `AI planning live${status?.model_id ? ` · ${status.model_id}` : ""}`
-          : "Using deterministic fallback planner";
-        generationBadge.textContent = isLive ? "Live" : "Fallback";
+        if (isLive) {
+          generationHeading.textContent = `AI planning live${status?.model_id ? ` · ${status.model_id}` : ""}`;
+          generationBadge.textContent = "Live";
+        } else if (status?.api_key_present === false) {
+          generationHeading.textContent = "This app instance is using the fallback planner";
+          generationBadge.textContent = "No key in server";
+        } else if (status?.sdk_installed === false) {
+          generationHeading.textContent = "This app instance cannot use OpenAI planning";
+          generationBadge.textContent = "SDK missing";
+        } else {
+          generationHeading.textContent = "This app instance is using the fallback planner";
+          generationBadge.textContent = "Fallback";
+        }
         generationBadge.className = `badge ${isLive ? "live" : "fallback"}`;
         generationMessage.textContent = status?.message || "";
 
-        generationMeta.innerHTML = "";
+        generationMeta.innerHTML = [
+          status?.provider ? pill(`Provider: ${status.provider}`) : "",
+          status?.model_id ? pill(`Model: ${status.model_id}`) : "",
+          status?.sdk_installed ? pill("SDK installed") : pill("SDK missing"),
+          status?.api_key_present ? pill("API key detected") : pill("No API key in this server"),
+          status?.env_file ? pill(`Env file: ${status.env_file}`) : pill("No env file configured"),
+        ].filter(Boolean).join("");
         generationSetupToggle.classList.toggle("hidden", isLive);
         if (isLive) {
           generationSetup.classList.add("hidden");
@@ -1118,7 +1158,6 @@
         linkedWorkflows.innerHTML = "";
         sourceBadge.textContent = "Waiting";
         sourceBadge.className = "badge fallback";
-        syncButton.disabled = true;
         materializeButton.disabled = true;
         publishButton.disabled = true;
         createRevisionButton.disabled = true;
@@ -1197,11 +1236,21 @@
           primary_database: dbSelect?.value || null,
           cache_backend: cacheSelect?.value || null,
           tech_stack: [],
+          data_sources: Array.isArray(creatorState.choices.data_sources)
+            ? creatorState.choices.data_sources.map((source) => ({ ...source }))
+            : [],
         };
       }
 
       function applyCreatorChoicesToInputs(choices) {
         if (!choices) return;
+        creatorState.choices = {
+          starter_type: choices.starter_type || "partial_implementation",
+          primary_database: choices.primary_database || null,
+          cache_backend: choices.cache_backend || null,
+          tech_stack: Array.isArray(choices.tech_stack) ? [...choices.tech_stack] : [],
+          data_sources: Array.isArray(choices.data_sources) ? choices.data_sources.map((source) => ({ ...source })) : [],
+        };
         const starter = document.querySelector(`input[name="starter_type"][value="${choices.starter_type}"]`);
         if (starter) starter.checked = true;
         const dbSelect = document.getElementById("creator-database");
@@ -1212,6 +1261,7 @@
         if (cacheSelect && choices.cache_backend !== undefined) {
           cacheSelect.value = choices.cache_backend || "";
         }
+        renderCreatorDataSources();
       }
 
       function friendlyDatabase(value) {
@@ -1226,6 +1276,92 @@
         return labels[value] || titleCase(value);
       }
 
+      function friendlyDataSourcePurpose(value) {
+        const labels = {
+          retrieval: "Retrieval",
+          reference_data: "Reference data",
+          seed_state: "Seed state",
+          external_mock: "Mocked dependency data",
+        };
+        return labels[value] || titleCase(String(value || "reference_data").replaceAll("_", " "));
+      }
+
+      function formatBytes(bytes) {
+        const value = Number(bytes || 0);
+        if (!Number.isFinite(value) || value <= 0) return "0 B";
+        if (value < 1024) return `${value} B`;
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+        return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      function selectedCreatorAssetIds() {
+        return new Set(
+          (creatorState.choices.data_sources || [])
+            .map((source) => source.asset_id || source.id)
+            .filter(Boolean),
+        );
+      }
+
+      function renderCreatorDataSources() {
+        const selectedSources = creatorState.choices.data_sources || [];
+        const selectedIds = selectedCreatorAssetIds();
+        if (creatorDataSourceCount) {
+          creatorDataSourceCount.textContent = `${selectedSources.length} attached`;
+        }
+        if (creatorSelectedDataSources) {
+          if (!selectedSources.length) {
+            creatorSelectedDataSources.innerHTML = `
+              <div class="creator-data-source-empty">
+                <p class="field-hint">No uploaded data sources selected yet.</p>
+              </div>
+            `;
+          } else {
+            creatorSelectedDataSources.innerHTML = selectedSources.map((source) => `
+              <article class="creator-data-source-card">
+                <div class="creator-data-source-copy">
+                  <strong>${escapeHtml(source.title || source.id)}</strong>
+                  <p>${escapeHtml(source.workspace_path || "data/source.txt")}</p>
+                  <div class="pill-row">
+                    ${pill(friendlyDataSourcePurpose(source.purpose))}
+                    ${source.format ? pill(source.format.toUpperCase()) : ""}
+                    ${source.learner_visible ? pill("Learner visible") : ""}
+                  </div>
+                </div>
+                <button type="button" class="button subtle" data-remove-data-source="${escapeHtml(source.asset_id || source.id)}">Remove</button>
+              </article>
+            `).join("");
+          }
+        }
+        if (creatorAssetLibrary) {
+          if (!creatorState.assets.length) {
+            creatorAssetLibrary.innerHTML = "";
+          } else {
+            const items = creatorState.assets.map((asset) => {
+              const assetId = asset.id;
+              const selected = selectedIds.has(assetId);
+              return `
+                <article class="creator-asset-row">
+                  <div class="creator-asset-copy">
+                    <strong>${escapeHtml(asset.title || asset.file_name)}</strong>
+                    <p>${escapeHtml(asset.file_name)} • ${escapeHtml(asset.workspace_path)} • ${escapeHtml(formatBytes(asset.size_bytes))}</p>
+                  </div>
+                  <div class="creator-asset-actions">
+                    <button type="button" class="button subtle" data-toggle-data-source="${escapeHtml(assetId)}">${selected ? "Remove from course" : "Use in this course"}</button>
+                  </div>
+                </article>
+              `;
+            }).join("");
+            creatorAssetLibrary.innerHTML = `
+              <div class="creator-asset-library-header">
+                <h4>Uploaded files</h4>
+                <p class="field-hint">These files are stored locally and can be reused in later drafts.</p>
+              </div>
+              <div class="creator-asset-library-list">${items}</div>
+            `;
+          }
+        }
+      }
+
       function renderCreatorPlanPreview() {
         const plan = creatorState.plan;
         if (!creatorPlanPreview) return;
@@ -1238,8 +1374,19 @@
           pill(`Starter: ${friendlyStarterType(choices.starter_type)}`),
           pill(`Database: ${friendlyDatabase(choices.primary_database)}`),
           pill(`Cache: ${friendlyCache(choices.cache_backend)}`),
+          ...(choices.data_sources && choices.data_sources.length ? [pill(`Data sources: ${choices.data_sources.length}`)] : []),
         ].join("");
-        const moduleCards = (plan.modules || []).map((m, i) => `
+        const dataSourceList = choices.data_sources && choices.data_sources.length
+          ? `
+            <div class="creator-plan-data-sources">
+              <h4>Attached data sources</h4>
+              <ul>
+                ${choices.data_sources.map((source) => `<li><strong>${escapeHtml(source.title || source.id)}</strong> — <code>${escapeHtml(source.workspace_path || "data/source.txt")}</code></li>`).join("")}
+              </ul>
+            </div>
+          `
+          : "";
+        const deliverableCards = (plan.deliverables || []).map((m, i) => `
           <article class="creator-plan-module">
             <header>
               <span class="creator-plan-module-index">${i + 1}</span>
@@ -1247,7 +1394,7 @@
             </header>
             <p>${escapeHtml(m.summary || "")}</p>
             ${m.learning_outcomes && m.learning_outcomes.length ? `
-              <p class="creator-plan-module-section-title">What learners build</p>
+              <p class="creator-plan-module-section-title">What this deliverable covers</p>
               <ul>${m.learning_outcomes.map((o) => `<li>${escapeHtml(o)}</li>`).join("")}</ul>
             ` : ""}
             ${m.creator_notes && m.creator_notes.length ? `
@@ -1262,8 +1409,9 @@
             ${plan.summary ? `<p class="creator-plan-summary-line">${escapeHtml(plan.summary)}</p>` : ""}
             ${plan.creator_summary ? `<p class="creator-plan-narrative">${escapeHtml(plan.creator_summary)}</p>` : ""}
             <div class="pill-row">${choicePills}</div>
+            ${dataSourceList}
           </div>
-          <div class="creator-plan-modules">${moduleCards}</div>
+          <div class="creator-plan-modules">${deliverableCards}</div>
           ${plan.notes && plan.notes.length ? `
             <aside class="creator-plan-footnotes">
               <h4>Notes about this plan</h4>
@@ -1271,6 +1419,96 @@
             </aside>
           ` : ""}
         `;
+      }
+
+      async function refreshCreatorAssets() {
+        if (!state.creator_assets_url) return;
+        try {
+          const response = await fetch(state.creator_assets_url);
+          if (!response.ok) {
+            throw new Error(await extractDetail(response));
+          }
+          const payload = await response.json();
+          creatorState.assets = Array.isArray(payload.assets) ? payload.assets : [];
+          renderCreatorDataSources();
+        } catch (error) {
+          if (creatorAssetLibrary) {
+            creatorAssetLibrary.innerHTML = `<p class="field-hint">${escapeHtml(error instanceof Error ? error.message : "Could not load uploaded files.")}</p>`;
+          }
+        }
+      }
+
+      function attachCreatorAsset(record) {
+        const next = Array.isArray(creatorState.choices.data_sources)
+          ? creatorState.choices.data_sources.filter((source) => (source.asset_id || source.id) !== record.id)
+          : [];
+        next.push({ ...record.data_source });
+        creatorState.choices = { ...creatorState.choices, data_sources: next };
+        renderCreatorDataSources();
+      }
+
+      function detachCreatorAsset(assetId) {
+        creatorState.choices = {
+          ...creatorState.choices,
+          data_sources: (creatorState.choices.data_sources || []).filter((source) => (source.asset_id || source.id) !== assetId),
+        };
+        renderCreatorDataSources();
+      }
+
+      function defaultDataSourcePurpose() {
+        const goal = (goalField?.value || creatorState.goal || "").toLowerCase();
+        if (/(rag|retrieval|knowledge base|documents|corpus|search|citation)/.test(goal)) {
+          return "retrieval";
+        }
+        return "reference_data";
+      }
+
+      async function uploadCreatorAssets() {
+        if (!creatorDataSourceFileInput?.files?.length) {
+          setMessage(formMessage, "error", "Choose at least one file to upload.");
+          return;
+        }
+        const purpose = creatorDataSourcePurpose?.value || defaultDataSourcePurpose();
+        const files = Array.from(creatorDataSourceFileInput.files);
+        creatorUploadDataSourceButton.disabled = true;
+        setMessage(formMessage, "info", `Uploading ${pluralize(files.length, "file")}…`);
+        try {
+          const uploaded = [];
+          for (const file of files) {
+            const content = await file.text();
+            const response = await fetch(state.creator_assets_url, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                file_name: file.name,
+                content,
+                content_type: file.type || null,
+                purpose,
+                learner_visible: true,
+              }),
+            });
+            if (!response.ok) {
+              throw new Error(await extractDetail(response));
+            }
+            uploaded.push(await response.json());
+          }
+          for (const record of uploaded.reverse()) {
+            creatorState.assets = [record, ...creatorState.assets.filter((asset) => asset.id !== record.id)];
+            attachCreatorAsset(record);
+          }
+          if (creatorDataSourceFileInput) {
+            creatorDataSourceFileInput.value = "";
+          }
+          setMessage(
+            formMessage,
+            "success",
+            `Uploaded ${pluralize(uploaded.length, "file")} and added ${pluralize(uploaded.length, "data source")} to this course setup.`,
+          );
+        } catch (error) {
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not upload the selected file.");
+        } finally {
+          creatorUploadDataSourceButton.disabled = false;
+        }
       }
 
       async function fetchCreatorSuggestedOutcomes(opts = {}) {
@@ -1319,7 +1557,7 @@
 
       async function fetchCreatorPlan() {
         creatorState.choices = readCreatorChoices();
-        setMessage(formMessage, "info", "Building a module plan from your brief...");
+          setMessage(formMessage, "info", "Building a deliverable plan from your brief...");
         try {
           const response = await fetch("/v1/course-generation/creator-plan", {
             method: "POST",
@@ -1335,6 +1573,9 @@
           }
           const payload = await response.json();
           creatorState.plan = payload.plan;
+          if (payload.plan?.creator_choices) {
+            applyCreatorChoicesToInputs(payload.plan.creator_choices);
+          }
           if (payload.learning_outcomes && payload.learning_outcomes.length) {
             creatorState.outcomes = payload.learning_outcomes.filter(Boolean);
           }
@@ -1345,12 +1586,12 @@
             formMessage,
             payload.source === "openai_live" ? "success" : "info",
             payload.source === "openai_live"
-              ? "Module plan ready. Review and create the draft when you're aligned."
-              : "Module plan ready (fallback planner). Review and create the draft when you're aligned.",
+              ? "Deliverable plan ready. Review and create the draft when you're aligned."
+              : "Deliverable plan ready (fallback planner). Review and create the draft when you're aligned.",
           );
           return true;
         } catch (error) {
-          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not generate the module plan.");
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not generate the deliverable plan.");
           return false;
         }
       }
@@ -1362,13 +1603,14 @@
         }
         generateButton.disabled = true;
         const originalLabel = generateButton.textContent;
+        let createdCourseRun = null;
         generateButton.textContent = "Creating draft…";
         if (creatorPlanPreview) {
           creatorPlanPreview.classList.add("creator-plan-preview-creating");
         }
         setMessage(formMessage, "info", "Creating your draft from this plan…");
         try {
-          const response = await fetch("/v1/course-runs/from-creator-plan", {
+          const response = await fetch("/v1/course-runs/from-creator-plan-async", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ plan: creatorState.plan }),
@@ -1376,10 +1618,10 @@
           if (!response.ok) {
             throw new Error(await extractDetail(response));
           }
-          const courseRun = await response.json();
+          const payload = await response.json();
+          createdCourseRun = payload.course_run;
           generateButton.textContent = "Opening draft…";
-          resetCreatorFlow();
-          await loadCourseDraft(courseRun.id, {
+          await loadCourseDraft(createdCourseRun.id, {
             silentMessage: true,
             historyMode: "push",
             tabAfterLoad: "drafts",
@@ -1388,10 +1630,14 @@
           setMessage(
             formMessage,
             "success",
-            `Draft created: “${courseRun.title}”. Opened on the Drafts tab.`,
+            `Draft created: “${createdCourseRun.title}”. Opened on the Drafts tab.`,
           );
+          resetCreatorFlow();
         } catch (error) {
-          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not create the draft.");
+          const message = createdCourseRun
+            ? "Your draft was created, but we couldn't open it yet. Your plan is still here so you can try again."
+            : (error instanceof Error ? error.message : "Could not create the draft.");
+          setMessage(formMessage, "error", message);
           if (creatorPlanPreview) {
             creatorPlanPreview.classList.remove("creator-plan-preview-creating");
           }
@@ -1404,18 +1650,31 @@
       function resetCreatorFlow() {
         creatorState.goal = "";
         creatorState.outcomes = [];
+        creatorState.choices = {
+          starter_type: "partial_implementation",
+          primary_database: "postgres",
+          cache_backend: "redis",
+          tech_stack: [],
+          data_sources: [],
+        };
         creatorState.plan = null;
         if (goalField) goalField.value = "";
+        if (creatorDataSourceFileInput) creatorDataSourceFileInput.value = "";
+        if (creatorDataSourcePurpose) creatorDataSourcePurpose.value = defaultDataSourcePurpose();
         renderCreatorOutcomes();
-        if (creatorPlanPreview) creatorPlanPreview.innerHTML = "";
+        renderCreatorDataSources();
+        if (creatorPlanPreview) {
+          creatorPlanPreview.classList.remove("creator-plan-preview-creating");
+          creatorPlanPreview.innerHTML = "";
+        }
         showCreatorStep(1);
       }
 
       function renderWorkflowProgress(courseRun = currentCourseRun, review = currentReview, events = currentEvents) {
         const showingDraftContext = currentTab === "drafts" && Boolean(courseRun);
         const loadingDraftContext = currentTab === "drafts" && !courseRun && (draftLoadInProgress || Boolean(pendingDraftId));
-        const readyModules = review?.counts?.ready_modules ?? 0;
-        const totalModules = review?.counts?.total_modules ?? courseRun?.modules?.length ?? 0;
+        const readyModules = review?.counts?.ready_deliverables ?? 0;
+        const totalModules = review?.counts?.total_deliverables ?? courseRun?.deliverables?.length ?? 0;
         const progressPercent = totalModules ? Math.min(100, Math.round((readyModules / totalModules) * 100)) : 0;
         const progressState = {
           brief: "current",
@@ -1438,7 +1697,7 @@
             workflowProgressCopy.textContent = "Write the goal and outcomes to create the first draft.";
             workflowProgressNext.textContent = "Next: Generate the course plan";
           }
-          workflowProgressCount.textContent = "0 of 0 modules ready";
+          workflowProgressCount.textContent = "0 of 0 deliverables ready";
           workflowReviewProgress.classList.add("hidden");
           workflowReviewProgress.dataset.tone = "active";
           workflowProgressBar.style.width = "0%";
@@ -1447,7 +1706,7 @@
           const nextTask = humanizeAuthorCopy(statusModel.nextTask);
           workflowProgressTitle.textContent = statusModel.currentTask;
           workflowProgressCopy.textContent = humanizeAuthorCopy(statusModel.latestMessage);
-          workflowProgressCount.textContent = `${readyModules} of ${totalModules} modules ready`;
+          workflowProgressCount.textContent = `${readyModules} of ${totalModules} deliverables ready`;
           workflowReviewProgress.classList.remove("hidden");
           workflowReviewProgress.dataset.tone = courseRun.status === "published"
             ? "live"
@@ -1480,7 +1739,7 @@
             progressState.review = "current";
           } else if (
             courseRun.generated_plan
-            || courseRun.modules.length
+            || courseRun.deliverables.length
             || courseRun.active_operation === "generation"
             || courseRun.stage === "drafting"
             || courseRun.status === "active"
@@ -1510,6 +1769,11 @@
         draftsTabPane.classList.toggle("active", !showCreate);
         renderWorkflowProgress();
         updateWorkspaceChrome();
+        if (currentCourseRun && currentTab === "drafts") {
+          ensureDraftPolling(currentCourseRun.id);
+        } else {
+          stopDraftPolling();
+        }
         if (options.updateUrl !== false) {
           writeUrlState({}, options.historyMode || "replace");
         }
@@ -1546,7 +1810,7 @@
               <p>${escapeHtml(courseRun?.summary || "We are generating the course plan and linked workflows.")}</p>
             </div>
           `;
-          moduleList.innerHTML = `<div class="review-item"><p>${escapeHtml(courseRun?.stage === "drafting" ? "We will fill in the module ladder here as soon as the draft is ready." : "No generated plan is stored on this draft yet.")}</p></div>`;
+          moduleList.innerHTML = `<div class="review-item"><p>${escapeHtml(courseRun?.stage === "drafting" ? "We will fill in the deliverable plan here as soon as the draft is ready." : "No generated deliverable plan is stored on this draft yet.")}</p></div>`;
           return;
         }
         renderPlan(plan, source, status);
@@ -1558,13 +1822,13 @@
           : "Fallback plan";
         sourceBadge.className = `badge ${source === "openai_live" ? "live" : "fallback"}`;
 
-        const focusAreas = [...new Set((plan.modules || []).flatMap((module) => module.overlays_hint || []))]
+        const focusAreas = [...new Set((plan.deliverables || []).flatMap((deliverable) => deliverable.overlays_hint || []))]
           .map((overlay) => pill(`Focus: ${friendlyFocusArea(overlay)}`))
           .join("");
         const noteItems = (plan.notes || []).map((note) => `<div class="review-item"><p>${escapeHtml(note)}</p></div>`).join("");
         planSummary.innerHTML = `
           <div class="summary-item">
-            <h4>Course plan</h4>
+            <h4>Deliverable plan</h4>
             <p>${escapeHtml(plan.summary)}</p>
             <div class="pill-row">
               ${pill(`Course shape: ${friendlyCourseShape(plan.package_type)}`)}
@@ -1575,14 +1839,14 @@
           ${noteItems ? `<div class="summary-item"><h4>Why this plan</h4><div class="review-list">${noteItems}</div></div>` : ""}
         `;
 
-        moduleList.innerHTML = (plan.modules || []).map((module, index) => `
+        moduleList.innerHTML = (plan.deliverables || []).map((deliverable, index) => `
           <div class="module-item">
-            <h4>${index + 1}. ${escapeHtml(module.title)}</h4>
-            <p>${escapeHtml(module.summary || "")}</p>
+            <h4>${index + 1}. ${escapeHtml(deliverable.title)}</h4>
+            <p>${escapeHtml(deliverable.summary || "")}</p>
             <div class="pill-row">
-              ${module.archetype_hint ? pill(`Build pattern: ${friendlyBuildPattern(module.archetype_hint)}`) : ""}
-              ${module.domain_pack_hint ? pill(`Use case: ${friendlyUseCase(module.domain_pack_hint)}`) : ""}
-              ${(module.overlays_hint || []).map((overlay) => pill(`Focus: ${friendlyFocusArea(overlay)}`)).join("")}
+              ${deliverable.archetype_hint ? pill(`Build pattern: ${friendlyBuildPattern(deliverable.archetype_hint)}`) : ""}
+              ${deliverable.domain_pack_hint ? pill(`Use case: ${friendlyUseCase(deliverable.domain_pack_hint)}`) : ""}
+              ${(deliverable.overlays_hint || []).map((overlay) => pill(`Focus: ${friendlyFocusArea(overlay)}`)).join("")}
             </div>
           </div>
         `).join("");
@@ -1594,7 +1858,8 @@
         updateWorkspaceChrome();
         const overviewPills = [
           pill(`Last updated: ${formatDate(courseRun.updated_at)}`),
-          pill(`${courseRun.modules.length} module${courseRun.modules.length === 1 ? "" : "s"}`),
+          pill(`${courseRun.deliverables.length} deliverable${courseRun.deliverables.length === 1 ? "" : "s"}`),
+          pill(usageSpendLabel(courseRun.ai_usage)),
           courseRun.base_archetype ? pill(`Build pattern: ${friendlyBuildPattern(courseRun.base_archetype)}`) : "",
           courseRun.active_operation ? pill(`Working on: ${friendlyOperation(courseRun.active_operation)}`) : "",
         ].filter(Boolean).join("");
@@ -1615,7 +1880,6 @@
           ` : ""}
         `;
         const isBusy = Boolean(courseRun.active_operation);
-        syncButton.disabled = false;
         materializeButton.disabled = courseRun.stage === "drafting" || isBusy;
         publishButton.disabled = courseRun.stage !== "ready_to_publish" || isBusy;
         createRevisionButton.disabled = courseRun.status !== "published" || isBusy;
@@ -1628,8 +1892,6 @@
         createRevisionButton.classList.toggle("subtle", !(isPublished && !isBusy));
         materializeButton.classList.toggle("subtle", true);
         materializeButton.classList.toggle("primary", false);
-        syncButton.classList.toggle("subtle", true);
-        syncButton.classList.toggle("primary", false);
 
         renderDraftSwitcherMenu(recentDraftRuns);
       }
@@ -1660,7 +1922,7 @@
         } else if (activeOperation === "materialize") {
           badgeText = "Preparing bundle";
           badgeKind = "fallback";
-          headline = "We are building the review bundle now.";
+          headline = "We are building the review package now.";
           explanation = latestEvent?.payload?.message || "The course bundle and linked workflow outputs are being materialized for review.";
         } else if (activeOperation === "publish") {
           badgeText = "Publishing now";
@@ -1760,9 +2022,9 @@
           target.classList.add("hidden");
           return;
         }
-        const moduleResults = evalReport.module_results || [];
-        const passed = moduleResults.filter((r) => r.progression_observed || r.good_attempt?.passed).length;
-        const total = moduleResults.length;
+        const deliverableResults = evalReport.deliverable_results || [];
+        const passed = deliverableResults.filter((r) => r.progression_observed || r.good_attempt?.passed).length;
+        const total = deliverableResults.length;
         const overall = evalReport.overall_status || "unknown";
         const tone = overall === "passed" ? "passed" : overall === "blocked" ? "blocked" : "neutral";
         target.classList.remove("hidden");
@@ -1772,7 +2034,7 @@
             <span class="badge ${tone === "passed" ? "live" : tone === "blocked" ? "fallback" : "fallback"}">${escapeHtml(titleCase(overall))}</span>
           </div>
           <div class="panel-body">
-            <p class="learner-eval-line">${passed}/${total} modules cleared in the latest learner walkthrough.</p>
+            <p class="learner-eval-line">${passed}/${total} deliverables cleared in the latest learner walkthrough.</p>
             <p class="learner-eval-meta">Run on ${escapeHtml(formatDate(evalReport.created_at))}</p>
             ${evalReport.notes && evalReport.notes.length ? `
               <ul class="learner-eval-notes">${evalReport.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
@@ -1801,14 +2063,7 @@
 
       function shouldPollDraft(courseRun, review) {
         if (!courseRun) return false;
-        if (courseRun.active_operation) {
-          return true;
-        }
-        if (courseRun.stage === "drafting" || courseRun.status === "active") {
-          return true;
-        }
-        const workflows = review?.linked_workflows || [];
-        return workflows.some((workflow) => workflow.status === "active");
+        return currentTab === "drafts";
       }
 
       async function fetchWorkflowDetails(workflows) {
@@ -1852,7 +2107,7 @@
           } catch (_error) {
             stopDraftPolling();
           }
-        }, 3000);
+        }, 5000);
       }
 
       function renderReview(review, courseRun, events, workflowDetails = {}) {
@@ -1861,13 +2116,13 @@
         const workflows = review.linked_workflows || [];
         const pendingWorkflows = workflows.filter((workflow) => workflow.pending_gate);
         const statusModel = buildStatusModel(courseRun, review, events);
-        const readyModules = counts.ready_modules ?? 0;
-        const totalModules = counts.total_modules ?? courseRun.modules.length;
-        const bundleCount = counts.modules_with_bundle ?? 0;
+        const readyModules = counts.ready_deliverables ?? 0;
+        const totalModules = counts.total_deliverables ?? courseRun.deliverables.length;
+        const bundleCount = counts.deliverables_with_bundle ?? 0;
         const publishedAssignments = counts.published_workflow_runs ?? 0;
 
         reviewMetrics.innerHTML = `
-          <div class="metric-item"><p><strong>Modules ready</strong><br />${readyModules} of ${totalModules}</p></div>
+          <div class="metric-item"><p><strong>Deliverables ready</strong><br />${readyModules} of ${totalModules}</p></div>
           <div class="metric-item"><p><strong>Review bundles</strong><br />${bundleCount} ready</p></div>
           <div class="metric-item"><p><strong>Assignment versions ready</strong><br />${publishedAssignments} published</p></div>
           <div class="metric-item"><p><strong>Pending on</strong><br />${escapeHtml(statusModel.owner)}</p></div>
@@ -1923,14 +2178,14 @@
             `;
           }
           if (courseRun.stage === "blocked" || courseRun.last_error) {
-            return `
-              <div class="review-empty review-empty-warn">
-                <p class="review-empty-eyebrow">Blocked</p>
-                <h4>The draft hit a problem</h4>
-                <p>${escapeHtml(courseRun.last_error || "Open the activity feed to see what stopped the build.")}</p>
-                <p class="review-empty-hint">Refresh the draft, then start a new version if needed.</p>
-              </div>
-            `;
+          return `
+            <div class="review-empty review-empty-warn">
+              <p class="review-empty-eyebrow">Blocked</p>
+              <h4>The draft hit a problem</h4>
+              <p>${escapeHtml(courseRun.last_error || "Open the activity feed to see what stopped the build.")}</p>
+              <p class="review-empty-hint">This page updates automatically. Start a new version if you want to retry from a clean draft.</p>
+            </div>
+          `;
           }
           return `
             <div class="review-empty">
@@ -1953,7 +2208,7 @@
               const hasReviewArtifact = Boolean(artifactKind);
               const reviewPromptByGate = {
                 gate_1_spec_review: "Approve if the assignment contract, tools, checks, and endpoints match the learner task you want to ship.",
-                gate_2_progression_review: "Approve if the module ladder teaches the work in the right order and the readiness checks make sense.",
+                gate_2_progression_review: "Approve if the deliverable plan teaches the work in the right order and the readiness checks make sense.",
                 gate_3_pre_publish: "Approve if this assignment package is ready to publish for learners.",
               };
               const gatePrompt = pendingGate === "gate_1_spec_review" && artifactKind === "archetype_blueprint"
@@ -1973,7 +2228,7 @@
                         : `<p>${escapeHtml(
                             hasReviewArtifact
                               ? gatePrompt
-                              : "Review details are still loading. Refresh the draft before deciding on this step."
+                              : "Review details are still loading. This page will keep updating until the review package is ready."
                           )}</p>`}
                     </div>
                     <div class="workflow-action-bar">
@@ -2074,7 +2329,7 @@
               ${version.default_for_new_enrollments ? pill("Default for new enrollments") : ""}
               ${version.is_latest ? pill("Latest publish") : ""}
               ${pill(`${version.learner_count} learner${version.learner_count === 1 ? "" : "s"} pinned`)}
-              ${pill(`${version.module_count} module${version.module_count === 1 ? "" : "s"}`)}
+              ${pill(`${version.deliverable_count} deliverable${version.deliverable_count === 1 ? "" : "s"}`)}
               ${pill("New enrollments only")}
             </div>
             <div class="review-list">
@@ -2252,6 +2507,9 @@
           return;
         }
         applyCreatorChoicesToInputs(creatorState.choices);
+        if (creatorDataSourcePurpose && !(creatorState.choices.data_sources || []).length) {
+          creatorDataSourcePurpose.value = defaultDataSourcePurpose();
+        }
         showCreatorStep(3);
       });
 
@@ -2301,6 +2559,40 @@
         outcomesCount.textContent = `${inputs.length} outcome${inputs.length === 1 ? "" : "s"}`;
       });
 
+      creatorSelectedDataSources?.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const action = target.closest("[data-remove-data-source]");
+        if (!(action instanceof HTMLElement)) return;
+        const assetId = action.dataset.removeDataSource;
+        if (!assetId) return;
+        detachCreatorAsset(assetId);
+      });
+
+      creatorAssetLibrary?.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const action = target.closest("[data-toggle-data-source]");
+        if (!(action instanceof HTMLElement)) return;
+        const assetId = action.dataset.toggleDataSource;
+        if (!assetId) return;
+        const selectedIds = selectedCreatorAssetIds();
+        if (selectedIds.has(assetId)) {
+          detachCreatorAsset(assetId);
+          return;
+        }
+        const asset = creatorState.assets.find((item) => item.id === assetId);
+        if (!asset) {
+          setMessage(formMessage, "error", "That uploaded file is no longer available.");
+          return;
+        }
+        attachCreatorAsset(asset);
+      });
+
+      creatorUploadDataSourceButton?.addEventListener("click", async () => {
+        await uploadCreatorAssets();
+      });
+
       document.querySelectorAll("[data-creator-prev]").forEach((btn) => {
         btn.addEventListener("click", () => {
           const target = parseInt(btn.dataset.creatorPrev, 10);
@@ -2325,25 +2617,10 @@
         }
       });
 
-      syncButton.addEventListener("click", async () => {
-        if (!currentCourseRun) return;
-        syncButton.disabled = true;
-        setMessage(formMessage, "info", "Refreshing draft details...");
-        try {
-          await refreshDraftDetails(currentCourseRun.id);
-          await refreshRecentDrafts();
-          setMessage(formMessage, "success", "Draft refreshed.");
-        } catch (error) {
-          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not refresh the draft details.");
-        } finally {
-          syncButton.disabled = false;
-        }
-      });
-
       materializeButton.addEventListener("click", async () => {
         if (!currentCourseRun) return;
         materializeButton.disabled = true;
-        setMessage(formMessage, "info", "Starting bundle materialization and following it in Drafts...");
+        setMessage(formMessage, "info", "Building the review package and following it in Drafts...");
         try {
           const response = await fetch(materializeUrlTemplate.replace("{course_run_id}", currentCourseRun.id), {
             method: "POST",
@@ -2356,9 +2633,9 @@
           const payload = await response.json();
           await refreshDraftDetails(payload.course_run.id);
           await refreshRecentDrafts();
-          setMessage(formMessage, "success", "Bundle materialization started. We’ll keep updating the Drafts tab until the review bundle is ready.");
+          setMessage(formMessage, "success", "Review package build started. We’ll keep updating the Drafts tab until the files are ready.");
         } catch (error) {
-          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not materialize the course bundle.");
+          setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not build the review package.");
         } finally {
           materializeButton.disabled = currentCourseRun?.stage === "drafting" || Boolean(currentCourseRun?.active_operation);
         }
@@ -2578,6 +2855,7 @@
           setActiveTab("create", { updateUrl: false });
           writeUrlState({ draftId: null, tab: "create" }, "replace");
           await refreshRecentDrafts();
+          await refreshCreatorAssets();
           setMessage(
             formMessage,
             "success",
@@ -2615,6 +2893,10 @@
       });
 
       renderCreatorOutcomes();
+      if (creatorDataSourcePurpose && !creatorDataSourcePurpose.value) {
+        creatorDataSourcePurpose.value = defaultDataSourcePurpose();
+      }
+      renderCreatorDataSources();
       showCreatorStep(1);
       updateBriefCounters();
       const urlState = readUrlState();
@@ -2649,6 +2931,7 @@
       }).catch((error) => {
         recentDrafts.innerHTML = `<div class="review-item"><p>${escapeHtml(error instanceof Error ? error.message : "Could not load recent drafts.")}</p></div>`;
       });
+      refreshCreatorAssets();
 
       revealPanelFromHash(window.location.hash);
 

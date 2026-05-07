@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.domain.assets import (
+    CreateCreatorAssetRequest,
+    CreatorAssetList,
+    CreatorAssetRecord,
+    DeleteCreatorAssetResult,
+)
 from app.domain.course import (
     CourseEvent,
     CourseGenerationStatus,
@@ -75,6 +81,7 @@ from app.domain.workflow import (
 from app.services.course_patterns import CATALOG_PATTERNS, course_pattern_by_slug
 from app.services.assignment_design_inference import AssignmentDesignInference, GenerationIntake, infer_assignment_design
 from app.services.course_generation_service import CourseGenerationService
+from app.services.creator_asset_service import CreatorAssetService
 from app.services.course_workflow_service import CourseWorkflowConflictError, CourseWorkflowService
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.examples import get_support_triage_example, get_support_triage_passing_submission
@@ -99,6 +106,10 @@ def _course_workflow_service(request: Request) -> CourseWorkflowService:
 
 def _course_generation_service(request: Request) -> CourseGenerationService:
     return request.app.state.course_generation_service
+
+
+def _creator_asset_service(request: Request) -> CreatorAssetService:
+    return request.app.state.creator_asset_service
 
 
 def _task_agent_blackbox_runner(request: Request) -> TaskAgentBlackBoxRunner:
@@ -419,6 +430,30 @@ def get_course_generation_status(request: Request) -> CourseGenerationStatus:
     return _course_generation_service(request).status()
 
 
+@router.get("/v1/creator-assets", response_model=CreatorAssetList, tags=["course"])
+def list_creator_assets(request: Request) -> CreatorAssetList:
+    return _creator_asset_service(request).list_assets()
+
+
+@router.post("/v1/creator-assets", response_model=CreatorAssetRecord, tags=["course"])
+def create_creator_asset(
+    payload: CreateCreatorAssetRequest,
+    request: Request,
+) -> CreatorAssetRecord:
+    try:
+        return _creator_asset_service(request).create_asset(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/v1/creator-assets/{asset_id}", response_model=DeleteCreatorAssetResult, tags=["course"])
+def delete_creator_asset(asset_id: str, request: Request) -> DeleteCreatorAssetResult:
+    deleted = _creator_asset_service(request).delete_asset(asset_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Unknown creator asset '{asset_id}'.")
+    return DeleteCreatorAssetResult(asset_id=asset_id)
+
+
 @router.post("/v1/course-generation/suggest-outcomes", response_model=SuggestLearningOutcomesResponse, tags=["course"])
 def suggest_learning_outcomes(
     payload: SuggestLearningOutcomesRequest,
@@ -459,6 +494,17 @@ def create_course_run_from_creator_plan(
 ) -> CourseRun:
     try:
         return _course_generation_service(request).create_course_run_from_creator_plan(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/v1/course-runs/from-creator-plan-async", response_model=QueueCourseGenerationResponse, tags=["course"])
+def queue_course_run_from_creator_plan(
+    payload: CreateCourseFromCreatorPlanRequest,
+    request: Request,
+) -> QueueCourseGenerationResponse:
+    try:
+        return _course_generation_service(request).queue_course_run_from_creator_plan(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -772,11 +818,11 @@ def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollmen
 def get_lms_module_experience(
     enrollment_id: str,
     request: Request,
-    module_id: str | None = Query(None, description="Optional assignment module id, e.g. module_1"),
+    deliverable_id: str | None = Query(None, description="Optional project deliverable id, e.g. exercise/01-contract"),
 ) -> LearnerModuleExperience:
     service = _lms_service(request)
     try:
-        return service.get_module_experience(enrollment_id, module_id)
+        return service.get_deliverable_experience(enrollment_id, deliverable_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except LMSConflictError as exc:
@@ -787,11 +833,11 @@ def get_lms_module_experience(
 def get_lms_learner_view(
     enrollment_id: str,
     request: Request,
-    module_id: str | None = Query(None, description="Optional learner-facing module id."),
+    deliverable_id: str | None = Query(None, description="Optional learner-facing deliverable id."),
 ) -> LearnerTestingView:
     service = _lms_service(request)
     try:
-        return service.get_learner_view(enrollment_id, module_id)
+        return service.get_learner_view(enrollment_id, deliverable_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except LMSConflictError as exc:
@@ -843,11 +889,11 @@ def launch_lms_workspace(
 def list_lms_workspace_files(
     enrollment_id: str,
     request: Request,
-    module_id: str | None = Query(None, description="Optional learner-facing module id."),
+    deliverable_id: str | None = Query(None, description="Optional learner-facing deliverable id."),
 ) -> LearnerWorkspaceFileList:
     service = _lms_service(request)
     try:
-        return service.list_workspace_files(enrollment_id, module_id)
+        return service.list_workspace_files(enrollment_id, deliverable_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except LMSConflictError as exc:
@@ -859,11 +905,11 @@ def read_lms_workspace_file(
     enrollment_id: str,
     request: Request,
     path: str = Query(..., description="Relative path inside the learner workspace, e.g. app.py"),
-    module_id: str | None = Query(None, description="Optional learner-facing module id."),
+    deliverable_id: str | None = Query(None, description="Optional learner-facing deliverable id."),
 ) -> LearnerWorkspaceFileContent:
     service = _lms_service(request)
     try:
-        return service.read_workspace_file(enrollment_id, path, module_id)
+        return service.read_workspace_file(enrollment_id, path, deliverable_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except FileNotFoundError as exc:
@@ -895,7 +941,7 @@ def submit_lms_module(
 ) -> LearnerModuleExperience:
     service = _lms_service(request)
     try:
-        return service.submit_module(enrollment_id, payload)
+        return service.submit_project(enrollment_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
     except LMSConflictError as exc:

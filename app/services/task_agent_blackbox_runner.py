@@ -8,6 +8,7 @@ import httpx
 
 from app.domain.grader import ControlFlag
 from app.domain.grading import (
+    LiveAssignmentGradeReport,
     ApprovalRecord,
     EvalRunEvidence,
     EscalationRecord,
@@ -19,8 +20,8 @@ from app.domain.grading import (
     ToolCallRecord,
 )
 from app.domain.task_agent import TaskAgentServiceSpec
-from app.services.grader_planner import build_task_agent_grader_plan
-from app.services.task_agent_grader import grade_task_agent_submission
+from app.services.grader_planner import build_all_task_agent_review_area_plans, build_task_agent_grader_plan
+from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 
 
 class TaskAgentRunnerError(RuntimeError):
@@ -80,6 +81,48 @@ class TaskAgentBlackBoxRunner:
             metadata={"collected_from": request.base_url, "module_id": module_id},
         )
 
+    def collect_assignment_submission(
+        self,
+        spec: TaskAgentServiceSpec,
+        request: LiveGradeTaskAgentRequest,
+    ) -> TaskAgentSubmission:
+        plans = build_all_task_agent_review_area_plans(spec)
+        ordered_cases = OrderedDict((case.id, case) for case in spec.eval_dataset.cases)
+        case_ids: set[str] = set()
+        dry_run_case_ids: set[str] = set()
+
+        for plan in plans.module_plans:
+            for entry in plan.entries:
+                if entry.dependencies.dataset_id == spec.eval_dataset.id:
+                    case_ids.update(ordered_cases.keys())
+                case_ids.update(entry.dependencies.eval_case_ids)
+                if request.include_dry_runs and ControlFlag.dry_run in entry.controls:
+                    dry_run_case_ids.update(entry.dependencies.eval_case_ids)
+
+        if not case_ids:
+            raise TaskAgentRunnerError("No eval cases were activated for the assignment review.")
+
+        client = self.client_factory(request.base_url, request.timeout_ms / 1000)
+        try:
+            runs: list[EvalRunEvidence] = []
+            for case_id in ordered_cases.keys():
+                if case_id not in case_ids:
+                    continue
+                case = ordered_cases[case_id]
+                runs.append(self._execute_case(client, case.id, case.input, request, dry_run=False))
+                if case_id in dry_run_case_ids:
+                    dry_input = dict(case.input)
+                    dry_input["dry_run"] = True
+                    runs.append(self._execute_case(client, case.id, dry_input, request, dry_run=True))
+        finally:
+            client.close()
+
+        return TaskAgentSubmission(
+            submission_id=f"blackbox::assignment::{request.base_url}",
+            runs=runs,
+            metadata={"collected_from": request.base_url, "scope": "assignment"},
+        )
+
     def grade_live(
         self,
         spec: TaskAgentServiceSpec,
@@ -92,6 +135,19 @@ class TaskAgentBlackBoxRunner:
             base_url=request.base_url,
             submission=submission,
             grade_report=grade_report,
+        )
+
+    def grade_assignment_live(
+        self,
+        spec: TaskAgentServiceSpec,
+        request: LiveGradeTaskAgentRequest,
+    ) -> LiveAssignmentGradeReport:
+        submission = self.collect_assignment_submission(spec, request)
+        assignment_report = grade_assignment_submission(spec, submission)
+        return LiveAssignmentGradeReport(
+            base_url=request.base_url,
+            submission=submission,
+            assignment_report=assignment_report,
         )
 
     def _execute_case(

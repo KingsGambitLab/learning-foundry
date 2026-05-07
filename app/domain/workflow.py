@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.ai import AIUsageSummary
 from app.domain.sandbox import SandboxExecutionResult
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.assignment_design_inference import GenerationIntake
@@ -80,6 +81,40 @@ class ReviewerFinding(BaseModel):
     detail: str
 
 
+class FailureContextValidationIssue(BaseModel):
+    level: str
+    code: str
+    location: str
+    message: str
+
+
+class FailureContextModuleReport(BaseModel):
+    module_id: str
+    compile_succeeded: bool
+    runtime_succeeded: bool
+    error: str | None = None
+    stderr_excerpt: str | None = None
+
+
+class FailureContextSandboxSummary(BaseModel):
+    error: str | None = None
+    build_stdout_excerpt: str | None = None
+    build_stderr_excerpt: str | None = None
+    run_stdout_excerpt: str | None = None
+    run_stderr_excerpt: str | None = None
+    failed_modules: list[str] = Field(default_factory=list)
+    module_reports: list[FailureContextModuleReport] = Field(default_factory=list)
+
+
+class FailureContext(BaseModel):
+    source_node_kind: WorkflowNodeKind
+    source_node_attempt: int
+    source_summary: str
+    findings: list[ReviewerFinding] = Field(default_factory=list)
+    validation_issues: list[FailureContextValidationIssue] = Field(default_factory=list)
+    sandbox: FailureContextSandboxSummary | None = None
+
+
 class WorkflowNodeExecution(BaseModel):
     node_id: str
     kind: WorkflowNodeKind
@@ -134,6 +169,7 @@ class MaterializedBundle(BaseModel):
 class WorkflowArtifacts(BaseModel):
     draft_kind: DraftKind
     task_agent_spec: TaskAgentServiceSpec | None = None
+    ai_usage: AIUsageSummary = Field(default_factory=AIUsageSummary)
     validation_summary: JsonObject | None = None
     progression_preview: list[JsonObject] = Field(default_factory=list)
     artifact_plan: list[str] = Field(default_factory=list)

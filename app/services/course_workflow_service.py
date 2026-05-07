@@ -7,12 +7,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.course import (
     CourseAsyncOperation,
     CourseLinkedBundleSummary,
     CourseLinkedWorkflowSummary,
     CourseGenerationSource,
     CourseGenerationStatus,
+    CreatorCourseSetupChoices,
     LocalDraftResetResult,
     CourseModuleDraft,
     CourseModuleReview,
@@ -30,7 +32,7 @@ from app.domain.course import (
     QueueCourseRevisionResponse,
 )
 from app.domain.registry import PackageType, RiskClass
-from app.domain.task_agent import AssignmentDesignSpec, RetrievalMode
+from app.domain.task_agent import AssignmentDesignSpec, ModuleSpec, RetrievalMode, TaskAgentServiceSpec
 from app.domain.publish import PublishSnapshot, PublishedVersionList, PublishedVersionSummary
 from app.domain.testing import (
     CreateCreatorFeedbackRequest,
@@ -52,6 +54,7 @@ from app.domain.workflow import (
 )
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_patterns import CoursePattern, course_pattern_by_slug
+from app.services.creator_asset_service import CreatorAssetService
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design, infer_risk_class
 from app.services.lms_service import default_learner_workspace_dir
 from app.services.publish_snapshot_service import PublishSnapshotService
@@ -73,16 +76,26 @@ class CourseWorkflowService:
         workflow_service: WorkflowService,
         materializer: CourseArtifactMaterializer | None = None,
         publish_snapshot_service: PublishSnapshotService | None = None,
+        creator_asset_service: CreatorAssetService | None = None,
         job_runner: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self.store = store
         self.workflow_service = workflow_service
         self.materializer = materializer or CourseArtifactMaterializer()
         self.publish_snapshot_service = publish_snapshot_service or PublishSnapshotService(store, workflow_service)
+        self.creator_asset_service = creator_asset_service
         self.job_runner = job_runner or self._run_job_in_background
 
     def list_runs(self, limit: int = 50) -> CourseRunList:
-        return CourseRunList(runs=self.store.list_course_runs(limit=limit))
+        refreshed_runs: list[CourseRunSummary] = []
+        for summary in self.store.list_course_runs(limit=limit):
+            run = self.store.get_course_run(summary.id)
+            if run is None:
+                continue
+            refreshed = self._compute_refreshed_run(run)
+            self.store.save_course_run(refreshed)
+            refreshed_runs.append(CourseRunSummary.from_run(refreshed))
+        return CourseRunList(runs=refreshed_runs)
 
     def get_run(self, course_run_id: str) -> CourseRun | None:
         return self.store.get_course_run(course_run_id)
@@ -114,6 +127,8 @@ class CourseWorkflowService:
             self.workflow_service.workspace_manager.base_dir.resolve(),
             default_learner_workspace_dir().resolve(),
         }
+        if self.creator_asset_service is not None:
+            candidate_dirs.add(self.creator_asset_service.base_dir.resolve())
         for directory in sorted(candidate_dirs):
             path = Path(directory)
             if path.exists():
@@ -133,6 +148,7 @@ class CourseWorkflowService:
             deleted_creator_feedback=counts.get("deleted_creator_feedback", 0),
             deleted_learner_feedback=counts.get("deleted_learner_feedback", 0),
             deleted_learner_eval_reports=counts.get("deleted_learner_eval_reports", 0),
+            deleted_creator_assets=counts.get("deleted_creator_assets", 0),
             cleared_directories=cleared_directories,
         )
 
@@ -164,6 +180,7 @@ class CourseWorkflowService:
         goal: str,
         learning_outcomes: list[str],
         package_type_hint: PackageType | None = None,
+        creator_choices: CreatorCourseSetupChoices | None = None,
         generation_status: CourseGenerationStatus | None = None,
     ) -> CourseRun:
         intake = GenerationIntake(
@@ -171,12 +188,22 @@ class CourseWorkflowService:
             problem_statement=goal,
             learning_outcomes=learning_outcomes,
             package_type_hint=package_type_hint,
+            starter_type=(creator_choices.starter_type if creator_choices is not None else None),
+            primary_database=(creator_choices.primary_database if creator_choices is not None else None),
+            cache_backend=(creator_choices.cache_backend if creator_choices is not None else None),
+            tech_stack=(list(creator_choices.tech_stack) if creator_choices is not None else []),
+            data_sources=(list(creator_choices.data_sources) if creator_choices is not None else []),
         )
         inferred = infer_assignment_design(
             title=title,
             problem_statement=goal,
             learning_outcomes=learning_outcomes,
             package_type_hint=package_type_hint,
+            starter_type=intake.starter_type,
+            primary_database=intake.primary_database,
+            cache_backend=intake.cache_backend,
+            tech_stack=intake.tech_stack,
+            data_sources=intake.data_sources,
         )
         now = datetime.now(UTC)
         course_run_id = f"course_{uuid4().hex[:12]}"
@@ -210,6 +237,9 @@ class CourseWorkflowService:
                 "goal": goal,
                 "learning_outcome_count": len(learning_outcomes),
                 "package_type_hint": package_type_hint.value if package_type_hint is not None else None,
+                "starter_type": creator_choices.starter_type.value if creator_choices is not None else None,
+                "primary_database": creator_choices.primary_database if creator_choices is not None else None,
+                "cache_backend": creator_choices.cache_backend if creator_choices is not None else None,
             },
         )
         return course_run
@@ -221,6 +251,7 @@ class CourseWorkflowService:
         plan: GeneratedCoursePlan,
         source: CourseGenerationSource,
         generation_status: CourseGenerationStatus,
+        usage: AIUsageSummary | None = None,
     ) -> CourseRun:
         existing = self._require_run(course_run_id)
         course_run = self._build_course_run(
@@ -254,6 +285,8 @@ class CourseWorkflowService:
         course_run.generated_plan = self.generated_plan_from_run(course_run, notes=plan.notes)
         course_run.generation_source = source
         course_run.generation_status = generation_status
+        course_run.own_ai_usage = merge_ai_usage(existing.own_ai_usage, usage)
+        course_run.ai_usage = course_run.own_ai_usage
         course_run.active_operation = None
         course_run.last_error = None
         self.store.save_course_run(course_run)
@@ -266,6 +299,7 @@ class CourseWorkflowService:
                 "model_id": generation_status.model_id,
                 "message": generation_status.message,
                 "module_count": len(course_run.modules),
+                "ai_usage": (usage.model_dump(mode="json") if usage is not None else None),
             },
         )
         return course_run
@@ -336,6 +370,7 @@ class CourseWorkflowService:
             shared_workflow_run_id = None
         else:
             shared_run = self._create_progressive_workflow(title, summary, modules, shared_design_spec)
+            shared_run = self._ensure_progressive_workflow_matches_modules(shared_run, modules)
             aligned_modules = self._align_progressive_modules(modules, shared_run)
             module_drafts = [
                 self._module_draft_from_workflow(
@@ -522,11 +557,18 @@ class CourseWorkflowService:
                 f"Publish snapshot '{publish_snapshot_id}' does not have a learner package to evaluate."
             )
 
-        learner_module_ids = {module.module_id for module in snapshot.learner_package.modules}
-        unknown_modules = [result.module_id for result in request.module_results if result.module_id not in learner_module_ids]
-        if unknown_modules:
+        learner_deliverable_ids = {
+            deliverable.deliverable_id
+            for deliverable in snapshot.learner_package.deliverables
+        }
+        unknown_deliverables = [
+            result.deliverable_id
+            for result in request.deliverable_results
+            if result.deliverable_id not in learner_deliverable_ids
+        ]
+        if unknown_deliverables:
             raise CourseWorkflowConflictError(
-                f"Learner evaluation report includes unknown module ids for snapshot '{publish_snapshot_id}': {', '.join(unknown_modules)}."
+                f"Learner evaluation report includes unknown deliverable ids for snapshot '{publish_snapshot_id}': {', '.join(unknown_deliverables)}."
             )
 
         learner_id = request.learner_id
@@ -548,7 +590,7 @@ class CourseWorkflowService:
             "passed"
             if all(
                 result.good_attempt.status == "passed" and result.progression_observed
-                for result in request.module_results
+                for result in request.deliverable_results
             )
             else "failed"
         )
@@ -561,7 +603,7 @@ class CourseWorkflowService:
             created_at=datetime.now(UTC),
             overall_status=overall_status,
             notes=list(request.notes),
-            module_results=request.module_results,
+            deliverable_results=request.deliverable_results,
         )
         self.store.save_learner_eval_report(report)
         self.store.append_course_event(
@@ -571,7 +613,7 @@ class CourseWorkflowService:
                 "report_id": report.id,
                 "publish_snapshot_id": publish_snapshot_id,
                 "overall_status": report.overall_status,
-                "module_count": len(report.module_results),
+                "deliverable_count": len(report.deliverable_results),
                 "enrollment_id": request.enrollment_id,
             },
         )
@@ -610,7 +652,7 @@ class CourseWorkflowService:
                     is_latest=index == 0,
                     default_for_new_enrollments=course_run.latest_publish_snapshot_id == snapshot.id or (index == 0 and course_run.latest_publish_snapshot_id is None),
                     learner_count=enrollment_counts.get(snapshot.id, 0),
-                    module_count=len(learner_package.modules) if learner_package is not None else 0,
+                    deliverable_count=len(learner_package.deliverables) if learner_package is not None else 0,
                     compatibility="new_enrollments_only",
                     changes=self._published_version_changes(snapshot, previous),
                 )
@@ -707,14 +749,21 @@ class CourseWorkflowService:
 
     def _compute_refreshed_run(self, course_run: CourseRun) -> CourseRun:
         if course_run.stage == CourseRunStage.drafting and not course_run.modules:
+            course_run.ai_usage = course_run.own_ai_usage
             return course_run
         refreshed_run = course_run.model_copy(deep=True)
         module_drafts: list[CourseModuleDraft] = []
         shared_run = None
+        linked_runs: list[WorkflowRun] = []
         if refreshed_run.shared_workflow_run_id is not None:
             shared_run = self.workflow_service.get_run(refreshed_run.shared_workflow_run_id)
 
         if shared_run is not None:
+            shared_run = self._ensure_progressive_workflow_matches_modules(
+                shared_run,
+                [self._request_from_module_draft(module) for module in refreshed_run.modules],
+            )
+            linked_runs.append(shared_run)
             aligned_modules = self._align_progressive_modules(
                 [self._request_from_module_draft(module) for module in refreshed_run.modules],
                 shared_run,
@@ -746,6 +795,7 @@ class CourseWorkflowService:
                     refreshed.notes.append("Linked assignment workflow run is missing.")
                     module_drafts.append(refreshed)
                     continue
+                linked_runs.append(child_run)
                 module_drafts.append(
                     self._module_draft_from_workflow(
                         self._request_from_module_draft(module),
@@ -764,6 +814,10 @@ class CourseWorkflowService:
         refreshed_run.stage = stage if refreshed_run.status != CourseRunStatus.published else CourseRunStage.published
         refreshed_run.status = status if refreshed_run.status != CourseRunStatus.published else CourseRunStatus.published
         refreshed_run.updated_at = datetime.now(UTC)
+        refreshed_run.ai_usage = merge_ai_usage(
+            refreshed_run.own_ai_usage,
+            *[run.artifacts.ai_usage for run in linked_runs],
+        )
         if refreshed_run.generated_plan is not None:
             refreshed_run.generated_plan = self.generated_plan_from_run(
                 refreshed_run,
@@ -914,8 +968,6 @@ class CourseWorkflowService:
             linked_run = linked_runs.get(module.workflow_run_id) if module.workflow_run_id else None
             linked_summary = self._linked_workflow_summary(linked_run)
             module_blockers = self._module_blockers(module, linked_run)
-            if course_run.shared_workflow_run_id is not None and not module.checkpoint_module_ids:
-                module_blockers.append("Progressive module is not aligned to any shared assignment checkpoints yet.")
             bundle_available = bool(
                 linked_run and linked_run.artifacts.materialized_bundle is not None
             )
@@ -945,7 +997,6 @@ class CourseWorkflowService:
                     module_slug=module.module_slug,
                     title=module.title,
                     summary=module.summary,
-                    checkpoint_module_ids=list(module.checkpoint_module_ids),
                     design_spec=module.design_spec,
                     domain_pack=module.domain_pack,
                     overlays=module.overlays,
@@ -1054,7 +1105,6 @@ class CourseWorkflowService:
             title=module.title,
             summary=module.summary or module.title,
             learning_outcomes=module.learning_outcomes,
-            checkpoint_module_ids=list(module.checkpoint_module_ids),
             design_spec=design_spec,
             domain_pack=(design_spec.domain_pack if design_spec is not None else module.domain_pack_hint),
             overlays=list(design_spec.overlays if design_spec is not None else module.overlays_hint),
@@ -1098,7 +1148,6 @@ class CourseWorkflowService:
             title=module.title,
             summary=module.summary,
             learning_outcomes=module.learning_outcomes,
-            checkpoint_module_ids=list(module.checkpoint_module_ids),
             design_spec=module.design_spec,
             domain_pack_hint=module.domain_pack,
             overlays_hint=module.overlays,
@@ -1109,105 +1158,125 @@ class CourseWorkflowService:
         modules: list[CreateCourseModuleRequest],
         shared_run: WorkflowRun,
     ) -> list[CreateCourseModuleRequest]:
-        spec = shared_run.artifacts.task_agent_spec
-        if spec is None or not spec.modules or not modules:
+        if shared_run.artifacts.task_agent_spec is None or not modules:
             return modules
+        return [
+            module.model_copy(
+                update={
+                    "title": module.title.strip(),
+                    "summary": (module.summary or module.title).strip(),
+                    "learning_outcomes": list(module.learning_outcomes),
+                }
+            )
+            for module in modules
+        ]
 
-        checkpoint_ids = [module.id for module in spec.modules]
-        checkpoint_modules_by_id = {module.id: module for module in spec.modules}
-        checkpoint_groups = self._explicit_progressive_checkpoint_groups(modules, checkpoint_ids)
-        if checkpoint_groups is None:
-            checkpoint_groups = self._balanced_checkpoint_groups(len(modules), checkpoint_ids)
+    def _ensure_progressive_workflow_matches_modules(
+        self,
+        shared_run: WorkflowRun,
+        modules: list[CreateCourseModuleRequest],
+    ) -> WorkflowRun:
+        spec = shared_run.artifacts.task_agent_spec
+        if (
+            spec is None
+            or not modules
+            or shared_run.status == WorkflowStatus.published
+        ):
+            return shared_run
+        updated_spec = self._reshape_progressive_spec_to_modules(spec, modules)
+        if updated_spec.model_dump(mode="json") == spec.model_dump(mode="json"):
+            return shared_run
+        return self.workflow_service.update_task_agent_spec(shared_run.id, updated_spec)
 
-        aligned_modules: list[CreateCourseModuleRequest] = []
-        for index, module in enumerate(modules):
-            group_ids = checkpoint_groups[index] if index < len(checkpoint_groups) else []
-            group_modules = [
-                checkpoint_modules_by_id[checkpoint_id]
-                for checkpoint_id in group_ids
-                if checkpoint_id in checkpoint_modules_by_id
-            ]
-            title = module.title.strip()
-            summary = (module.summary or module.title).strip()
-            if not module.checkpoint_module_ids and group_modules:
-                title = self._progressive_module_title(group_modules, fallback=title)
-                summary = self._progressive_module_summary(group_modules, fallback=summary)
-            aligned_modules.append(
-                module.model_copy(
-                    update={
-                        "title": title,
-                        "summary": summary,
-                        "checkpoint_module_ids": group_ids,
-                    }
+    def _reshape_progressive_spec_to_modules(
+        self,
+        spec: TaskAgentServiceSpec,
+        modules: list[CreateCourseModuleRequest],
+    ) -> TaskAgentServiceSpec:
+        current_modules = list(spec.modules)
+        current_count = len(current_modules)
+        desired_count = len(modules)
+        if current_count == 0 or desired_count == 0:
+            return spec
+
+        def source_index_for_new(new_index: int) -> int:
+            if current_count == 1:
+                return 0
+            if desired_count <= current_count:
+                if desired_count == 1:
+                    return current_count - 1
+                return min(
+                    round(new_index * (current_count - 1) / (desired_count - 1)),
+                    current_count - 1,
+                )
+            if new_index == desired_count - 1:
+                return current_count - 1
+            return min(new_index, current_count - 2)
+
+        def new_index_for_old(old_index: int) -> int:
+            if desired_count == 1 or current_count == 1:
+                return 0
+            if desired_count >= current_count:
+                if old_index == current_count - 1:
+                    return desired_count - 1
+                return old_index
+            return min(
+                round(old_index * (desired_count - 1) / (current_count - 1)),
+                desired_count - 1,
+            )
+
+        new_module_ids = [f"module_{index + 1}" for index in range(desired_count)]
+        rebuilt_modules: list[ModuleSpec] = []
+        for index, planned_module in enumerate(modules):
+            source_module = current_modules[source_index_for_new(index)]
+            rebuilt_modules.append(
+                ModuleSpec(
+                    id=new_module_ids[index],
+                    title=planned_module.title.strip(),
+                    objective=(planned_module.summary or planned_module.title).strip(),
+                    starter_type=source_module.starter_type,
+                    overlay_ids=list(source_module.overlay_ids),
+                    learning_outcomes=list(planned_module.learning_outcomes or source_module.learning_outcomes),
+                    learner_brief=source_module.learner_brief,
+                    public_checks=list(source_module.public_checks),
                 )
             )
-        return aligned_modules
 
-    def _explicit_progressive_checkpoint_groups(
-        self,
-        modules: list[CreateCourseModuleRequest],
-        checkpoint_ids: list[str],
-    ) -> list[list[str]] | None:
-        groups: list[list[str]] = []
-        assigned: list[str] = []
-        for module in modules:
-            if not module.checkpoint_module_ids:
-                return None
-            selected = [checkpoint_id for checkpoint_id in checkpoint_ids if checkpoint_id in module.checkpoint_module_ids]
-            if not selected:
-                return None
-            groups.append(selected)
-            assigned.extend(selected)
-        if len(assigned) != len(set(assigned)):
-            return None
-        if assigned != checkpoint_ids:
-            return None
-        return groups
+        old_to_new = {
+            module.id: new_module_ids[new_index_for_old(index)]
+            for index, module in enumerate(current_modules)
+        }
+        rebuilt_behaviors = [
+            behavior.model_copy(
+                update={
+                    "first_required_in": old_to_new.get(
+                        behavior.first_required_in,
+                        new_module_ids[-1],
+                    )
+                }
+            )
+            for behavior in spec.behaviors
+        ]
+        rebuilt_qualities = [
+            quality.model_copy(
+                update={
+                    "first_required_in": old_to_new.get(
+                        quality.first_required_in,
+                        new_module_ids[-1],
+                    )
+                }
+            )
+            for quality in spec.qualities
+        ]
 
-    def _balanced_checkpoint_groups(
-        self,
-        module_count: int,
-        checkpoint_ids: list[str],
-    ) -> list[list[str]]:
-        if module_count <= 0:
-            return []
-        if not checkpoint_ids:
-            return [[] for _ in range(module_count)]
-        groups: list[list[str]] = []
-        total_checkpoints = len(checkpoint_ids)
-        for index in range(module_count):
-            start = (index * total_checkpoints) // module_count
-            end = ((index + 1) * total_checkpoints) // module_count
-            groups.append(checkpoint_ids[start:end])
-        return groups
-
-    def _progressive_module_title(self, checkpoint_modules: list, *, fallback: str) -> str:
-        if not checkpoint_modules:
-            return fallback
-        titles = [module.title.strip().rstrip(".") for module in checkpoint_modules]
-        if len(titles) == 1:
-            return titles[0]
-        if len(titles) == 2:
-            return f"{titles[0]} + {titles[1]}"
-        return f"{titles[0]} + {titles[-1]}"
-
-    def _progressive_module_summary(self, checkpoint_modules: list, *, fallback: str) -> str:
-        if not checkpoint_modules:
-            return fallback
-        objectives = [module.objective.strip().rstrip(".") for module in checkpoint_modules]
-        if len(objectives) == 1:
-            return f"{objectives[0]}."
-        if len(objectives) == 2:
-            return f"{objectives[0]}. Then {self._sentence_tail(objectives[1])}."
-        return (
-            f"{objectives[0]}. Then extend the module through "
-            f"{self._sentence_tail(objectives[1])} and {self._sentence_tail(objectives[-1])}."
+        return spec.model_copy(
+            deep=True,
+            update={
+                "modules": rebuilt_modules,
+                "behaviors": rebuilt_behaviors,
+                "qualities": rebuilt_qualities,
+            },
         )
-
-    def _sentence_tail(self, text: str) -> str:
-        if not text:
-            return text
-        return text[0].lower() + text[1:] if text[0].isupper() else text
 
     def _course_stage_from_modules(self, modules: list[CourseModuleDraft]) -> tuple[CourseRunStage, CourseRunStatus]:
         statuses = {module.workflow_status for module in modules}
@@ -1477,6 +1546,10 @@ class CourseWorkflowService:
         module_drafts: list[CourseModuleDraft] = []
         if source.shared_workflow_run_id and source.shared_workflow_run_id in workflow_revision_map:
             cloned_run = workflow_revision_map[source.shared_workflow_run_id]
+            cloned_run = self._ensure_progressive_workflow_matches_modules(
+                cloned_run,
+                [self._request_from_module_draft(module) for module in source.modules],
+            )
             aligned_modules = self._align_progressive_modules(
                 [self._request_from_module_draft(module) for module in source.modules],
                 cloned_run,
@@ -1729,35 +1802,36 @@ class CourseWorkflowService:
                 changes.append("Course title changed for learners.")
             if learner_package.summary != previous_package.summary:
                 changes.append("Course summary changed.")
-            if len(learner_package.modules) != len(previous_package.modules):
+            if len(learner_package.deliverables) != len(previous_package.deliverables):
                 changes.append(
-                    f"Module count changed from {len(previous_package.modules)} to {len(learner_package.modules)}."
+                    f"Deliverable count changed from {len(previous_package.deliverables)} to {len(learner_package.deliverables)}."
                 )
-            changed_modules = 0
-            previous_by_id = {module.module_id: module for module in previous_package.modules}
-            for module in learner_package.modules:
-                old = previous_by_id.get(module.module_id)
+            changed_deliverables = 0
+            previous_by_id = {
+                deliverable.deliverable_id: deliverable
+                for deliverable in previous_package.deliverables
+            }
+            for deliverable in learner_package.deliverables:
+                old = previous_by_id.get(deliverable.deliverable_id)
                 if old is None:
-                    changed_modules += 1
+                    changed_deliverables += 1
                     continue
                 if (
-                    module.title != old.title
-                    or module.objective != old.objective
-                    or module.content_markdown != old.content_markdown
-                    or module.starter_readme != old.starter_readme
-                    or module.learning_outcomes != old.learning_outcomes
-                    or module.checkpoint_module_ids != old.checkpoint_module_ids
-                    or module.completion_checkpoint_id != old.completion_checkpoint_id
-                    or module.active_test_ids != old.active_test_ids
-                    or [file.relative_path for file in module.workspace_seed_files]
+                    deliverable.title != old.title
+                    or deliverable.objective != old.objective
+                    or deliverable.content_markdown != old.content_markdown
+                    or deliverable.starter_readme != old.starter_readme
+                    or deliverable.learning_outcomes != old.learning_outcomes
+                    or deliverable.active_test_ids != old.active_test_ids
+                    or [file.relative_path for file in deliverable.workspace_seed_files]
                     != [file.relative_path for file in old.workspace_seed_files]
                 ):
-                    changed_modules += 1
-            if changed_modules:
-                changes.append(f"Learner package changed in {changed_modules} module(s).")
+                    changed_deliverables += 1
+            if changed_deliverables:
+                changes.append(f"Learner package changed in {changed_deliverables} deliverable(s).")
         if snapshot.task_agent_spec is not None and previous.task_agent_spec is not None:
             if snapshot.task_agent_spec.model_dump(mode="json") != previous.task_agent_spec.model_dump(mode="json"):
-                changes.append("Hidden grading or checkpoint contract changed.")
+                changes.append("Hidden grading contract changed.")
         if not changes:
             changes.append("No learner-visible changes from the previous published version.")
         return changes

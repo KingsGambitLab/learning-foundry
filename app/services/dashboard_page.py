@@ -19,6 +19,7 @@ def build_dashboard_state(*, generation_status: CourseGenerationStatus) -> dict:
         "materialize_url_template": "/v1/course-runs/{course_run_id}/materialize-async",
         "publish_url_template": "/v1/course-runs/{course_run_id}/publish-async",
         "suggest_outcomes_url": "/v1/course-generation/suggest-outcomes",
+        "creator_assets_url": "/v1/creator-assets",
         "status_url": "/v1/course-generation/status",
         "reset_local_url": "/v1/course-runs/reset-local",
     }

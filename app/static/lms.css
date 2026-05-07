@@ -73,19 +73,14 @@
 
 .learner-shell {
   display: grid;
-  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
-  grid-template-areas: "sidebar main";
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "main";
   gap: 20px;
   align-items: start;
 }
 
 .learner-shell.sidebar-hidden {
   grid-template-columns: 44px minmax(0, 1fr);
-}
-
-.learner-shell.no-sidebar {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "main";
 }
 
 .learner-main {

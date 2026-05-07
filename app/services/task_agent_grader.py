@@ -6,15 +6,17 @@ from statistics import mean
 from typing import Any
 
 from app.domain.grading import (
+    AssignmentGradeReport,
     EvalRunEvidence,
     GradeStatus,
     ModuleGradeReport,
+    ReviewAreaGradeReport,
     TaskAgentSubmission,
     TestGradeResult,
     ToolCallStatus,
 )
 from app.domain.task_agent import TaskAgentServiceSpec
-from app.services.grader_planner import build_task_agent_grader_plan
+from app.services.grader_planner import build_all_task_agent_review_area_plans, build_task_agent_grader_plan
 
 
 def grade_task_agent_submission(
@@ -45,6 +47,61 @@ def grade_task_agent_submission(
         pass_rate=pass_rate,
         status=status,
         results=results,
+        submission_warnings=warnings,
+    )
+
+
+def grade_assignment_submission(
+    spec: TaskAgentServiceSpec,
+    submission: TaskAgentSubmission,
+) -> AssignmentGradeReport:
+    plan_collection = build_all_task_agent_review_area_plans(spec)
+    grouped_runs = _group_runs_by_case(submission)
+    primary_runs = _primary_runs(spec, grouped_runs)
+    warnings = _submission_warnings(spec, submission, primary_runs)
+
+    review_areas: list[ReviewAreaGradeReport] = []
+    for plan in plan_collection.module_plans:
+        results: list[TestGradeResult] = []
+        for entry in plan.entries:
+            results.append(_grade_entry(spec, entry, grouped_runs, primary_runs))
+
+        passed_tests = sum(1 for result in results if result.status == GradeStatus.passed)
+        total_tests = len(results)
+        failed_tests = total_tests - passed_tests
+        pass_rate = passed_tests / total_tests if total_tests else 0.0
+        status = GradeStatus.passed if failed_tests == 0 else GradeStatus.failed
+        review_areas.append(
+            ReviewAreaGradeReport(
+                module_id=plan.module_id,
+                title=plan.module_title,
+                objective=plan.module_objective,
+                module_index=spec.module_order[plan.module_id] + 1,
+                grade_report=ModuleGradeReport(
+                    module_id=plan.module_id,
+                    total_tests=total_tests,
+                    passed_tests=passed_tests,
+                    failed_tests=failed_tests,
+                    pass_rate=pass_rate,
+                    status=status,
+                    results=results,
+                    submission_warnings=list(warnings),
+                ),
+            )
+        )
+
+    passed_tests = sum(area.grade_report.passed_tests for area in review_areas)
+    total_tests = sum(area.grade_report.total_tests for area in review_areas)
+    failed_tests = total_tests - passed_tests
+    pass_rate = passed_tests / total_tests if total_tests else 0.0
+    status = GradeStatus.passed if failed_tests == 0 else GradeStatus.failed
+    return AssignmentGradeReport(
+        total_tests=total_tests,
+        passed_tests=passed_tests,
+        failed_tests=failed_tests,
+        pass_rate=pass_rate,
+        status=status,
+        review_areas=review_areas,
         submission_warnings=warnings,
     )
 

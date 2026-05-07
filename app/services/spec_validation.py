@@ -31,6 +31,11 @@ from app.domain.task_agent import (
     ConfidenceCalibrationJudgeTestParams,
     EscalationPrecisionTestParams,
 )
+from app.services.review_area_coverage import (
+    RESERVED_REVIEW_AREA_TAGS,
+    infer_review_area_case_tags,
+    summarize_review_area_hidden_coverage,
+)
 
 
 class ValidationLevel(str, Enum):
@@ -80,6 +85,11 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
     module_ids = set(spec.module_order.keys())
     tool_ids = spec.tool_ids
     eval_case_ids = spec.eval_case_ids
+    inferred_case_tags = infer_review_area_case_tags(spec)
+    hidden_coverage = {
+        summary.module_id: summary
+        for summary in summarize_review_area_hidden_coverage(spec)
+    }
     endpoint_paths = {endpoint.path for endpoint in spec.production_contract.canonical_endpoints}
     overlay_ids = {overlay.id for overlay in DESIGN_CATALOG.overlays}
     escalation_reasons = {rule.reason for rule in spec.production_contract.escalation_policy}
@@ -170,6 +180,7 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
 
     for module in spec.modules:
         gate = spec.gate_for(module.id)
+        coverage = hidden_coverage[module.id]
         for overlay_id in module.overlay_ids:
             if overlay_id not in overlay_ids:
                 add_issue(
@@ -177,6 +188,49 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     "unknown_overlay",
                     f"modules.{module.id}.overlay_ids",
                     f"Unknown overlay '{overlay_id}'.",
+                )
+        if not module.learning_outcomes:
+            add_issue(
+                ValidationLevel.error,
+                "missing_module_learning_outcomes",
+                f"modules.{module.id}.learning_outcomes",
+                "Each module should publish concrete learning outcomes derived from the learner task.",
+            )
+        else:
+            seen_outcomes: set[str] = set()
+            for index, outcome in enumerate(module.learning_outcomes):
+                location = f"modules.{module.id}.learning_outcomes[{index}]"
+                normalized = outcome.strip()
+                if not normalized:
+                    add_issue(
+                        ValidationLevel.error,
+                        "blank_module_learning_outcome",
+                        location,
+                        "Learning outcomes must not be blank.",
+                    )
+                    continue
+                lowered = normalized.lower()
+                if lowered in seen_outcomes:
+                    add_issue(
+                        ValidationLevel.warning,
+                        "duplicate_module_learning_outcome",
+                        location,
+                        f"Duplicate learning outcome '{normalized}'.",
+                    )
+                seen_outcomes.add(lowered)
+                if any(phrase in lowered for phrase in ["understand", "learn about", "be familiar"]):
+                    add_issue(
+                        ValidationLevel.warning,
+                        "vague_module_learning_outcome",
+                        location,
+                        "Learning outcomes should describe an observable learner capability, not vague understanding.",
+                    )
+            if len(module.learning_outcomes) > 4:
+                add_issue(
+                    ValidationLevel.warning,
+                    "too_many_module_learning_outcomes",
+                    f"modules.{module.id}.learning_outcomes",
+                    "Keep module outcomes focused. More than four usually means the module is trying to teach too much at once.",
                 )
         if module.learner_brief is None:
             add_issue(
@@ -221,6 +275,23 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 f"modules.{module.id}.learner_brief",
                 "Learner briefs should explain the task without internal checkpoint or grader jargon.",
             )
+        if module.learning_outcomes:
+            alignment_text = " ".join(
+                [
+                    module.title,
+                    module.objective,
+                    module.learner_brief.task_to_build,
+                    *module.learner_brief.definition_of_done,
+                    *module.learner_brief.example_scenarios,
+                ]
+            ).lower()
+            if not any(token in alignment_text for token in _alignment_tokens(module.learning_outcomes)):
+                add_issue(
+                    ValidationLevel.warning,
+                    "module_learning_outcomes_need_alignment_review",
+                    f"modules.{module.id}.learning_outcomes",
+                    "The learning outcomes do not obviously line up with the learner brief. Review them before publish.",
+                )
         if not module.public_checks:
             add_issue(
                 ValidationLevel.error,
@@ -307,6 +378,40 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 "too_many_public_checks",
                 f"modules.{module.id}.public_checks",
                 "Keep learner-visible checks focused. More than four checks usually signals that the module should rely on the hidden grader for depth.",
+            )
+        if spec.assessment_strategy.hidden_grader_required and not coverage.hidden_test_ids:
+            add_issue(
+                ValidationLevel.error,
+                "missing_hidden_grader_coverage",
+                f"modules.{module.id}",
+                "Each review area needs at least one hidden grader test so submission feedback can go deeper than the public checks.",
+            )
+        elif spec.assessment_strategy.hidden_grader_required and not coverage.hidden_case_ids:
+            add_issue(
+                ValidationLevel.error,
+                "missing_hidden_eval_cases",
+                f"modules.{module.id}",
+                "Hidden grader coverage must exercise at least one tagged eval case for this review area.",
+            )
+
+    for case in spec.eval_dataset.cases:
+        explicit_tags = set(case.tags)
+        invalid_tags = sorted(explicit_tags - module_ids - RESERVED_REVIEW_AREA_TAGS)
+        if invalid_tags:
+            add_issue(
+                ValidationLevel.error,
+                "unknown_eval_case_tag",
+                f"eval_dataset.cases.{case.id}.tags",
+                "Eval case tags must reference known review areas: "
+                + ", ".join(f"'{tag}'" for tag in invalid_tags),
+            )
+        effective_tags = explicit_tags | set(inferred_case_tags.get(case.id, []))
+        if not effective_tags:
+            add_issue(
+                ValidationLevel.error,
+                "unmapped_eval_case",
+                f"eval_dataset.cases.{case.id}",
+                "Every hidden eval case must belong to at least one review area so grader feedback can map back to the learner-visible deliverable.",
             )
 
     for behavior in spec.behaviors:
@@ -581,3 +686,32 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
 
 def compute_task_agent_gate(spec: TaskAgentServiceSpec, module_id: str) -> ModuleGate:
     return spec.gate_for(module_id)
+
+
+def _alignment_tokens(outcomes: list[str]) -> set[str]:
+    stop_words = {
+        "the",
+        "and",
+        "with",
+        "into",
+        "from",
+        "that",
+        "this",
+        "will",
+        "your",
+        "each",
+        "learner",
+        "module",
+        "service",
+        "system",
+        "visible",
+        "public",
+    }
+    tokens: set[str] = set()
+    for outcome in outcomes:
+        for token in outcome.lower().replace("`", "").replace("/", " ").split():
+            cleaned = token.strip(".,:;()[]{}")
+            if len(cleaned) < 5 or cleaned in stop_words:
+                continue
+            tokens.add(cleaned)
+    return tokens

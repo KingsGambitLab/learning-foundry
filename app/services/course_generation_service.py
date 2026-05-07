@@ -4,11 +4,14 @@ import re
 import threading
 from collections.abc import Callable
 
+from app.domain.ai import AIUsageSummary
 from app.domain.course import (
     CreateCourseFromCreatorPlanRequest,
     CourseGenerationSource,
     CourseGenerationStatus,
     CourseRun,
+    CreatorCourseSetupChoices,
+    CreatorCourseSetupInput,
     CreatorCourseModulePlan,
     CreatorCoursePlan,
     CreateCourseModuleRequest,
@@ -25,6 +28,9 @@ from app.domain.course import (
 from app.domain.registry import PackageType, RiskClass, StarterType
 from app.domain.task_agent import (
     AssignmentDesignSpec,
+    DataSourceKind,
+    DataSourcePurpose,
+    DataSourceSpec,
     ProgressionMode,
     RetrievalMode,
     WorkspaceScope,
@@ -58,11 +64,13 @@ class CourseGenerationService:
         request: GenerateCourseFromBriefRequest,
     ) -> QueueCourseGenerationResponse:
         planner_status = self.live_planner.status()
+        resolved_setup = self._resolve_creator_setup(request.goal, request.creator_setup)
         course_run = self.course_workflow_service.create_generation_placeholder(
             title=request.title or self._title_from_goal(request.goal),
             goal=request.goal,
-            learning_outcomes=request.learning_outcomes,
+            learning_outcomes=[],
             package_type_hint=request.package_type_hint,
+            creator_choices=resolved_setup,
             generation_status=planner_status,
         )
         self.course_workflow_service.store.append_course_event(
@@ -92,7 +100,7 @@ class CourseGenerationService:
 
         if status.available:
             try:
-                outcomes, status = self.live_planner.suggest_learning_outcomes(request)
+                outcomes, status, _usage = self.live_planner.suggest_learning_outcomes(request)
                 source = CourseGenerationSource.openai_live
                 return SuggestLearningOutcomesResponse(
                     source=source,
@@ -121,26 +129,28 @@ class CourseGenerationService:
         self,
         request: GenerateCreatorCoursePlanRequest,
     ) -> GenerateCreatorCoursePlanResponse:
-        normalized_outcomes = self._normalize_learning_outcomes(
-            request.learning_outcomes or self._fallback_learning_outcomes(request.goal)
-        )
+        resolved_setup = self._resolve_creator_setup(request.goal, request.creator_choices)
         plan_request = GenerateCourseFromBriefRequest(
             goal=request.goal,
-            learning_outcomes=normalized_outcomes,
             title=request.title,
             package_type_hint=request.package_type_hint,
+            creator_setup=CreatorCourseSetupInput(**resolved_setup.model_dump(mode="json")),
         )
-        normalized_plan, source, status = self._generate_normalized_plan(plan_request)
+        normalized_plan, source, status, _usage = self._generate_normalized_plan(plan_request)
         adjusted_shared_design_spec = self._apply_creator_choices_to_design_spec(
             normalized_plan.shared_design_spec,
-            request.creator_choices,
+            resolved_setup,
         )
         creator_modules = self._creator_plan_modules(
             request=plan_request,
             design_spec=adjusted_shared_design_spec,
             default_modules=normalized_plan.modules,
             creator_summary=normalized_plan.summary,
-            creator_choices=request.creator_choices,
+            creator_choices=resolved_setup,
+        )
+        normalized_outcomes = self._derive_plan_learning_outcomes(
+            creator_modules,
+            adjusted_shared_design_spec,
         )
         creator_plan = CreatorCoursePlan(
             goal=request.goal,
@@ -148,10 +158,10 @@ class CourseGenerationService:
             title=normalized_plan.title,
             summary=normalized_plan.summary,
             package_type=normalized_plan.package_type,
-            creator_choices=request.creator_choices,
+            creator_choices=resolved_setup,
             shared_design_spec=adjusted_shared_design_spec,
             modules=creator_modules,
-            creator_summary=self._creator_summary(adjusted_shared_design_spec, request.creator_choices),
+            creator_summary=self._creator_summary(adjusted_shared_design_spec, resolved_setup),
             notes=list(
                 dict.fromkeys(
                     [
@@ -174,28 +184,14 @@ class CourseGenerationService:
         request: CreateCourseFromCreatorPlanRequest,
     ) -> CourseRun:
         plan = request.plan
-        shared_design_spec = self._apply_creator_choices_to_design_spec(
-            plan.shared_design_spec,
-            plan.creator_choices,
-        )
-        modules = [
-            CreateCourseModuleRequest(
-                module_slug=module.module_slug,
-                title=module.title,
-                summary=module.summary,
-                learning_outcomes=module.learning_outcomes,
-                checkpoint_module_ids=module.checkpoint_module_ids,
-                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or shared_design_spec, plan.creator_choices),
-            )
-            for module in plan.modules
-        ]
+        generated_plan = self._generated_plan_from_creator_plan(plan)
         course_run = self.course_workflow_service.create_run(
             CreateCourseRunRequest(
-                title=plan.title,
-                summary=plan.summary,
-                package_type=plan.package_type,
-                shared_design_spec=shared_design_spec,
-                modules=modules,
+                title=generated_plan.title,
+                summary=generated_plan.summary,
+                package_type=generated_plan.package_type,
+                shared_design_spec=generated_plan.shared_design_spec,
+                modules=generated_plan.modules,
             )
         )
         if len(course_run.modules) == len(plan.modules):
@@ -219,25 +215,74 @@ class CourseGenerationService:
                     f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
                     *( [f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else [] ),
                     *( [f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else [] ),
+                    *(
+                        [
+                            "Attached data sources: "
+                            + ", ".join(f"`{source.title}`" for source in plan.creator_choices.data_sources[:3])
+                            + "."
+                        ]
+                        if plan.creator_choices.data_sources
+                        else []
+                    ),
                 ]
             )
         )
         course_run.goal = plan.goal
         course_run.requested_learning_outcomes = list(plan.learning_outcomes)
-        course_run.generated_plan = GeneratedCoursePlan(
+        course_run.generated_plan = generated_plan
+        self.course_workflow_service.store.save_course_run(course_run)
+        self.course_workflow_service.store.append_course_event(
+            course_run.id,
+            "creator_plan_accepted",
+            {
+                "module_count": len(plan.modules),
+                "goal": plan.goal,
+                "learning_outcome_count": len(plan.learning_outcomes),
+                "starter_type": plan.creator_choices.starter_type.value,
+                "primary_database": plan.creator_choices.primary_database,
+                "cache_backend": plan.creator_choices.cache_backend,
+                "data_source_count": len(plan.creator_choices.data_sources),
+            },
+        )
+        return course_run
+
+    def queue_course_run_from_creator_plan(
+        self,
+        request: CreateCourseFromCreatorPlanRequest,
+    ) -> QueueCourseGenerationResponse:
+        plan = request.plan
+        planner_status = self.live_planner.status()
+        course_run = self.course_workflow_service.create_generation_placeholder(
             title=plan.title,
-            summary=plan.summary,
-            package_type=plan.package_type,
-            shared_design_spec=shared_design_spec,
-            modules=modules,
-            notes=list(
-                dict.fromkeys(
-                    [
-                        *plan.notes,
-                        "Creator-approved module plan.",
-                    ]
-                )
-            ),
+            goal=plan.goal or plan.summary,
+            learning_outcomes=plan.learning_outcomes,
+            package_type_hint=plan.package_type,
+            creator_choices=plan.creator_choices,
+            generation_status=planner_status,
+        )
+        course_run.summary = plan.summary
+        course_run.goal = plan.goal
+        course_run.requested_learning_outcomes = list(plan.learning_outcomes)
+        course_run.generated_plan = self._generated_plan_from_creator_plan(plan)
+        course_run.notes = list(
+            dict.fromkeys(
+                [
+                    *course_run.notes,
+                    "Creator-approved module plan queued.",
+                    f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
+                    *([f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else []),
+                    *([f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else []),
+                    *(
+                        [
+                            "Attached data sources: "
+                            + ", ".join(f"`{source.title}`" for source in plan.creator_choices.data_sources[:3])
+                            + "."
+                        ]
+                        if plan.creator_choices.data_sources
+                        else []
+                    ),
+                ]
+            )
         )
         self.course_workflow_service.store.save_course_run(course_run)
         self.course_workflow_service.store.append_course_event(
@@ -250,12 +295,30 @@ class CourseGenerationService:
                 "starter_type": plan.creator_choices.starter_type.value,
                 "primary_database": plan.creator_choices.primary_database,
                 "cache_backend": plan.creator_choices.cache_backend,
+                "data_source_count": len(plan.creator_choices.data_sources),
+                "message": "Approved module plan accepted. Building the draft in the background.",
             },
         )
-        return course_run
+        self.course_workflow_service.store.append_course_event(
+            course_run.id,
+            "course_generation_started",
+            {
+                "provider": planner_status.provider,
+                "source": planner_status.source.value,
+                "message": "Building the draft from your approved creator plan.",
+                "model_id": planner_status.model_id,
+            },
+        )
+        self.job_runner(lambda: self._finish_queued_creator_plan(course_run.id, request))
+        latest = self.course_workflow_service.get_run(course_run.id) or course_run
+        return QueueCourseGenerationResponse(
+            queued=True,
+            status=planner_status,
+            course_run=latest,
+        )
 
     def generate_course_run(self, request: GenerateCourseFromBriefRequest) -> GenerateCourseFromBriefResponse:
-        normalized_plan, source, status = self._generate_normalized_plan(request)
+        normalized_plan, source, status, usage = self._generate_normalized_plan(request)
         course_run = self.course_workflow_service.create_run(
             CreateCourseRunRequest(
                 title=normalized_plan.title,
@@ -270,10 +333,15 @@ class CourseGenerationService:
             notes=normalized_plan.notes,
         )
         course_run.goal = request.goal
-        course_run.requested_learning_outcomes = list(request.learning_outcomes)
+        course_run.requested_learning_outcomes = self._derive_plan_learning_outcomes(
+            aligned_plan.modules,
+            aligned_plan.shared_design_spec,
+        )
         course_run.generated_plan = aligned_plan
         course_run.generation_source = source
         course_run.generation_status = status
+        course_run.own_ai_usage = usage or AIUsageSummary()
+        course_run.ai_usage = course_run.own_ai_usage
         course_run.notes.append(
             (
                 f"Course brief generated via `{source.value}`."
@@ -292,6 +360,7 @@ class CourseGenerationService:
                 "provider": status.provider,
                 "model_id": status.model_id,
                 "message": status.message,
+                "ai_usage": (usage.model_dump(mode="json") if usage is not None else None),
             },
         )
         review = self.course_workflow_service.review_run(course_run.id)
@@ -309,12 +378,13 @@ class CourseGenerationService:
         request: GenerateCourseFromBriefRequest,
     ) -> None:
         try:
-            normalized_plan, source, status = self._generate_normalized_plan(request)
+            normalized_plan, source, status, usage = self._generate_normalized_plan(request)
             self.course_workflow_service.apply_generated_plan(
                 course_run_id,
                 plan=normalized_plan,
                 source=source,
                 generation_status=status,
+                usage=usage,
             )
         except Exception as exc:
             status = self.live_planner.status()
@@ -324,6 +394,63 @@ class CourseGenerationService:
                 generation_status=status,
             )
 
+    def _finish_queued_creator_plan(
+        self,
+        course_run_id: str,
+        request: CreateCourseFromCreatorPlanRequest,
+    ) -> None:
+        try:
+            plan = request.plan
+            built = self.course_workflow_service.apply_generated_plan(
+                course_run_id,
+                plan=self._generated_plan_from_creator_plan(plan),
+                source=CourseGenerationSource.deterministic_fallback,
+                generation_status=self.live_planner.status(),
+            )
+            if len(built.modules) == len(plan.modules):
+                for stored_module, planned_module in zip(built.modules, plan.modules, strict=False):
+                    stored_module.title = planned_module.title
+                    stored_module.summary = planned_module.summary
+                    stored_module.learning_outcomes = list(planned_module.learning_outcomes)
+                    stored_module.notes = list(
+                        dict.fromkeys(
+                            [
+                                *stored_module.notes,
+                                *planned_module.creator_notes,
+                            ]
+                        )
+                    )
+            built.summary = plan.summary
+            built.goal = plan.goal
+            built.requested_learning_outcomes = list(plan.learning_outcomes)
+            built.generated_plan = self._generated_plan_from_creator_plan(plan)
+            built.notes = list(
+                dict.fromkeys(
+                    [
+                        *built.notes,
+                        "Draft created from an approved creator plan.",
+                        f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
+                        *([f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else []),
+                        *([f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else []),
+                    ]
+                )
+            )
+            self.course_workflow_service.store.save_course_run(built)
+            self.course_workflow_service.store.append_course_event(
+                built.id,
+                "creator_plan_applied",
+                {
+                    "module_count": len(plan.modules),
+                    "message": "Draft finished building from the approved creator plan.",
+                },
+            )
+        except Exception as exc:
+            self.course_workflow_service.mark_generation_failed(
+                course_run_id,
+                error=str(exc),
+                generation_status=self.live_planner.status(),
+            )
+
     def _generate_normalized_plan(
         self,
         request: GenerateCourseFromBriefRequest,
@@ -331,10 +458,11 @@ class CourseGenerationService:
         source = CourseGenerationSource.deterministic_fallback
         status = self.live_planner.status()
         plan: GeneratedCoursePlan
+        usage: AIUsageSummary | None = None
 
         if status.available:
             try:
-                plan, status = self.live_planner.plan_course(request)
+                plan, status, usage = self.live_planner.plan_course(request)
                 source = CourseGenerationSource.openai_live
             except (OpenAICourseGenerationError, OpenAICoursePlannerUnavailable) as exc:
                 status = CourseGenerationStatus(
@@ -351,11 +479,42 @@ class CourseGenerationService:
         else:
             plan = self._fallback_plan(request)
 
-        return self._normalize_plan(plan, request), source, status
+        return self._normalize_plan(plan, request), source, status, usage
 
     def _run_job_in_background(self, job: Callable[[], None]) -> None:
         thread = threading.Thread(target=job, daemon=True)
         thread.start()
+
+    def _generated_plan_from_creator_plan(self, plan: CreatorCoursePlan) -> GeneratedCoursePlan:
+        shared_design_spec = self._apply_creator_choices_to_design_spec(
+            plan.shared_design_spec,
+            plan.creator_choices,
+        )
+        modules = [
+            CreateCourseModuleRequest(
+                module_slug=module.module_slug,
+                title=module.title,
+                summary=module.summary,
+                learning_outcomes=module.learning_outcomes,
+                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or shared_design_spec, plan.creator_choices),
+            )
+            for module in plan.modules
+        ]
+        return GeneratedCoursePlan(
+            title=plan.title,
+            summary=plan.summary,
+            package_type=plan.package_type,
+            shared_design_spec=shared_design_spec,
+            modules=modules,
+            notes=list(
+                dict.fromkeys(
+                    [
+                        *plan.notes,
+                        "Creator-approved module plan.",
+                    ]
+                )
+            ),
+        )
 
     def _normalize_plan(
         self,
@@ -363,17 +522,26 @@ class CourseGenerationService:
         request: GenerateCourseFromBriefRequest,
     ) -> GeneratedCoursePlan:
         normalized = plan.model_copy(deep=True)
+        creator_choices = self._resolve_creator_setup(request.goal, request.creator_setup)
         intake = GenerationIntake(
             title=request.title or plan.title or self._title_from_goal(request.goal),
             problem_statement=request.goal,
-            learning_outcomes=request.learning_outcomes,
             package_type_hint=request.package_type_hint or plan.package_type,
+            starter_type=creator_choices.starter_type,
+            primary_database=creator_choices.primary_database,
+            cache_backend=creator_choices.cache_backend,
+            tech_stack=list(creator_choices.tech_stack),
+            data_sources=list(creator_choices.data_sources),
         )
         inferred = infer_assignment_design(
             title=intake.title,
             problem_statement=intake.problem_statement,
-            learning_outcomes=intake.learning_outcomes,
             package_type_hint=intake.package_type_hint,
+            starter_type=intake.starter_type,
+            primary_database=intake.primary_database,
+            cache_backend=intake.cache_backend,
+            tech_stack=intake.tech_stack,
+            data_sources=intake.data_sources,
         )
 
         if request.package_type_hint is not None:
@@ -387,13 +555,17 @@ class CourseGenerationService:
         if shared_design_spec is None:
             raise ValueError("This brief is outside the current learner-ready generation scope.")
         shared_design_spec = self._with_package_type(shared_design_spec, normalized.package_type)
+        shared_design_spec = self._apply_creator_choices_to_design_spec(shared_design_spec, creator_choices)
         normalized.shared_design_spec = shared_design_spec
 
         modules: list[CreateCourseModuleRequest] = []
         for module in normalized.modules:
             design_spec = module.design_spec or shared_design_spec
             design_spec = self._with_package_type(design_spec, normalized.package_type)
-            learning_outcomes = self._normalize_learning_outcomes(module.learning_outcomes or request.learning_outcomes[:3])
+            design_spec = self._apply_creator_choices_to_design_spec(design_spec, creator_choices)
+            learning_outcomes = self._normalize_learning_outcomes(
+                module.learning_outcomes or self._derive_module_learning_outcomes(module.title, module.summary or module.title, design_spec)
+            )
             modules.append(
                 CreateCourseModuleRequest(
                     module_slug=module.module_slug,
@@ -421,17 +593,23 @@ class CourseGenerationService:
 
     def _fallback_plan(self, request: GenerateCourseFromBriefRequest) -> GeneratedCoursePlan:
         title = request.title or self._title_from_goal(request.goal)
+        creator_choices = self._resolve_creator_setup(request.goal, request.creator_setup)
         inferred = infer_assignment_design(
             title=title,
             problem_statement=request.goal,
-            learning_outcomes=request.learning_outcomes,
             package_type_hint=request.package_type_hint,
+            starter_type=creator_choices.starter_type,
+            primary_database=creator_choices.primary_database,
+            cache_backend=creator_choices.cache_backend,
+            tech_stack=list(creator_choices.tech_stack),
+            data_sources=list(creator_choices.data_sources),
         )
         if inferred.design_spec is None:
             raise ValueError("This brief is outside the current learner-ready generation scope.")
 
         package_type = self._preferred_package_type(request, inferred.package_type)
         design_spec = self._with_package_type(inferred.design_spec, package_type)
+        design_spec = self._apply_creator_choices_to_design_spec(design_spec, creator_choices)
 
         return GeneratedCoursePlan(
             title=title,
@@ -451,13 +629,15 @@ class CourseGenerationService:
         design_spec: AssignmentDesignSpec,
         package_type: PackageType,
     ) -> list[CreateCourseModuleRequest]:
-        outcomes = request.learning_outcomes
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
             return [
                 CreateCourseModuleRequest(
                     title="Corpus ingestion and chunking",
                     summary="Stand up the retrieval substrate and make the corpus queryable.",
-                    learning_outcomes=outcomes[:2] or ["chunking strategy", "retrieval setup"],
+                    learning_outcomes=[
+                        "Stand up the retrieval substrate so learner-visible documents can be queried reliably.",
+                        "Shape the corpus and retrieval contract before answer synthesis begins.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -465,7 +645,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Grounded retrieval and citations",
                     summary="Return answers that stay anchored to the corpus and cite supporting evidence.",
-                    learning_outcomes=outcomes[:3] or ["citation correctness", "faithfulness", "abstention"],
+                    learning_outcomes=[
+                        "Return answers that stay grounded in retrieved evidence instead of guessing.",
+                        "Use citations and abstention to make evidence coverage visible to the learner.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -473,14 +656,20 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Quality tuning and evals",
                     summary="Improve answer quality with decomposition, reranking, and eval-driven iteration.",
-                    learning_outcomes=outcomes[:3] or ["query decomposition", "reranking", "evaluation"],
+                    learning_outcomes=[
+                        "Use visible evaluation cases to improve grounded answer quality deliberately.",
+                        "Refine retrieval and answer composition without regressing supported scenarios.",
+                    ],
                     design_spec=design_spec,
                     overlays_hint=["productionization_overlay"],
                 ),
                 CreateCourseModuleRequest(
                     title="Scale, freshness, and final SLO",
                     summary="Push the system to production bars for latency, freshness, and operating cost.",
-                    learning_outcomes=outcomes[:3] or ["latency tuning", "freshness", "cost control"],
+                    learning_outcomes=[
+                        "Tune the service for production-minded latency and operating cost.",
+                        "Keep retrieved evidence fresh enough for realistic deployment expectations.",
+                    ],
                     design_spec=design_spec,
                     overlays_hint=["scale_slo_overlay", "freshness_overlay"],
                 ),
@@ -491,7 +680,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Index design and retrieval contract",
                     summary="Build the corpus, query interface, and ranking baseline.",
-                    learning_outcomes=outcomes[:2] or ["index design", "retrieval contract"],
+                    learning_outcomes=[
+                        "Design the retrieval contract and corpus shape the service will expose.",
+                        "Build a ranking baseline over learner-visible documents and filters.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -499,7 +691,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Ranking quality and filtering",
                     summary="Improve retrieval precision, ordering, and metadata-aware filters.",
-                    learning_outcomes=outcomes[:3] or ["ranking quality", "filtering", "query analysis"],
+                    learning_outcomes=[
+                        "Improve retrieval precision with ranking and metadata-aware filters.",
+                        "Handle query analysis decisions without destabilizing the retrieval contract.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -507,7 +702,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Production retrieval final",
                     summary="Meet quality and latency expectations for a production retrieval service.",
-                    learning_outcomes=outcomes[:3] or ["latency tuning", "quality checks", "operational readiness"],
+                    learning_outcomes=[
+                        "Raise retrieval quality and latency to a production-minded bar.",
+                        "Use visible checks and final grading to prove the service is operationally credible.",
+                    ],
                     design_spec=design_spec,
                     overlays_hint=["scale_slo_overlay"],
                 ),
@@ -518,7 +716,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Contract and data model",
                     summary="Define the service surface, persistence model, and baseline invariants.",
-                    learning_outcomes=outcomes[:2] or ["contract design", "data modeling"],
+                    learning_outcomes=[
+                        "Define the service contract and persistence model around the core invariants.",
+                        "Model data so the workflow can stay correct as mutable state changes.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -526,7 +727,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Correctness under concurrency",
                     summary="Make the state transitions safe under duplicate requests and parallel access.",
-                    learning_outcomes=outcomes[:3] or ["idempotency", "concurrency safety", "error handling"],
+                    learning_outcomes=[
+                        "Keep concurrent or repeated requests from breaking critical invariants.",
+                        "Use retries, idempotency, or locking to make mutable state safe under load.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
@@ -534,7 +738,10 @@ class CourseGenerationService:
                 CreateCourseModuleRequest(
                     title="Throughput and production final",
                     summary="Harden the service for real traffic, latency, and failure handling.",
-                    learning_outcomes=outcomes[:3] or ["throughput", "latency", "operational readiness"],
+                    learning_outcomes=[
+                        "Raise the service to a production-minded bar for throughput, latency, and reliability.",
+                        "Make stateful failures visible enough for an operator to debug them confidently.",
+                    ],
                     design_spec=design_spec,
                     overlays_hint=["scale_slo_overlay"],
                 ),
@@ -544,7 +751,10 @@ class CourseGenerationService:
             CreateCourseModuleRequest(
                 title="Run contract and structured output",
                 summary="Get the service onto a stable run contract with a reliable output schema.",
-                learning_outcomes=outcomes[:2] or ["structured output", "run contract"],
+                learning_outcomes=[
+                    "Implement a stable run contract with the expected structured response shape.",
+                    "Return reliable outputs for the visible scenarios before adding deeper controls.",
+                ],
                 design_spec=design_spec,
                 domain_pack_hint=design_spec.domain_pack,
                 overlays_hint=list(design_spec.overlays),
@@ -552,7 +762,10 @@ class CourseGenerationService:
             CreateCourseModuleRequest(
                 title="Tooling and control flow",
                 summary="Teach the system how to choose tools and execute bounded workflows.",
-                learning_outcomes=outcomes[:3] or ["tool selection", "multi-step execution", "state handling"],
+                learning_outcomes=[
+                    "Choose the right tools and bounded control flow for the supported workflow paths.",
+                    "Keep tool usage explicit enough that the learner can debug why each step happened.",
+                ],
                 design_spec=design_spec,
                 domain_pack_hint=design_spec.domain_pack,
                 overlays_hint=list(design_spec.overlays),
@@ -560,7 +773,10 @@ class CourseGenerationService:
             CreateCourseModuleRequest(
                 title="Approvals, fallbacks, and observability",
                     summary="Add safety controls, error recovery, and traces that make the system operable.",
-                    learning_outcomes=outcomes[:3] or ["approval gates", "fallback handling", "observability"],
+                    learning_outcomes=[
+                        "Add approvals and fallback behavior without breaking the public contract.",
+                        "Emit observability signals that make failures understandable to an operator.",
+                    ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=["productionization_overlay"],
@@ -572,7 +788,10 @@ class CourseGenerationService:
                     CreateCourseModuleRequest(
                         title="Eval-driven quality improvements",
                         summary="Use evals to improve reliability, escalation quality, and output usefulness.",
-                        learning_outcomes=outcomes[:3] or ["evaluation", "quality tuning", "regression control"],
+                        learning_outcomes=[
+                            "Use evaluation feedback to improve behavior without guessing what changed.",
+                            "Tighten the system while protecting earlier supported scenarios from regression.",
+                        ],
                         design_spec=design_spec,
                         domain_pack_hint=design_spec.domain_pack,
                         overlays_hint=["productionization_overlay"],
@@ -580,7 +799,10 @@ class CourseGenerationService:
                     CreateCourseModuleRequest(
                         title="Production final at SLO",
                         summary="Push the system to its final reliability, latency, and cost bar.",
-                        learning_outcomes=outcomes[:3] or ["latency", "cost control", "production readiness"],
+                        learning_outcomes=[
+                            "Integrate the full system until it meets a production-minded reliability and latency bar.",
+                            "Balance quality, latency, and cost without regressing the learner-visible contract.",
+                        ],
                         design_spec=design_spec,
                         domain_pack_hint=design_spec.domain_pack,
                         overlays_hint=["productionization_overlay", "scale_slo_overlay"],
@@ -598,7 +820,7 @@ class CourseGenerationService:
         creator_summary: str,
         creator_choices,
     ) -> list[CreatorCourseModulePlan]:
-        text = " ".join([request.goal, creator_summary, *request.learning_outcomes]).lower()
+        text = " ".join([request.goal, creator_summary]).lower()
         modules: list[CreateCourseModuleRequest]
         if (
             design_spec.capabilities.durable_state_required
@@ -673,9 +895,15 @@ class CourseGenerationService:
                 module_slug=module.module_slug or f"module-{index}",
                 title=module.title,
                 summary=module.summary or module.title,
-                learning_outcomes=self._normalize_learning_outcomes(module.learning_outcomes or request.learning_outcomes[:3]),
+                learning_outcomes=self._normalize_learning_outcomes(
+                    module.learning_outcomes
+                    or self._derive_module_learning_outcomes(
+                        module.title,
+                        module.summary or module.title,
+                        module.design_spec or design_spec,
+                    )
+                ),
                 creator_notes=self._creator_notes_for_module(module, creator_choices),
-                checkpoint_module_ids=list(module.checkpoint_module_ids),
                 design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or design_spec, creator_choices),
             )
             for index, module in enumerate(modules, start=1)
@@ -761,6 +989,139 @@ class CourseGenerationService:
                 normalized.append(cleaned)
         return normalized
 
+    def _derive_plan_learning_outcomes(
+        self,
+        modules: list[CreateCourseModuleRequest] | list[CreatorCourseModulePlan],
+        design_spec: AssignmentDesignSpec | None,
+    ) -> list[str]:
+        outcomes: list[str] = []
+        for module in modules:
+            module_outcomes = list(module.learning_outcomes) if getattr(module, "learning_outcomes", None) else []
+            if not module_outcomes:
+                module_design_spec = getattr(module, "design_spec", None) or design_spec
+                module_outcomes = self._derive_module_learning_outcomes(
+                    getattr(module, "title", "Module"),
+                    getattr(module, "summary", "Build the module"),
+                    module_design_spec,
+                )
+            outcomes.extend(module_outcomes[:2])
+        return self._normalize_learning_outcomes(outcomes)[:6]
+
+    def _derive_module_learning_outcomes(
+        self,
+        title: str,
+        summary: str,
+        design_spec: AssignmentDesignSpec | None,
+    ) -> list[str]:
+        title_lower = title.lower()
+        summary_text = summary.strip().rstrip(".")
+
+        if any(keyword in title_lower for keyword in ["lock", "concurrency", "retry", "idempot"]):
+            return [
+                "Keep the critical workflow correct under concurrent or repeated requests.",
+                "Use locking, retries, or idempotency controls to preserve core invariants.",
+            ]
+        if "cache" in title_lower:
+            return [
+                "Use the configured cache to improve read performance without breaking correctness.",
+                "Explain the freshness and invalidation tradeoffs introduced by the cache layer.",
+            ]
+        if any(keyword in title_lower for keyword in ["retrieval", "citation", "grounded", "corpus", "search"]):
+            return [
+                "Use the learner-visible data source to return relevant evidence for each request.",
+                "Keep retrieval or grounded answers faithful to the available evidence.",
+            ]
+        if any(keyword in title_lower for keyword in ["tool", "control flow", "workflow"]):
+            return [
+                "Choose the right bounded workflow or tool path for each supported request.",
+                "Keep the service contract stable while the internal workflow becomes more capable.",
+            ]
+        if any(keyword in title_lower for keyword in ["observability", "trace", "production", "slo"]):
+            return [
+                "Make the service observable enough to explain what happened during a run.",
+                "Raise the module to a production-minded bar for reliability, latency, or operator trust.",
+            ]
+
+        outcomes: list[str] = []
+        if summary_text:
+            outcomes.append(summary_text + ".")
+        if design_spec is not None and design_spec.capabilities.durable_state_required:
+            outcomes.append("Protect the system invariants while the service mutates durable state.")
+        elif design_spec is not None and design_spec.capabilities.retrieval_mode != RetrievalMode.none:
+            outcomes.append("Turn the available data source into a dependable learner-visible service behavior.")
+        else:
+            outcomes.append("Implement the learner-visible behavior end to end and verify it with the provided checks.")
+        return self._normalize_learning_outcomes(outcomes)[:3]
+
+    def _resolve_creator_setup(
+        self,
+        goal: str,
+        creator_setup: CreatorCourseSetupInput | CreatorCourseSetupChoices | None,
+    ) -> CreatorCourseSetupChoices:
+        setup = creator_setup or CreatorCourseSetupInput()
+        lowered_goal = goal.lower()
+        starter_type = setup.starter_type or self._starter_type_for_goal(lowered_goal)
+        inferred_sources = self._infer_default_data_sources(lowered_goal)
+        raw_sources = list(setup.data_sources or inferred_sources)
+        seen_source_keys: set[str] = set()
+        data_sources = []
+        for source in raw_sources:
+            key = source.asset_id or source.workspace_path or source.id
+            if key in seen_source_keys:
+                continue
+            seen_source_keys.add(key)
+            data_sources.append(source)
+
+        primary_database = setup.primary_database
+        if primary_database is None and any(
+            keyword in lowered_goal
+            for keyword in ["booking", "reservation", "inventory", "payment", "wallet", "transaction", "order"]
+        ):
+            primary_database = "postgres"
+
+        cache_backend = setup.cache_backend
+        if cache_backend is None and any(
+            keyword in lowered_goal
+            for keyword in ["cache", "caching", "booking", "reservation", "availability", "read-heavy", "latency"]
+        ):
+            cache_backend = "redis"
+
+        return CreatorCourseSetupChoices(
+            starter_type=starter_type,
+            primary_database=primary_database,
+            cache_backend=cache_backend,
+            tech_stack=list(setup.tech_stack),
+            data_sources=data_sources,
+        )
+
+    def _starter_type_for_goal(self, lowered_goal: str) -> StarterType:
+        if any(keyword in lowered_goal for keyword in ["buggy", "fix", "debug", "legacy", "broken"]):
+            return StarterType.working_buggy
+        if any(keyword in lowered_goal for keyword in ["refactor", "improve", "optimize", "suboptimal"]):
+            return StarterType.working_suboptimal
+        if any(keyword in lowered_goal for keyword in ["from scratch", "blank", "implement everything"]):
+            return StarterType.bare_stub
+        return StarterType.partial_implementation
+
+    def _infer_default_data_sources(self, lowered_goal: str) -> list[DataSourceSpec]:
+        if any(
+            keyword in lowered_goal
+            for keyword in ["rag", "retrieval", "knowledge base", "documents", "corpus", "wiki", "search"]
+        ):
+            return [
+                DataSourceSpec(
+                    id="primary_corpus",
+                    kind=DataSourceKind.uploaded_file,
+                    title="Primary learner-visible corpus",
+                    purpose=DataSourcePurpose.retrieval,
+                    learner_visible=True,
+                    format="json",
+                    workspace_path="data/corpus.json",
+                    description="A learner-visible corpus or uploaded file used for retrieval and grounded answers.",
+                )
+            ]
+        return []
+
     def _apply_creator_choices_to_design_spec(
         self,
         design_spec: AssignmentDesignSpec | None,
@@ -773,9 +1134,16 @@ class CourseGenerationService:
                 "runtime_dependencies": design_spec.runtime_dependencies.model_copy(
                     update={
                         "starter_type": creator_choices.starter_type,
+                        "visible_fixture_files": [
+                            source.workspace_path
+                            for source in creator_choices.data_sources
+                            if source.learner_visible and source.workspace_path
+                        ]
+                        or list(design_spec.runtime_dependencies.visible_fixture_files),
                         "primary_database": creator_choices.primary_database,
                         "cache_backend": creator_choices.cache_backend,
                         "tech_stack": list(creator_choices.tech_stack),
+                        "data_sources": list(creator_choices.data_sources),
                     }
                 )
             }
@@ -796,6 +1164,9 @@ class CourseGenerationService:
             parts.append(f"The current plan assumes `{creator_choices.primary_database}` as the primary database.")
         if creator_choices.cache_backend:
             parts.append(f"The plan also gives learners access to `{creator_choices.cache_backend}` for caching work.")
+        if creator_choices.data_sources:
+            labels = ", ".join(f"`{source.title}`" for source in creator_choices.data_sources[:3])
+            parts.append(f"Learners will also work with data sources such as {labels}.")
         capability_labels = ", ".join(design_spec.capabilities.summary_labels())
         parts.append(f"Under the hood, the generation pipeline will target {capability_labels}.")
         return " ".join(parts)
@@ -807,6 +1178,12 @@ class CourseGenerationService:
             notes.append(f"Expected to use `{creator_choices.primary_database}` in this module.")
         if creator_choices.cache_backend and "cache" in summary_lower:
             notes.append(f"Expected to use `{creator_choices.cache_backend}` in this module.")
+        if creator_choices.data_sources and any(keyword in summary_lower for keyword in ["retrieval", "grounded", "corpus", "search", "citation"]):
+            notes.append(
+                "This module should use learner-visible data sources such as "
+                + ", ".join(f"`{source.title}`" for source in creator_choices.data_sources[:2])
+                + "."
+            )
         if creator_choices.starter_type.name.startswith("working"):
             notes.append("Learners should inherit a starter that already runs, then improve it.")
         elif creator_choices.starter_type == creator_choices.starter_type.partial_implementation:
@@ -823,7 +1200,7 @@ class CourseGenerationService:
         if request.package_type_hint is not None:
             return request.package_type_hint
 
-        brief = " ".join([request.goal, *request.learning_outcomes]).lower()
+        brief = request.goal.lower()
         survey_markers = [
             "survey",
             "compare",
@@ -852,16 +1229,12 @@ class CourseGenerationService:
                             if shared_codebase
                             else WorkspaceScope.per_module_workspace
                         ),
-                        "progression_mode": (
-                            ProgressionMode.cumulative_module_gates
-                            if shared_codebase
-                            else ProgressionMode.independent_modules
-                        ),
+                        "progression_mode": ProgressionMode.independent_modules,
                         "shared_codebase": shared_codebase,
                     }
                 ),
                 "assessment_strategy": design_spec.assessment_strategy.model_copy(
-                    update={"cumulative_module_gates": shared_codebase}
+                    update={"cumulative_module_gates": False}
                 ),
             }
         )

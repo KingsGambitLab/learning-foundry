@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.domain.task_agent import TaskAgentServiceSpec
 
@@ -121,7 +121,7 @@ class TestGradeResult(BaseModel):
 
 
 class ModuleGradeReport(BaseModel):
-    module_id: str
+    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
     total_tests: int
     passed_tests: int
     failed_tests: int
@@ -131,4 +131,32 @@ class ModuleGradeReport(BaseModel):
     submission_warnings: list[str] = Field(default_factory=list)
 
 
+class ReviewAreaGradeReport(BaseModel):
+    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    title: str
+    objective: str
+    deliverable_index: int = Field(
+        ge=1,
+        validation_alias=AliasChoices("deliverable_index", "module_index"),
+    )
+    grade_report: ModuleGradeReport
+
+
+class AssignmentGradeReport(BaseModel):
+    total_tests: int
+    passed_tests: int
+    failed_tests: int
+    pass_rate: float = Field(ge=0.0, le=1.0)
+    status: GradeStatus
+    review_areas: list[ReviewAreaGradeReport] = Field(default_factory=list)
+    submission_warnings: list[str] = Field(default_factory=list)
+
+
+class LiveAssignmentGradeReport(BaseModel):
+    base_url: str
+    submission: TaskAgentSubmission
+    assignment_report: AssignmentGradeReport
+
+
 LiveTaskAgentGradeReport.model_rebuild()
+LiveAssignmentGradeReport.model_rebuild()

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 
-from app.domain.grading import LiveGradeTaskAgentRequest, LiveTaskAgentGradeReport
+from app.domain.grading import LiveAssignmentGradeReport, LiveGradeTaskAgentRequest
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
@@ -44,7 +44,7 @@ class LearnerStudioService:
         self,
         *,
         enrollment_id: str,
-        module_id: str,
+        deliverable_id: str,
         workspace_root: str | Path,
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
@@ -57,10 +57,9 @@ class LearnerStudioService:
             if self._can_reuse_session(
                 existing_session=existing_session,
                 workspace_path=workspace_path,
-                module_id=module_id,
             ):
                 refreshed = existing_session.model_copy(deep=True)
-                refreshed.module_id = module_id
+                refreshed.deliverable_id = deliverable_id
                 refreshed.status = LearnerWorkspaceSessionStatus.running
                 refreshed.updated_at = self._now()
                 return refreshed
@@ -110,7 +109,7 @@ class LearnerStudioService:
         return LearnerWorkspaceSession(
             id=session_id,
             enrollment_id=enrollment_id,
-            module_id=module_id,
+            deliverable_id=deliverable_id,
             scope=scope,
             created_at=existing_session.created_at if existing_session is not None else self._now(),
             updated_at=self._now(),
@@ -128,7 +127,6 @@ class LearnerStudioService:
         *,
         existing_session: LearnerWorkspaceSession,
         workspace_path: Path,
-        module_id: str,
     ) -> bool:
         container_name = existing_session.container_name
         if not container_name:
@@ -137,15 +135,14 @@ class LearnerStudioService:
             return False
         if not self._container_running(container_name):
             return False
-        return self._container_current_module_id(container_name) == module_id
+        return True
 
-    def grade_workspace(
+    def grade_assignment(
         self,
         *,
         workspace_root: str | Path,
         spec: TaskAgentServiceSpec,
-        module_id: str,
-    ) -> LiveTaskAgentGradeReport:
+    ) -> LiveAssignmentGradeReport:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
         self._ensure_image()
@@ -190,9 +187,8 @@ class LearnerStudioService:
         base_url = f"http://{self.host}:{host_port}"
         try:
             self._wait_for_http(f"{base_url}/health")
-            return self.runner.grade_live(
+            return self.runner.grade_assignment_live(
                 spec,
-                module_id,
                 LiveGradeTaskAgentRequest(base_url=base_url),
             )
         except TaskAgentRunnerError as exc:
@@ -254,26 +250,6 @@ class LearnerStudioService:
             text=True,
             timeout=30,
         )
-
-    def _container_current_module_id(self, container_name: str) -> str | None:
-        inspect = subprocess.run(
-            [
-                self.docker_binary,
-                "exec",
-                container_name,
-                "sh",
-                "-lc",
-                "cat /workspace/.coursegen/current_module.txt 2>/dev/null",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        if inspect.returncode != 0:
-            return None
-        current_module_id = inspect.stdout.strip()
-        return current_module_id or None
 
     def _wait_for_http(self, url: str) -> None:
         deadline = time.time() + self.start_timeout_s

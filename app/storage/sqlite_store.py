@@ -4,8 +4,10 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
+from app.domain.assets import CreatorAssetRecord
 from app.domain.course import CourseEvent, CourseRun, CourseRunSummary
 from app.domain.learner import (
     LearnerEnrollment,
@@ -180,7 +182,19 @@ class SQLiteWorkflowStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creator_assets (
+                    asset_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
             connection.commit()
+
+    def utcnow(self) -> datetime:
+        return datetime.now(UTC)
 
     def save_run(self, run: WorkflowRun) -> WorkflowRun:
         payload = json.dumps(run.model_dump(mode="json"))
@@ -403,6 +417,7 @@ class SQLiteWorkflowStore:
             creator_feedback_count = int(connection.execute("SELECT COUNT(*) AS count FROM creator_feedback").fetchone()["count"])
             learner_feedback_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_feedback").fetchone()["count"])
             learner_eval_report_count = int(connection.execute("SELECT COUNT(*) AS count FROM learner_eval_reports").fetchone()["count"])
+            creator_asset_count = int(connection.execute("SELECT COUNT(*) AS count FROM creator_assets").fetchone()["count"])
 
             connection.execute("DELETE FROM workflow_events")
             connection.execute("DELETE FROM workflow_runs")
@@ -412,6 +427,7 @@ class SQLiteWorkflowStore:
             connection.execute("DELETE FROM creator_feedback")
             connection.execute("DELETE FROM learner_feedback")
             connection.execute("DELETE FROM learner_eval_reports")
+            connection.execute("DELETE FROM creator_assets")
             connection.execute("DELETE FROM learner_submissions")
             connection.execute("DELETE FROM learner_workspace_sessions")
             connection.execute("DELETE FROM learner_enrollments")
@@ -429,7 +445,56 @@ class SQLiteWorkflowStore:
             "deleted_creator_feedback": creator_feedback_count,
             "deleted_learner_feedback": learner_feedback_count,
             "deleted_learner_eval_reports": learner_eval_report_count,
+            "deleted_creator_assets": creator_asset_count,
         }
+
+    def save_creator_asset(self, asset: CreatorAssetRecord) -> CreatorAssetRecord:
+        payload = json.dumps(asset.model_dump(mode="json"))
+        with self._lock, self._session() as connection:
+            connection.execute(
+                """
+                INSERT INTO creator_assets (asset_id, created_at, payload_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    payload_json = excluded.payload_json
+                """,
+                (asset.id, asset.created_at.isoformat(), payload),
+            )
+            connection.commit()
+        return asset
+
+    def get_creator_asset(self, asset_id: str) -> CreatorAssetRecord | None:
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM creator_assets WHERE asset_id = ?",
+                (asset_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return CreatorAssetRecord.model_validate(json.loads(row["payload_json"]))
+
+    def list_creator_assets(self, limit: int = 100) -> list[CreatorAssetRecord]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM creator_assets
+                ORDER BY datetime(created_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [CreatorAssetRecord.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def delete_creator_asset(self, asset_id: str) -> bool:
+        with self._lock, self._session() as connection:
+            cursor = connection.execute(
+                "DELETE FROM creator_assets WHERE asset_id = ?",
+                (asset_id,),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
     def save_learner_enrollment(self, enrollment: LearnerEnrollment) -> LearnerEnrollment:
         payload = json.dumps(enrollment.model_dump(mode="json"))
@@ -468,7 +533,7 @@ class SQLiteWorkflowStore:
             ).fetchone()
         if row is None:
             return None
-        return LearnerEnrollment.model_validate(json.loads(row["payload_json"]))
+        return LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(json.loads(row["payload_json"])))
 
     def find_learner_enrollment(self, learner_id: str, course_run_id: str) -> LearnerEnrollment | None:
         with self._session() as connection:
@@ -484,7 +549,7 @@ class SQLiteWorkflowStore:
             ).fetchone()
         if row is None:
             return None
-        return LearnerEnrollment.model_validate(json.loads(row["payload_json"]))
+        return LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(json.loads(row["payload_json"])))
 
     def list_learner_enrollments(self, learner_id: str | None = None, limit: int = 50) -> list[LearnerEnrollmentSummary]:
         query = """
@@ -502,7 +567,7 @@ class SQLiteWorkflowStore:
             rows = connection.execute(query, params).fetchall()
         return [
             LearnerEnrollmentSummary.from_enrollment(
-                LearnerEnrollment.model_validate(json.loads(row["payload_json"]))
+                LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(json.loads(row["payload_json"])))
             )
             for row in rows
         ]
@@ -524,7 +589,7 @@ class SQLiteWorkflowStore:
                 (
                     submission.id,
                     submission.enrollment_id,
-                    submission.module_id,
+                    submission.deliverable_id,
                     submission.created_at.isoformat(),
                     payload,
                 ),
@@ -566,7 +631,7 @@ class SQLiteWorkflowStore:
                 (
                     session.id,
                     session.enrollment_id,
-                    session.module_id,
+                    session.deliverable_id,
                     session.updated_at.isoformat(),
                     payload,
                 ),
@@ -955,3 +1020,28 @@ class SQLiteWorkflowStore:
                 "course_family_id": payload.get("id"),
             }
         return payload
+
+    def _normalize_learner_enrollment_payload(self, payload: dict) -> dict:
+        deliverables = payload.get("deliverables")
+        if not isinstance(deliverables, list):
+            deliverables = payload.get("modules")
+        if not isinstance(deliverables, list):
+            return payload
+
+        normalized_deliverables = []
+        for deliverable in deliverables:
+            if not isinstance(deliverable, dict):
+                normalized_deliverables.append(deliverable)
+                continue
+            status = deliverable.get("status")
+            normalized_deliverables.append(
+                {
+                    **deliverable,
+                    "status": "available" if status == "locked" else status,
+                }
+            )
+
+        return {
+            **payload,
+            "deliverables": normalized_deliverables,
+        }

@@ -190,6 +190,21 @@ class ExecutionSurface(str, Enum):
     protocol_server = "protocol_server"
 
 
+class DataSourceKind(str, Enum):
+    uploaded_file = "uploaded_file"
+    corpus_bundle = "corpus_bundle"
+    seed_database = "seed_database"
+    mock_api = "mock_api"
+    object_store = "object_store"
+
+
+class DataSourcePurpose(str, Enum):
+    retrieval = "retrieval"
+    reference_data = "reference_data"
+    seed_state = "seed_state"
+    external_mock = "external_mock"
+
+
 class RetrievalMode(str, Enum):
     none = "none"
     ranked_results = "ranked_results"
@@ -203,11 +218,24 @@ class CourseStructureSpec(BaseModel):
     shared_codebase: bool = True
 
 
+class DataSourceSpec(BaseModel):
+    id: str
+    kind: DataSourceKind
+    title: str
+    purpose: DataSourcePurpose = DataSourcePurpose.reference_data
+    learner_visible: bool = True
+    format: str | None = None
+    workspace_path: str | None = None
+    asset_id: str | None = None
+    description: str | None = None
+
+
 class RuntimeDependencySpec(BaseModel):
     execution_surface: ExecutionSurface
     starter_type: StarterType = StarterType.partial_implementation
     editable_files: list[str] = Field(default_factory=list)
     visible_fixture_files: list[str] = Field(default_factory=list)
+    data_sources: list[DataSourceSpec] = Field(default_factory=list)
     primary_database: str | None = None
     cache_backend: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
@@ -494,6 +522,7 @@ class ModuleSpec(BaseModel):
     objective: str
     starter_type: StarterType
     overlay_ids: list[str] = Field(default_factory=list)
+    learning_outcomes: list[str] = Field(default_factory=list)
     learner_brief: LearnerModuleBrief | None = None
     public_checks: list[PublicCheckSpec] = Field(default_factory=list)
 
@@ -589,17 +618,30 @@ class TaskAgentServiceSpec(BaseModel):
             raise ValueError(f"unknown module id: {module_id}")
 
         cutoff = order[module_id]
-        cumulative_modules = [module.id for module in self.modules[: cutoff + 1]]
-        active_behaviors = [
-            behavior.id
-            for behavior in self.behaviors
-            if order.get(behavior.first_required_in, cutoff + 1) <= cutoff
-        ]
-        active_qualities = [
-            quality.id
-            for quality in self.qualities
-            if order.get(quality.first_required_in, cutoff + 1) <= cutoff
-        ]
+        if self.course_structure.progression_mode == ProgressionMode.independent_modules:
+            cumulative_modules = [module_id]
+            active_behaviors = [
+                behavior.id
+                for behavior in self.behaviors
+                if behavior.first_required_in == module_id
+            ]
+            active_qualities = [
+                quality.id
+                for quality in self.qualities
+                if quality.first_required_in == module_id
+            ]
+        else:
+            cumulative_modules = [module.id for module in self.modules[: cutoff + 1]]
+            active_behaviors = [
+                behavior.id
+                for behavior in self.behaviors
+                if order.get(behavior.first_required_in, cutoff + 1) <= cutoff
+            ]
+            active_qualities = [
+                quality.id
+                for quality in self.qualities
+                if order.get(quality.first_required_in, cutoff + 1) <= cutoff
+            ]
         return ModuleGate(
             module_id=module_id,
             cumulative_modules=cumulative_modules,
