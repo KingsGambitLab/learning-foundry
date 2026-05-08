@@ -474,6 +474,48 @@ def render_task_agent_runtime_module() -> str:
     ).strip() + "\n"
 
 
+def render_legacy_task_agent_root_app() -> str:
+    return dedent(
+        """
+        from __future__ import annotations
+
+        import sys
+        from pathlib import Path
+
+        ROOT = Path(__file__).resolve().parents[2]
+        if str(ROOT) not in sys.path:
+            sys.path.append(str(ROOT))
+
+        from runtime.task_agent_runtime import create_app_from_manifest
+
+        app = create_app_from_manifest(Path(__file__).with_name("starter_manifest.json"))
+        """
+    ).strip() + "\n"
+
+
+def render_task_agent_root_app() -> str:
+    return dedent(
+        """
+        from __future__ import annotations
+
+        import sys
+        from pathlib import Path
+
+        ROOT = Path(__file__).resolve().parent
+        if str(ROOT) not in sys.path:
+            sys.path.append(str(ROOT))
+
+        from runtime.task_agent_runtime import create_app_from_manifest
+
+        app = create_app_from_manifest(Path(__file__).with_name("starter_manifest.json"))
+        """
+    ).strip() + "\n"
+
+
+def render_legacy_task_agent_module_app() -> str:
+    return render_legacy_task_agent_root_app()
+
+
 def render_task_agent_module_app() -> str:
     return dedent(
         """

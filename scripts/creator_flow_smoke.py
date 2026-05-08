@@ -72,6 +72,27 @@ def _request_json(client: httpx.Client, method: str, path: str, **kwargs) -> dic
     return payload
 
 
+def _wait_for_condition(
+    client: httpx.Client,
+    path: str,
+    *,
+    timeout_s: float,
+    poll_interval_s: float,
+    predicate,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_s
+    last_payload: dict[str, Any] | None = None
+    while time.time() < deadline:
+        payload = _request_json(client, "GET", path)
+        last_payload = payload
+        if predicate(payload):
+            return payload
+        time.sleep(poll_interval_s)
+    raise SmokeError(
+        f"Timed out waiting for {path}. Last payload:\n{json.dumps(last_payload, indent=2)}"
+    )
+
+
 def _run_scenario(client: httpx.Client, scenario: dict[str, Any]) -> dict[str, Any]:
     planned = _request_json(
         client,
@@ -124,6 +145,89 @@ def _run_scenario(client: httpx.Client, scenario: dict[str, Any]) -> dict[str, A
     }
 
 
+def _run_full_flow(
+    client: httpx.Client,
+    scenario: dict[str, Any],
+    *,
+    creator_timeout_s: float,
+) -> dict[str, Any]:
+    created = _run_scenario(client, scenario)
+    course_run_id = created["course_run_id"]
+
+    creator_view = _wait_for_condition(
+        client,
+        f"/v1/course-runs/{course_run_id}/creator-view",
+        timeout_s=creator_timeout_s,
+        poll_interval_s=0.5,
+        predicate=lambda payload: payload["course_run"]["stage"] in {"ready_to_publish", "published"},
+    )
+    course_run = creator_view["course_run"]
+    if course_run["stage"] == "ready_to_publish":
+        published = _request_json(client, "POST", f"/v1/course-runs/{course_run_id}/publish")
+        course_run = published
+
+    catalog = _request_json(client, "GET", "/v1/lms/catalog")
+    catalog_course = next(
+        (course for course in catalog["courses"] if course["course_run_id"] == course_run_id),
+        None,
+    )
+    if catalog_course is None:
+        raise SmokeError(f"Published course '{course_run_id}' is missing from the LMS catalog.")
+    if not catalog_course.get("supported_for_lms"):
+        raise SmokeError(
+            f"Published course '{course_run_id}' is not learner-ready: {catalog_course.get('support_reason')}"
+        )
+
+    enrollment = _request_json(
+        client,
+        "POST",
+        "/v1/lms/enrollments",
+        json={"course_run_id": course_run_id},
+    )
+    enrollment_id = enrollment["id"]
+
+    experience = _request_json(client, "GET", f"/v1/lms/enrollments/{enrollment_id}/experience")
+    if not experience.get("project_brief_markdown", "").strip():
+        raise SmokeError("Learner experience is missing the project brief.")
+
+    launched = _request_json(
+        client,
+        "POST",
+        f"/v1/lms/enrollments/{enrollment_id}/workspace",
+        json={},
+    )
+    workspace_session = launched.get("workspace_session") or launched["deliverables"][0].get("workspace_session")
+    if not workspace_session or not workspace_session.get("editor_url"):
+        raise SmokeError(f"Workspace launch did not return an editor URL: {json.dumps(launched, indent=2)}")
+
+    deliverables = launched.get("deliverables", [])
+    first_deliverable = deliverables[0] if deliverables else None
+    if first_deliverable is None:
+        raise SmokeError("Enrollment is missing deliverables after launch.")
+
+    reviewed = _request_json(
+        client,
+        "POST",
+        f"/v1/lms/enrollments/{enrollment_id}/submit",
+        json={"deliverable_id": first_deliverable["deliverable_id"]},
+    )
+    latest_submission = reviewed.get("latest_assignment_submission")
+    latest_report = reviewed.get("latest_assignment_report")
+    if latest_submission is None or latest_report is None:
+        raise SmokeError(f"Submit did not return the assignment review report: {json.dumps(reviewed, indent=2)}")
+
+    return {
+        **created,
+        "final_stage": course_run["stage"],
+        "publish_snapshot_id": course_run.get("latest_publish_snapshot_id"),
+        "enrollment_id": enrollment_id,
+        "workspace_url": workspace_session["editor_url"],
+        "review_status": latest_submission["status"],
+        "passed_tests": latest_report["passed_tests"],
+        "total_tests": latest_report["total_tests"],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the creator-plan -> draft -> creator-view flow.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010", help="Base URL for the local app.")
@@ -133,6 +237,17 @@ def main() -> None:
         action="append",
         help="Only run specific scenario(s). Defaults to all.",
     )
+    parser.add_argument(
+        "--full-flow",
+        action="store_true",
+        help="Also publish, enroll, launch the shared workspace, and submit the starter project for review.",
+    )
+    parser.add_argument(
+        "--creator-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for async creator generation to reach ready_to_publish.",
+    )
     args = parser.parse_args()
 
     selected = [scenario for scenario in SCENARIOS if not args.scenario or scenario["slug"] in args.scenario]
@@ -140,7 +255,10 @@ def main() -> None:
         raise SmokeError("No creator-flow scenarios selected.")
 
     with httpx.Client(base_url=args.base_url, timeout=60.0) as client:
-        results = [_run_scenario(client, scenario) for scenario in selected]
+        if args.full_flow:
+            results = [_run_full_flow(client, scenario, creator_timeout_s=args.creator_timeout) for scenario in selected]
+        else:
+            results = [_run_scenario(client, scenario) for scenario in selected]
 
     print(json.dumps({"base_url": args.base_url, "results": results}, indent=2))
 

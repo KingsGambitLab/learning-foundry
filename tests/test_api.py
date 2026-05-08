@@ -5,7 +5,7 @@ import json
 import py_compile
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,13 +14,14 @@ from fastapi.testclient import TestClient
 
 from app.domain.ai import AIUsageSummary
 from app.domain.course import (
+    CourseAsyncOperation,
     CourseGenerationSource,
     CourseGenerationStatus,
     CreateCourseModuleRequest,
     GenerateCourseFromBriefRequest,
     GeneratedCoursePlan,
 )
-from app.domain.grading import LiveAssignmentGradeReport, LiveTaskAgentGradeReport
+from app.domain.grading import GradeStatus, LiveAssignmentGradeReport, LiveTaskAgentGradeReport
 from app.domain.registry import PackageType, RiskClass
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.sandbox import (
@@ -55,6 +56,10 @@ from app.services.openai_task_agent_authoring import (
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+from app.services.task_agent_starter_templates import (
+    render_legacy_task_agent_root_app,
+    render_task_agent_root_app,
+)
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
@@ -1085,6 +1090,48 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("Optimistic locking and retries in postgres", creator_module_titles)
         self.assertIn("Redis for availability reads", creator_module_titles)
 
+    def test_creator_view_does_not_mutate_shared_workflow_when_course_copy_drifts(self) -> None:
+        planned = self.client.post(
+            "/v1/course-generation/creator-plan",
+            json={
+                "goal": "Build a grounded internal docs assistant that answers from a visible corpus with citations and abstains when support is weak.",
+                "creator_choices": {
+                    "starter_type": "partial_implementation",
+                },
+            },
+        )
+        self.assertEqual(planned.status_code, 200)
+
+        created = self.client.post(
+            "/v1/course-runs/from-creator-plan",
+            json={"plan": planned.json()["plan"]},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run_id = created.json()["id"]
+        shared_workflow_run_id = created.json()["shared_workflow_run_id"]
+        self.assertIsNotNone(shared_workflow_run_id)
+
+        stored = app.state.workflow_service.store.get_course_run(course_run_id)
+        assert stored is not None
+        stored.active_operation = CourseAsyncOperation.generation
+        stored.deliverables[0].title = "Locally edited creator title"
+        app.state.workflow_service.store.save_course_run(stored)
+
+        before_events = app.state.workflow_service.store.list_events(shared_workflow_run_id)
+        before_count = len(before_events)
+
+        creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
+        self.assertEqual(creator_view.status_code, 200)
+        body = creator_view.json()
+        self.assertEqual(body["course_run"]["active_operation"], "generation")
+
+        after_events = app.state.workflow_service.store.list_events(shared_workflow_run_id)
+        self.assertEqual(len(after_events), before_count)
+        self.assertEqual(
+            app.state.workflow_service.store.get_run(shared_workflow_run_id).artifacts.task_agent_spec.modules[0].title,
+            created.json()["deliverables"][0]["title"],
+        )
+
     def test_creator_plan_with_more_modules_than_base_scaffold_requires_new_hidden_coverage(self) -> None:
         planned = self.client.post(
             "/v1/course-generation/creator-plan",
@@ -1397,6 +1444,80 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["grade_report"]["status"], "passed")
         self.assertEqual(body["grade_report"]["passed_tests"], body["grade_report"]["total_tests"])
         self.assertEqual(len(body["submission"]["runs"]), 3)
+
+    def test_task_agent_live_grading_tolerates_missing_tool_call_order(self) -> None:
+        reference_submission = get_support_triage_passing_submission().model_dump(mode="json")
+        remaining_runs = list(reference_submission["runs"])
+        runtime_runs: dict[str, dict] = {}
+
+        def response(payload: dict, status_code: int = 200) -> httpx.Response:
+            return httpx.Response(status_code=status_code, json=payload)
+
+        def response_shape(run: dict) -> dict:
+            tool_calls = []
+            for call in run.get("tool_calls", []):
+                normalized = dict(call)
+                normalized.pop("order", None)
+                tool_calls.append(normalized)
+            return {
+                "output": run.get("output", {}),
+                "trace_events": run.get("trace_events", []),
+                "step_count": run.get("step_count", 0),
+                "latency_ms": run.get("latency_ms", 0),
+                "cost_usd": run.get("cost_usd", 0.0),
+                "tool_calls": tool_calls,
+                "approvals": run.get("approvals", []),
+                "escalations": run.get("escalations", []),
+                "failure_injections": run.get("failure_injections", []),
+                "fallback_actions": run.get("fallback_actions", []),
+                "resumed_after_pause": run.get("resumed_after_pause", False),
+                "success": run.get("success", True),
+                "quality_score": run.get("quality_score"),
+                "notes": run.get("notes", []),
+            }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            payload = json.loads(request.content.decode() or "{}") if request.content else {}
+
+            if request.method == "POST" and path == "/run":
+                dry_run = bool(payload.get("dry_run", False))
+                run = next(run for run in remaining_runs if run.get("dry_run", False) == dry_run)
+                remaining_runs.remove(run)
+                runtime_runs[run["run_id"]] = run
+                return response({"run_id": run["run_id"], "status": "completed", **response_shape(run)})
+
+            if request.method == "GET" and path.startswith("/runs/"):
+                run_id = path.split("/")[-1]
+                run = runtime_runs[run_id]
+                return response({"run_id": run_id, "status": "completed", **response_shape(run)})
+
+            if request.method == "GET" and path.startswith("/trace/"):
+                run_id = path.split("/")[-1]
+                run = runtime_runs[run_id]
+                return response({"run_id": run_id, "events": run.get("trace_events", [])})
+
+            return response({"detail": "unknown route"}, status_code=404)
+
+        app.state.task_agent_blackbox_runner = TaskAgentBlackBoxRunner(
+            client_factory=lambda base_url, timeout_s: httpx.Client(
+                transport=httpx.MockTransport(handler),
+                base_url=base_url,
+                timeout=timeout_s,
+            )
+        )
+        spec = self.client.get("/v1/examples/task-agent/support-triage").json()
+
+        response_live = self.client.post(
+            "/v1/specs/task-agent/grade-live/module_8",
+            json={
+                "spec": spec,
+                "live": {"base_url": "http://learner.test"},
+            },
+        )
+        self.assertEqual(response_live.status_code, 200)
+        body = response_live.json()
+        self.assertEqual(body["grade_report"]["status"], "passed")
 
     def test_validation_catches_unknown_tool_reference(self) -> None:
         example = self.client.get("/v1/examples/task-agent/support-triage").json()
@@ -2364,6 +2485,12 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(synced.status_code, 200)
         published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
         self.assertEqual(published.status_code, 200)
+        snapshot_id = published.json()["latest_publish_snapshot_id"]
+        snapshot = app.state.workflow_service.store.get_publish_snapshot(snapshot_id)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        snapshot.learner_package.project_brief_markdown = ""
+        app.state.workflow_service.store.save_publish_snapshot(snapshot)
 
         catalog = self.client.get("/v1/lms/catalog")
         self.assertEqual(catalog.status_code, 200)
@@ -2394,6 +2521,28 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(first_module["workspace_session"]["status"], "running")
         self.assertIn("http://127.0.0.1:18080/", first_module["workspace_session"]["editor_url"])
+        workspace_root = Path(first_module["workspace_session"]["workspace_root"])
+        self.assertTrue((workspace_root / "app.py").exists())
+        self.assertTrue((workspace_root / "checks" / "run_visible_checks.py").exists())
+
+        (workspace_root / "app.py").unlink()
+        self.assertFalse((workspace_root / "app.py").exists())
+
+        healed = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
+        self.assertEqual(healed.status_code, 200)
+        self.assertTrue((workspace_root / "app.py").exists())
+        self.assertEqual((workspace_root / "app.py").read_text(encoding="utf-8"), render_task_agent_root_app())
+
+        (workspace_root / "app.py").write_text(render_legacy_task_agent_root_app(), encoding="utf-8")
+        migrated = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
+        self.assertEqual(migrated.status_code, 200)
+        self.assertEqual((workspace_root / "app.py").read_text(encoding="utf-8"), render_task_agent_root_app())
+
+        experience_page = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
+        self.assertEqual(experience_page.status_code, 200)
+        experience_body = experience_page.json()
+        self.assertIn(course_run["title"], experience_body["project_brief_markdown"])
+        self.assertIn("What review will look at", experience_body["project_brief_markdown"])
 
         experience = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/submit",
@@ -2424,6 +2573,77 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(module_1["status"], "passed")
         self.assertEqual(module_2["status"], "passed")
+
+    def test_enrollment_prefers_newest_submission_per_deliverable(self) -> None:
+        app.state.lms_service = LMSService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            learner_studio_service=FakeLearnerStudioService(),
+        )
+        course = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(course.status_code, 200)
+        course_run_id = course.json()["id"]
+        shared_run_id = course.json()["shared_workflow_run_id"]
+        for gate in (
+            "gate_1_spec_review",
+            "gate_2_progression_review",
+            "gate_3_pre_publish",
+        ):
+            decision = self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+            self.assertEqual(decision.status_code, 200)
+        self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
+        self.assertEqual(published.status_code, 200)
+
+        enrollment = self.client.post(
+            "/v1/lms/enrollments",
+            json={"course_run_id": course_run_id},
+        )
+        self.assertEqual(enrollment.status_code, 200)
+        enrollment_id = enrollment.json()["id"]
+        first_deliverable_id = enrollment.json()["deliverables"][0]["deliverable_id"]
+
+        submit = self.client.post(
+            f"/v1/lms/enrollments/{enrollment_id}/submit",
+            json={"deliverable_id": first_deliverable_id},
+        )
+        self.assertEqual(submit.status_code, 200)
+        latest_pass = submit.json()["submissions"][0]
+        self.assertEqual(latest_pass["status"], "passed")
+
+        stored_pass = app.state.workflow_service.store.list_learner_submissions(enrollment_id)[0]
+        older_failure = stored_pass.model_copy(deep=True)
+        older_failure.id = f"{stored_pass.id}_older_failure"
+        older_failure.created_at = stored_pass.created_at - timedelta(minutes=5)
+        older_failure.status = GradeStatus.failed.value
+        older_failure.passed_tests = 0
+        older_failure.pass_rate = 0.0
+        older_failure.grade_report = older_failure.grade_report.model_copy(
+            update={
+                "status": GradeStatus.failed,
+                "passed_tests": 0,
+                "failed_tests": older_failure.grade_report.total_tests,
+                "pass_rate": 0.0,
+            }
+        )
+        app.state.workflow_service.store.save_learner_submission(older_failure)
+
+        refreshed = self.client.get(f"/v1/lms/enrollments/{enrollment_id}")
+        self.assertEqual(refreshed.status_code, 200)
+        first_deliverable = next(
+            deliverable
+            for deliverable in refreshed.json()["deliverables"]
+            if deliverable["deliverable_id"] == first_deliverable_id
+        )
+        self.assertEqual(first_deliverable["status"], "passed")
+        self.assertEqual(first_deliverable["latest_submission"]["id"], stored_pass.id)
+        self.assertEqual(first_deliverable["latest_submission"]["status"], "passed")
 
     def test_lms_workspace_file_api_reads_and_writes_workspace_files(self) -> None:
         app.state.lms_service = LMSService(

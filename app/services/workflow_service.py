@@ -138,6 +138,7 @@ class WorkflowService:
         reasons: list[str] | None = None,
         warnings: list[str] | None = None,
         notes: list[str] | None = None,
+        execute_nodes: bool = True,
     ) -> WorkflowRun:
         reasons = reasons or []
         warnings = warnings or []
@@ -154,6 +155,7 @@ class WorkflowService:
             reasons=reasons or ["Created from an explicit assignment design specification."],
             warnings=warnings,
             notes=notes,
+            execute_nodes=execute_nodes,
         )
 
     def list_task_agent_grader_plans(self, run_id: str) -> TaskAgentGraderPlanCollection:
@@ -201,7 +203,7 @@ class WorkflowService:
         )
         return report
 
-    def create_run(self, intake: GenerationIntake) -> WorkflowRun:
+    def create_run(self, intake: GenerationIntake, *, execute_nodes: bool = True) -> WorkflowRun:
         inferred = infer_assignment_design(
             title=intake.title,
             problem_statement=intake.problem_statement,
@@ -227,6 +229,7 @@ class WorkflowService:
             reasons=inferred.reasons,
             warnings=inferred.warnings,
             notes=[],
+            execute_nodes=execute_nodes,
         )
 
     def create_revision_from_run(self, run_id: str) -> WorkflowRun:
@@ -303,6 +306,7 @@ class WorkflowService:
         reasons: list[str],
         warnings: list[str],
         notes: list[str],
+        execute_nodes: bool = True,
     ) -> WorkflowRun:
         now = datetime.now(UTC)
         run_id = f"run_{uuid4().hex[:12]}"
@@ -357,11 +361,17 @@ class WorkflowService:
                 ),
             },
         )
-        if run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
+        if execute_nodes and run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
             run = self.execute_langgraph_nodes(run.id)
         return run
 
-    def update_task_agent_spec(self, run_id: str, spec: TaskAgentServiceSpec) -> WorkflowRun:
+    def update_task_agent_spec(
+        self,
+        run_id: str,
+        spec: TaskAgentServiceSpec,
+        *,
+        execute_nodes: bool = True,
+    ) -> WorkflowRun:
         run = self._require_run(run_id)
         if run.stage == WorkflowStage.published or run.status == WorkflowStatus.published:
             raise WorkflowConflictError("Published workflow runs are immutable. Create a new revision before editing the spec.")
@@ -385,7 +395,7 @@ class WorkflowService:
                 "warning_count": len(validation.warnings),
             },
         )
-        if self.node_runtime is not None:
+        if execute_nodes and self.node_runtime is not None:
             run = self.execute_langgraph_nodes(run.id)
         return run
 

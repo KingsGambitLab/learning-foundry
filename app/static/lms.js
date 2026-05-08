@@ -226,6 +226,71 @@
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }
 
+  const submitProgressSteps = [
+    {
+      title: "Starting review",
+      message: "Preparing your shared project files for the hidden grader.",
+      delayMs: 0,
+    },
+    {
+      title: "Booting review sandbox",
+      message: "Starting the app sandbox and wiring up the grader checks.",
+      delayMs: 1500,
+    },
+    {
+      title: "Running hidden checks",
+      message: "Review is in progress now. First boots can take a little longer.",
+      delayMs: 7000,
+    },
+    {
+      title: "Still reviewing",
+      message: "We are waiting for your project app to come up and finish the deliverable checks.",
+      delayMs: 18000,
+    },
+  ];
+
+  let submitProgressTimeout = null;
+
+  function openWorkspaceUrl(url) {
+    if (!url) {
+      return false;
+    }
+    window.location.assign(url);
+    return true;
+  }
+
+  function stopSubmitProgress() {
+    if (submitProgressTimeout !== null) {
+      window.clearTimeout(submitProgressTimeout);
+      submitProgressTimeout = null;
+    }
+  }
+
+  function advanceSubmitProgress(stepIndex) {
+    const step = submitProgressSteps[stepIndex];
+    if (!step || !isBusy("submit")) {
+      return;
+    }
+    uiState.submissionFeedback = {
+      kind: "info",
+      title: step.title,
+      message: step.message,
+    };
+    renderAll();
+    const nextStep = submitProgressSteps[stepIndex + 1];
+    if (!nextStep) {
+      submitProgressTimeout = null;
+      return;
+    }
+    const delay = Math.max(0, nextStep.delayMs - step.delayMs);
+    submitProgressTimeout = window.setTimeout(() => advanceSubmitProgress(stepIndex + 1), delay);
+  }
+
+  function startSubmitProgress() {
+    stopSubmitProgress();
+    advanceSubmitProgress(0);
+  }
+
   function setBusy(action, target = null) {
     uiState.busyAction = action;
     uiState.busyTarget = target;
@@ -603,6 +668,18 @@
     const canSubmit = enrollment.status !== "completed";
 
     const workspaceRunning = experience?.workspace_session?.status === "running";
+    const workspaceAction = session?.editor_url
+      ? `
+        <a class="button primary" href="${escapeHtml(session.editor_url)}">${escapeHtml(launchLabel)}</a>
+      `
+      : `
+        <button
+          class="button primary"
+          type="button"
+          data-action="launch-workspace"
+          ${canLaunchWorkspace ? "" : "disabled"}
+        >${escapeHtml(launchLabel)}</button>
+      `;
 
     const eyebrowText = enrollment.status === "completed"
       ? "Course complete"
@@ -677,12 +754,7 @@
                 </div>
                 <p>Cloud VS Code with the shared project files and your saved edits.</p>
                 <div class="focus-actions">
-                  <button
-                    class="button primary"
-                    type="button"
-                    data-action="launch-workspace"
-                    ${canLaunchWorkspace ? "" : "disabled"}
-                  >${escapeHtml(launchLabel)}</button>
+                  ${workspaceAction}
                 </div>
                 ${renderFeedbackBanner(uiState.workspaceFeedback)}
               </div>
@@ -1034,6 +1106,12 @@
       return;
     }
 
+    const currentSession = experience.workspace_session;
+    if (currentSession?.editor_url && currentSession.status === "running") {
+      openWorkspaceUrl(currentSession.editor_url);
+      return;
+    }
+
     uiState.workspaceFeedback = null;
     setBusy("workspace");
     renderAll();
@@ -1051,14 +1129,7 @@
       const refreshedSession = uiState.currentExperience?.active_deliverable?.workspace_session;
       const effectiveSession = uiState.currentExperience?.workspace_session || refreshedSession;
       if (effectiveSession?.editor_url) {
-        const editorTab = window.open(effectiveSession.editor_url, "_blank", "noopener,noreferrer");
-        showToast(
-          editorTab ? "success" : "info",
-          "Workspace ready",
-          editorTab
-            ? "Opening your VS Code workspace now."
-            : "Your browser blocked the new tab. Use the workspace button again to retry."
-        );
+        openWorkspaceUrl(effectiveSession.editor_url);
       } else {
         showToast("success", "Workspace ready", "Your coding workspace is running for this enrollment.");
       }
@@ -1082,8 +1153,8 @@
       return;
     }
 
-    uiState.submissionFeedback = null;
     setBusy("submit");
+    startSubmitProgress();
     renderAll();
 
     try {
@@ -1097,6 +1168,7 @@
       }
       const gradedExperience = await response.json();
       const latestSubmission = gradedExperience.latest_assignment_submission;
+      stopSubmitProgress();
 
       uiState.submissionFeedback = {
         kind: latestSubmission?.status === "passed" ? "success" : "error",
@@ -1117,6 +1189,7 @@
         );
       }
     } catch (error) {
+      stopSubmitProgress();
       const friendly = normalizeError("submit", error);
       uiState.submissionFeedback = {
         kind: "error",
@@ -1125,6 +1198,7 @@
         detail: friendly.detail,
       };
     } finally {
+      stopSubmitProgress();
       clearBusy();
       renderAll();
     }

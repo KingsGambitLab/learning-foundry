@@ -56,6 +56,7 @@ from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_patterns import CoursePattern, course_pattern_by_slug
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design, infer_risk_class
+from app.services.learner_brief_builder import ensure_task_agent_module_briefs
 from app.services.lms_service import default_learner_workspace_dir
 from app.services.publish_snapshot_service import PublishSnapshotService
 from app.services.workflow_service import WorkflowService
@@ -252,12 +253,15 @@ class CourseWorkflowService:
         source: CourseGenerationSource,
         generation_status: CourseGenerationStatus,
         usage: AIUsageSummary | None = None,
+        execute_shared_workflow_nodes: bool = True,
+        clear_active_operation: bool = True,
     ) -> CourseRun:
         existing = self._require_run(course_run_id)
         course_run = self._build_course_run(
             course_run_id=existing.id,
             created_at=existing.created_at,
             updated_at=datetime.now(UTC),
+            execute_shared_workflow_nodes=execute_shared_workflow_nodes,
             request=CreateCourseRunRequest(
                 title=plan.title,
                 summary=plan.summary,
@@ -287,7 +291,7 @@ class CourseWorkflowService:
         course_run.generation_status = generation_status
         course_run.own_ai_usage = merge_ai_usage(existing.own_ai_usage, usage)
         course_run.ai_usage = course_run.own_ai_usage
-        course_run.active_operation = None
+        course_run.active_operation = None if clear_active_operation else existing.active_operation
         course_run.last_error = None
         self.store.save_course_run(course_run)
         self.store.append_course_event(
@@ -345,6 +349,7 @@ class CourseWorkflowService:
         course_run_id: str,
         created_at: datetime,
         updated_at: datetime,
+        execute_shared_workflow_nodes: bool = True,
         request: CreateCourseRunRequest,
     ) -> CourseRun:
         pattern = course_pattern_by_slug(request.pattern_slug) if request.pattern_slug else None
@@ -369,8 +374,18 @@ class CourseWorkflowService:
             module_drafts = [self._create_survey_module(module, title, summary) for module in modules]
             shared_workflow_run_id = None
         else:
-            shared_run = self._create_progressive_workflow(title, summary, modules, shared_design_spec)
-            shared_run = self._ensure_progressive_workflow_matches_modules(shared_run, modules)
+            shared_run = self._create_progressive_workflow(
+                title,
+                summary,
+                modules,
+                shared_design_spec,
+                execute_nodes=execute_shared_workflow_nodes,
+            )
+            shared_run = self._ensure_progressive_workflow_matches_modules(
+                shared_run,
+                modules,
+                execute_nodes=execute_shared_workflow_nodes,
+            )
             aligned_modules = self._align_progressive_modules(modules, shared_run)
             module_drafts = [
                 self._module_draft_from_workflow(
@@ -759,10 +774,6 @@ class CourseWorkflowService:
             shared_run = self.workflow_service.get_run(refreshed_run.shared_workflow_run_id)
 
         if shared_run is not None:
-            shared_run = self._ensure_progressive_workflow_matches_modules(
-                shared_run,
-                [self._request_from_module_draft(module) for module in refreshed_run.modules],
-            )
             linked_runs.append(shared_run)
             aligned_modules = self._align_progressive_modules(
                 [self._request_from_module_draft(module) for module in refreshed_run.modules],
@@ -1072,6 +1083,8 @@ class CourseWorkflowService:
         summary: str,
         modules: list[CreateCourseModuleRequest],
         shared_design_spec: AssignmentDesignSpec | None,
+        *,
+        execute_nodes: bool = True,
     ):
         course_intake = GenerationIntake(
             title=title,
@@ -1085,9 +1098,10 @@ class CourseWorkflowService:
                 design_spec=shared_design_spec,
                 reasons=["Created from the progressive course planner."],
                 notes=["This workflow run is shared across all course modules."],
+                execute_nodes=execute_nodes,
             )
 
-        return self.workflow_service.create_run(course_intake)
+        return self.workflow_service.create_run(course_intake, execute_nodes=execute_nodes)
 
     def _module_draft_from_workflow(
         self,
@@ -1175,6 +1189,8 @@ class CourseWorkflowService:
         self,
         shared_run: WorkflowRun,
         modules: list[CreateCourseModuleRequest],
+        *,
+        execute_nodes: bool = True,
     ) -> WorkflowRun:
         spec = shared_run.artifacts.task_agent_spec
         if (
@@ -1186,7 +1202,12 @@ class CourseWorkflowService:
         updated_spec = self._reshape_progressive_spec_to_modules(spec, modules)
         if updated_spec.model_dump(mode="json") == spec.model_dump(mode="json"):
             return shared_run
-        return self.workflow_service.update_task_agent_spec(shared_run.id, updated_spec)
+        updated_spec = ensure_task_agent_module_briefs(updated_spec, overwrite=True)
+        return self.workflow_service.update_task_agent_spec(
+            shared_run.id,
+            updated_spec,
+            execute_nodes=execute_nodes,
+        )
 
     def _reshape_progressive_spec_to_modules(
         self,

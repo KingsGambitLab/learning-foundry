@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from app.domain.ai import AIUsageSummary
 from app.domain.course import (
@@ -35,6 +36,7 @@ from app.domain.task_agent import (
     RetrievalMode,
     WorkspaceScope,
 )
+from app.domain.workflow import DecisionOutcome, GateDecisionRequest
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.course_workflow_service import CourseWorkflowService
 from app.services.openai_course_planner import (
@@ -379,12 +381,19 @@ class CourseGenerationService:
     ) -> None:
         try:
             normalized_plan, source, status, usage = self._generate_normalized_plan(request)
-            self.course_workflow_service.apply_generated_plan(
+            built = self.course_workflow_service.apply_generated_plan(
                 course_run_id,
                 plan=normalized_plan,
                 source=source,
                 generation_status=status,
                 usage=usage,
+                execute_shared_workflow_nodes=False,
+                clear_active_operation=False,
+            )
+            self._finalize_background_generation(
+                built.id,
+                generation_status=status,
+                completion_message="Draft finished building from the generated course brief.",
             )
         except Exception as exc:
             status = self.live_planner.status()
@@ -406,6 +415,8 @@ class CourseGenerationService:
                 plan=self._generated_plan_from_creator_plan(plan),
                 source=CourseGenerationSource.deterministic_fallback,
                 generation_status=self.live_planner.status(),
+                execute_shared_workflow_nodes=False,
+                clear_active_operation=False,
             )
             if len(built.modules) == len(plan.modules):
                 for stored_module, planned_module in zip(built.modules, plan.modules, strict=False):
@@ -441,8 +452,13 @@ class CourseGenerationService:
                 "creator_plan_applied",
                 {
                     "module_count": len(plan.modules),
-                    "message": "Draft finished building from the approved creator plan.",
+                    "message": "Draft shell created from the approved creator plan. Review checks are still running.",
                 },
+            )
+            self._finalize_background_generation(
+                built.id,
+                generation_status=self.live_planner.status(),
+                completion_message="Draft finished building from the approved creator plan.",
             )
         except Exception as exc:
             self.course_workflow_service.mark_generation_failed(
@@ -450,6 +466,45 @@ class CourseGenerationService:
                 error=str(exc),
                 generation_status=self.live_planner.status(),
             )
+
+    def _finalize_background_generation(
+        self,
+        course_run_id: str,
+        *,
+        generation_status: CourseGenerationStatus,
+        completion_message: str,
+    ) -> None:
+        course_run = self.course_workflow_service.get_run(course_run_id)
+        if course_run is None:
+            raise KeyError(course_run_id)
+        if course_run.shared_workflow_run_id is not None:
+            workflow_run = self.course_workflow_service.workflow_service.execute_langgraph_nodes(
+                course_run.shared_workflow_run_id
+            )
+            while workflow_run.pending_gate is not None:
+                workflow_run = self.course_workflow_service.workflow_service.apply_gate_decision(
+                    workflow_run.id,
+                    GateDecisionRequest(
+                        gate=workflow_run.pending_gate,
+                        decision=DecisionOutcome.approve,
+                        comment="Auto-approved by the default creator-flow setting.",
+                    ),
+                )
+            course_run = self.course_workflow_service.sync_run(course_run.id)
+        course_run.active_operation = None
+        course_run.updated_at = datetime.now(UTC)
+        course_run.generation_status = generation_status
+        course_run.last_error = None
+        self.course_workflow_service.store.save_course_run(course_run)
+        self.course_workflow_service.store.append_course_event(
+            course_run.id,
+            "course_generation_completed",
+            {
+                "message": completion_message,
+                "deliverable_count": len(course_run.modules),
+                "shared_workflow_run_id": course_run.shared_workflow_run_id,
+            },
+        )
 
     def _generate_normalized_plan(
         self,
@@ -888,7 +943,15 @@ class CourseGenerationService:
                 ),
             ]
         else:
-            modules = default_modules
+            fallback_modules = self._fallback_modules(
+                request,
+                design_spec,
+                design_spec.course_structure.package_type,
+            )
+            if fallback_modules and len(default_modules) > len(fallback_modules):
+                modules = fallback_modules
+            else:
+                modules = default_modules
 
         return [
             CreatorCourseModulePlan(

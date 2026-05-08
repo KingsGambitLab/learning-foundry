@@ -205,9 +205,9 @@ class TaskAgentBlackBoxRunner:
             step_count=int(state.get("step_count", len(trace_events) or len(state.get("tool_calls", [])))),
             latency_ms=int(state.get("latency_ms", 0)),
             cost_usd=float(state.get("cost_usd", 0.0)),
-            tool_calls=self._parse_records(state.get("tool_calls", []), ToolCallRecord),
-            approvals=self._parse_records(state.get("approvals", []), ApprovalRecord),
-            escalations=self._parse_records(state.get("escalations", []), EscalationRecord),
+            tool_calls=self._parse_records(state.get("tool_calls", []), ToolCallRecord, include_order=True),
+            approvals=self._parse_records(state.get("approvals", []), ApprovalRecord, include_order=True),
+            escalations=self._parse_records(state.get("escalations", []), EscalationRecord, include_order=True),
             failure_injections=self._parse_records(state.get("failure_injections", []), FailureInjectionRecord),
             fallback_actions=self._parse_records(state.get("fallback_actions", []), FallbackActionRecord),
             resumed_after_pause=bool(state.get("resumed_after_pause", resumed_after_pause)),
@@ -259,15 +259,18 @@ class TaskAgentBlackBoxRunner:
                         events.append(str(event_name))
         return events
 
-    def _parse_records(self, payload: Any, model):
+    def _parse_records(self, payload: Any, model, *, include_order: bool = False):
         records: list[Any] = []
         if not isinstance(payload, list):
             return records
-        for item in payload:
+        for index, item in enumerate(payload):
             if isinstance(item, model):
                 records.append(item)
             elif isinstance(item, dict):
-                records.append(model.model_validate(item))
+                normalized = dict(item)
+                if include_order and "order" not in normalized:
+                    normalized["order"] = index
+                records.append(model.model_validate(normalized))
         return records
 
     def _request_json(self, client: httpx.Client, method: str, path: str, **kwargs) -> dict[str, Any]:

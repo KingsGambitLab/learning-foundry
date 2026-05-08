@@ -291,11 +291,12 @@
         const hasPendingDraft = currentTab === "drafts" && !hasOpenDraft && (draftLoadInProgress || Boolean(pendingDraftId));
         const showInboxRail = currentTab === "drafts" && !hasOpenDraft && !hasPendingDraft;
         const focusedDraftView = currentTab === "drafts" && hasOpenDraft;
+        const showDraftContext = currentTab === "drafts" && (hasOpenDraft || hasPendingDraft);
 
         workspaceLayout?.classList.toggle("has-rail", showInboxRail);
         workspaceLayout?.classList.toggle("is-loading-draft", hasPendingDraft);
         workspaceRail?.classList.toggle("hidden", !showInboxRail);
-        draftContextBar?.classList.toggle("hidden", !hasOpenDraft && !hasPendingDraft);
+        draftContextBar?.classList.toggle("hidden", !showDraftContext);
         draftContextBar?.classList.toggle("loading", hasPendingDraft && !hasOpenDraft);
         draftInboxPanel?.classList.toggle("hidden", currentTab !== "drafts" || hasOpenDraft || hasPendingDraft);
         document.body.classList.toggle("dashboard-drafts-mode", currentTab === "drafts");
@@ -2456,14 +2457,17 @@
           results.classList.add("visible");
           renderPersistedPlan(courseRun);
           renderCourse(courseRun);
-          await refreshRecentDrafts();
-          await refreshDraftDetails(courseRunId, { includeWorkflowDetails: options.includeWorkflowDetails });
           pendingDraftId = null;
           setActiveTab(options.tabAfterLoad || "drafts", { updateUrl: false });
           writeUrlState({ draftId: courseRunId, tab: options.tabAfterLoad || "drafts" }, options.historyMode || "push");
           if (options.scrollToResult) {
             scrollDraftIntoView();
           }
+          if (!options.silentMessage) {
+            setMessage(formMessage, "info", "Loading draft details...");
+          }
+          await refreshRecentDrafts();
+          await refreshDraftDetails(courseRunId, { includeWorkflowDetails: options.includeWorkflowDetails });
           if (!options.silentMessage) {
             setMessage(formMessage, "success", "Draft loaded.");
           }
@@ -2823,7 +2827,7 @@
       });
 
       createDraftShortcut.addEventListener("click", () => {
-        setActiveTab("create", { historyMode: "push" });
+        clearSelectedDraft({ historyMode: "push", tab: "create" });
         goalField.scrollIntoView({ behavior: "smooth", block: "start" });
       });
 
@@ -2872,7 +2876,7 @@
         }
       });
 
-      createTabButton.addEventListener("click", () => setActiveTab("create", { historyMode: "push" }));
+      createTabButton.addEventListener("click", () => clearSelectedDraft({ historyMode: "push", tab: "create" }));
       draftsTabButton.addEventListener("click", () => setActiveTab("drafts", { historyMode: "push" }));
       goalField.addEventListener("input", updateBriefCounters);
 

@@ -38,6 +38,10 @@ from app.domain.testing import (
     LearnerTestingView,
 )
 from app.services.learner_studio_service import LearnerStudioService
+from app.services.task_agent_starter_templates import (
+    render_legacy_task_agent_root_app,
+    render_task_agent_root_app,
+)
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -147,11 +151,23 @@ class LMSService:
         submissions = self.store.list_learner_submissions(enrollment.id)
         sessions = self.store.list_learner_workspace_sessions(enrollment.id)
         latest_session = sessions[0] if sessions else None
-        latest_submissions = {submission.deliverable_id: submission for submission in submissions}
+        latest_submissions: dict[str, LearnerSubmissionRecord] = {}
+        for submission in submissions:
+            current = latest_submissions.get(submission.deliverable_id)
+            if current is None or submission.created_at > current.created_at:
+                latest_submissions[submission.deliverable_id] = submission
 
         refreshed = enrollment.model_copy(deep=True)
         for deliverable in refreshed.deliverables:
-            deliverable.latest_submission = latest_submissions.get(deliverable.deliverable_id)
+            latest_submission = latest_submissions.get(deliverable.deliverable_id)
+            deliverable.latest_submission = latest_submission
+            if latest_submission is not None:
+                deliverable.status = (
+                    LearnerModuleStatus.passed
+                    if latest_submission.grade_report is not None
+                    and latest_submission.grade_report.status == GradeStatus.passed
+                    else LearnerModuleStatus.available
+                )
             deliverable.workspace_session = latest_session
         if all(deliverable.status == LearnerModuleStatus.passed for deliverable in refreshed.deliverables):
             refreshed.status = LearnerEnrollmentStatus.completed
@@ -167,15 +183,13 @@ class LMSService:
         all_submissions = self.store.list_learner_submissions(enrollment.id)
         latest_assignment_submission = self._latest_assignment_submission(all_submissions)
         snapshot = self._require_snapshot(enrollment.publish_snapshot_id)
+        self._ensure_workspace_seeded(enrollment, snapshot)
         latest_session = self.store.list_learner_workspace_sessions(enrollment.id)
         workspace_session = latest_session[0] if latest_session else None
+        project_brief_markdown = self._project_brief_markdown(snapshot)
         return LearnerModuleExperience(
             enrollment=LearnerEnrollmentSummary.from_enrollment(enrollment),
-            project_brief_markdown=(
-                snapshot.learner_package.project_brief_markdown
-                if snapshot.learner_package is not None
-                else ""
-            ),
+            project_brief_markdown=project_brief_markdown,
             workspace_session=workspace_session,
             latest_assignment_report=(
                 latest_assignment_submission.assignment_report
@@ -431,19 +445,20 @@ class LMSService:
         workspace_root = self._workspace_root(enrollment)
         workspace_root.mkdir(parents=True, exist_ok=True)
         seed_marker = workspace_root / ".coursegen" / "workspace_seeded.txt"
-        if seed_marker.exists():
-            return workspace_root
 
         learner_package = snapshot.learner_package
         if learner_package is None or not learner_package.deliverables:
             raise LMSConflictError("This publish snapshot is missing learner workspace seed files.")
 
-        seed_deliverable = learner_package.deliverables[0]
-        files_to_write = {
-            file.relative_path: file.content
-            for file in seed_deliverable.workspace_seed_files
-        }
-        project_brief_markdown = learner_package.project_brief_markdown or seed_deliverable.starter_readme
+        files_to_write: dict[str, str] = {}
+        for deliverable in learner_package.deliverables:
+            for file in deliverable.workspace_seed_files:
+                files_to_write.setdefault(file.relative_path, file.content)
+        legacy_app = render_legacy_task_agent_root_app()
+        current_app = render_task_agent_root_app()
+        if files_to_write.get("app.py") == legacy_app:
+            files_to_write["app.py"] = current_app
+        project_brief_markdown = self._project_brief_markdown(snapshot)
         files_to_write["README.md"] = project_brief_markdown
         files_to_write["project_brief.md"] = project_brief_markdown
         files_to_write["deliverables.md"] = self._deliverables_markdown(learner_package.deliverables)
@@ -459,10 +474,43 @@ class LMSService:
         for relative_path, content in files_to_write.items():
             target = workspace_root / relative_path
             if target.exists():
+                if relative_path == "app.py" and target.read_text(encoding="utf-8") == legacy_app:
+                    target.write_text(current_app, encoding="utf-8")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         return workspace_root
+
+    def _project_brief_markdown(self, snapshot: PublishSnapshot) -> str:
+        learner_package = snapshot.learner_package
+        if learner_package is None:
+            return ""
+        brief = (learner_package.project_brief_markdown or "").strip()
+        if brief:
+            return brief
+        lines = [
+            f"# {learner_package.title}",
+            "",
+            learner_package.summary or "Build the shared project in the workspace.",
+            "",
+            "## What review will look at",
+            "",
+        ]
+        for index, deliverable in enumerate(learner_package.deliverables, start=1):
+            objective = (deliverable.objective or deliverable.title).strip()
+            lines.append(f"{index}. **{deliverable.title}** - {objective}")
+        lines.extend(
+            [
+                "",
+                "## How to work",
+                "",
+                "- Open the shared VS Code workspace.",
+                "- Run the visible checks while you iterate.",
+                "- Submit the full project for review.",
+                "- Use the deliverable scorecard to see what still needs work.",
+            ]
+        )
+        return "\n".join(lines).strip() + "\n"
 
     def _review_area_index_json(self, deliverables: list[LearnerModulePackage]) -> str:
         rows = [
