@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
+import time
 from typing import Any
 
 from app.domain.ai import AIUsageSummary
@@ -13,6 +16,7 @@ from app.domain.course import (
     GeneratedCoursePlan,
     SuggestLearningOutcomesRequest,
 )
+from app.services.coursegen_logging import log_coursegen_event
 from app.services.assignment_design_inference import infer_assignment_design
 from app.services.openai_runtime_support import (
     extract_openai_usage,
@@ -38,11 +42,15 @@ class OpenAICoursePlanner:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
+        request_timeout_s: float = 90.0,
+        max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
         self.env_file = resolve_openai_env_file(env_file)
         self.model = model
         self.client_factory = client_factory
+        self.request_timeout_s = request_timeout_s
+        self.max_request_retries = max(0, max_request_retries)
 
     def status(self) -> CourseGenerationStatus:
         config = self._config()
@@ -108,9 +116,17 @@ class OpenAICoursePlanner:
             base_url=config.get("OPENAI_BASE_URL"),
         )
         prompt = self._prompt_payload(request)
+        log_coursegen_event(
+            "course_planner_request_started",
+            goal=request.goal,
+            title_hint=request.title,
+            model_id=status.model_id,
+            mode="creator_plan",
+        )
 
         try:
-            response = client.responses.create(
+            response = self._create_response_with_retries(
+                client,
                 model=status.model_id or "gpt-5.4",
                 input=[
                     {
@@ -132,7 +148,24 @@ class OpenAICoursePlanner:
             plan = self._normalize_raw_plan(request, raw_plan)
             usage = extract_openai_usage(response, status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
+            log_coursegen_event(
+                "course_planner_request_failed",
+                goal=request.goal,
+                title_hint=request.title,
+                model_id=status.model_id,
+                mode="creator_plan",
+                error=str(exc),
+            )
             raise OpenAICourseGenerationError(str(exc)) from exc
+        log_coursegen_event(
+            "course_planner_request_completed",
+            goal=request.goal,
+            title_hint=request.title,
+            model_id=status.model_id,
+            mode="creator_plan",
+            deliverable_count=len(plan.deliverables),
+            estimated_cost_usd=(usage.estimated_cost_usd if usage is not None else None),
+        )
 
         return (
             plan,
@@ -163,9 +196,17 @@ class OpenAICoursePlanner:
             base_url=config.get("OPENAI_BASE_URL"),
         )
         prompt = self._outcome_prompt_payload(request)
+        log_coursegen_event(
+            "course_planner_request_started",
+            goal=request.goal,
+            title_hint=request.title,
+            model_id=status.model_id,
+            mode="learning_outcomes",
+        )
 
         try:
-            response = client.responses.create(
+            response = self._create_response_with_retries(
+                client,
                 model=status.model_id or "gpt-5.4",
                 input=[
                     {
@@ -190,7 +231,24 @@ class OpenAICoursePlanner:
                 raise ValueError("The OpenAI response did not contain any learning outcomes.")
             usage = extract_openai_usage(response, status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
+            log_coursegen_event(
+                "course_planner_request_failed",
+                goal=request.goal,
+                title_hint=request.title,
+                model_id=status.model_id,
+                mode="learning_outcomes",
+                error=str(exc),
+            )
             raise OpenAICourseGenerationError(str(exc)) from exc
+        log_coursegen_event(
+            "course_planner_request_completed",
+            goal=request.goal,
+            title_hint=request.title,
+            model_id=status.model_id,
+            mode="learning_outcomes",
+            outcome_count=len(outcomes),
+            estimated_cost_usd=(usage.estimated_cost_usd if usage is not None else None),
+        )
 
         return (
             outcomes,
@@ -383,6 +441,81 @@ class OpenAICoursePlanner:
             timeout=20.0,
             max_retries=0,
         )
+
+    def _create_response_with_retries(self, client, **request_kwargs):
+        last_error: Exception | None = None
+        for attempt in range(self.max_request_retries + 1):
+            try:
+                log_coursegen_event(
+                    "course_planner_request_attempt_started",
+                    attempt=attempt + 1,
+                    max_attempts=self.max_request_retries + 1,
+                    model=request_kwargs.get("model"),
+                )
+                return self._create_response_with_timeout(client, **request_kwargs)
+            except Exception as exc:  # pragma: no cover - network and SDK failures vary
+                last_error = exc
+                log_coursegen_event(
+                    "course_planner_request_attempt_failed",
+                    attempt=attempt + 1,
+                    max_attempts=self.max_request_retries + 1,
+                    model=request_kwargs.get("model"),
+                    error=str(exc),
+                    retryable=self._is_retryable_exception(exc),
+                )
+                if attempt >= self.max_request_retries or not self._is_retryable_exception(exc):
+                    raise
+                time.sleep(min(2**attempt, 4))
+        if last_error is not None:  # pragma: no cover - defensive fallback
+            raise last_error
+        raise RuntimeError("OpenAI course planner request did not return a response.")
+
+    def _is_retryable_exception(self, exc: Exception) -> bool:
+        error_text = f"{type(exc).__name__}: {exc}".lower()
+        retryable_markers = (
+            "timed out",
+            "timeout",
+            "connection",
+            "rate limit",
+            "temporarily unavailable",
+            "overloaded",
+            "server error",
+            "bad gateway",
+            "gateway timeout",
+            "service unavailable",
+            "502",
+            "503",
+            "504",
+        )
+        return any(marker in error_text for marker in retryable_markers)
+
+    def _create_response_with_timeout(self, client, **request_kwargs):
+        outcome_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def _worker() -> None:
+            try:
+                response = client.responses.create(**request_kwargs)
+            except Exception as exc:  # pragma: no cover - network and SDK failures vary
+                outcome_queue.put(("error", exc))
+                return
+            outcome_queue.put(("ok", response))
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+        try:
+            status, payload = outcome_queue.get(timeout=self.request_timeout_s)
+        except queue.Empty as exc:
+            log_coursegen_event(
+                "course_planner_request_timeout",
+                model=request_kwargs.get("model"),
+                timeout_s=self.request_timeout_s,
+            )
+            raise TimeoutError(
+                f"OpenAI course planner request exceeded {self.request_timeout_s:.1f}s."
+            ) from exc
+        if status == "error":
+            raise payload
+        return payload
 
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}

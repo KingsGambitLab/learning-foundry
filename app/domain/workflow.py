@@ -54,6 +54,7 @@ class ArtifactVisibility(str, Enum):
 
 class WorkflowNodeKind(str, Enum):
     authoring_runtime = "authoring_runtime"
+    authoring_tests = "authoring_tests"
     authoring_repair = "authoring_repair"
     reviewer_runtime = "reviewer_runtime"
     reviewer_repair = "reviewer_repair"
@@ -75,11 +76,19 @@ class ReviewerFindingSeverity(str, Enum):
     error = "error"
 
 
+class WorkflowFailureOwnerHint(str, Enum):
+    authored_artifact = "authored_artifact"
+    platform_runtime = "platform_runtime"
+    ambiguous = "ambiguous"
+
+
 class ReviewerFinding(BaseModel):
     category: str
     severity: ReviewerFindingSeverity
     title: str
     detail: str
+    code: str | None = None
+    location: str | None = None
 
 
 class FailureContextValidationIssue(BaseModel):
@@ -111,6 +120,9 @@ class FailureContext(BaseModel):
     source_node_kind: WorkflowNodeKind
     source_node_attempt: int
     source_summary: str
+    owner_hint: WorkflowFailureOwnerHint = WorkflowFailureOwnerHint.ambiguous
+    failure_signature: str | None = None
+    phase: str | None = None
     findings: list[ReviewerFinding] = Field(default_factory=list)
     validation_issues: list[FailureContextValidationIssue] = Field(default_factory=list)
     sandbox: FailureContextSandboxSummary | None = None
@@ -119,6 +131,7 @@ class FailureContext(BaseModel):
 class WorkflowNodeExecution(BaseModel):
     node_id: str
     kind: WorkflowNodeKind
+    iteration: int = 1
     status: WorkflowNodeStatus
     attempt: int = 1
     summary: str
@@ -155,6 +168,10 @@ class BundleFile(BaseModel):
     visibility: ArtifactVisibility
     media_type: str
     size_bytes: int
+    role: str | None = None
+    audience: str | None = None
+    deliverable_id: str | None = None
+    semantic_source: str | None = None
 
 
 class MaterializedBundle(BaseModel):

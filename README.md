@@ -5,6 +5,8 @@ Course Gen Codex is a creator-to-learner pipeline for turning a high-level engin
 - a creator-facing planning flow
 - a deliverable-first course draft model
 - a LangGraph-based author/review loop for assignment generation
+- generated visible and hidden test scripts authored against the real starter workspace
+- a baseline matrix verifier that proves untouched starters fail and deeper bugs still get caught
 - publish-time learner-path certification
 - a shared learner workspace and assignment-wide grading
 - draft timeline visibility across course events, workflow events, and reviewer nodes
@@ -129,17 +131,16 @@ This binds one learner to one published snapshot and one shared workspace.
 
 Defined in [`app/domain/task_agent.py`](app/domain/task_agent.py).
 
-This is still the main generated assignment spec. It currently contains:
+This is still the main generated assignment spec. It currently contains the execution and learner-facing surface that authoring/review work against:
 
 - project contract
 - runtime dependencies
 - capabilities
 - assessment strategy
 - deliverables
-- tool registry
-- eval dataset
-- production contract
+- public endpoints
 - learner starter surface
+- generated test script metadata
 
 ## The service map
 
@@ -256,6 +257,29 @@ Responsibility:
 
 This is where the assignment becomes domain-specific without hardcoding domain compilers as the long-term strategy.
 
+### `OpenAITestScriptAuthoringService`
+
+File: [`app/services/openai_test_script_authoring.py`](app/services/openai_test_script_authoring.py)
+
+Responsibility:
+
+- read the actual materialized starter workspace
+- generate learner-visible and hidden test scripts against that workspace
+- revise those scripts from harness feedback when the same test weakness survives
+
+This is the assignment-specific test author, not the runtime judge.
+
+### `GeneratedTestBaselineVerifier`
+
+File: [`app/services/generated_test_harness.py`](app/services/generated_test_harness.py)
+
+Responsibility:
+
+- run the generated visible and hidden scripts across a baseline matrix
+- prove untouched starters fail when they should
+- prove hidden checks are stronger than visible checks
+- block weak or misleading generated test suites before human review
+
 ## End-to-end flow
 
 ### 1. Creator brief
@@ -289,7 +313,7 @@ For progressive codebase courses, that `CourseRun` links to one shared `Workflow
 
 The `WorkflowService` creates the workflow run and pushes it through `LangGraphAssignmentGraph`.
 
-At this point the system is building and validating the shared assignment spec, not publishing it yet.
+At this point the system is building the shared assignment spec, materializing the real starter workspace, generating test scripts against that workspace, and validating the whole package before anything is publishable.
 
 ### 5. Publish snapshot
 
@@ -361,10 +385,13 @@ This is the current LangGraph node flow defined in [`app/services/langgraph_assi
 ```mermaid
 flowchart TD
     START --> AR["authoring_runtime"]
-    AR -->|"pass"| RR["reviewer_runtime"]
+    AR -->|"pass"| AT["authoring_tests"]
     AR -->|"fail + attempts left"| AP["authoring_repair"]
     AR -->|"fail + exhausted"| END
-    AP --> AR
+    AT -->|"pass"| RR["reviewer_runtime"]
+    AT -->|"fail + attempts left"| AP
+    AT -->|"fail + exhausted"| END
+    AP -->|"retry runtime or tests"| AR
 
     RR -->|"pass"| RC["reviewer_code"]
     RR -->|"fail + attempts left"| RP["reviewer_repair"]
@@ -385,7 +412,8 @@ flowchart TD
     RT -->|"structural fix"| AP
     RT -->|"fail + exhausted"| END
 
-    RP --> RR
+    RP -->|"retry test quality"| RT
+    RP -->|"retry authored surface"| AR
 ```
 
 ### What each node does
@@ -395,6 +423,12 @@ flowchart TD
 - authors or syncs the workspace
 - runs sandbox verification
 - proves the generated assignment compiles/boots at a workflow level
+
+#### `authoring_tests`
+
+- reads the actual materialized starter workspace
+- generates learner-visible and hidden test scripts for each deliverable
+- runs the baseline matrix verifier before reviewer nodes ever see the suite
 
 #### `authoring_repair`
 
@@ -418,16 +452,17 @@ flowchart TD
 
 #### `reviewer_tests`
 
-- validates the hidden/public check relationship
+- validates the hidden/public test relationship
 - validates deliverable coverage
 - validates learner starter surface coverage
+- makes sure untouched starters still fail hidden checks and deeper bugs are caught
 
 ### Repair routing
 
-- **small runtime fix** -> `reviewer_repair` -> `reviewer_runtime`
-- **structural assignment fix** -> `authoring_repair` -> `authoring_runtime`
+- **runtime / starter failure** -> `authoring_repair` -> `authoring_runtime`
+- **generated test weakness** -> `authoring_repair` or `reviewer_repair`, then back through `authoring_tests` or `reviewer_tests`
 
-That means runtime breakage and deterministic cleanup stay in the narrow reviewer loop, while genuinely structural starter-surface failures bounce back through authoring before we re-enter reviewer land.
+That means the loop now has a dedicated test-authoring stage: starter generation, test generation, and reviewer validation are separate responsibilities, and the harness decides whether the generated tests are actually useful.
 
 ### Important nuance
 
@@ -483,6 +518,23 @@ This exists to prevent a bad pattern we explicitly do **not** want:
 The intended shape is:
 
 > the learner extends a believable starter app in learner-owned files, and the authored guidance explains the real work clearly.
+
+## Generated tests
+
+The current test loop is deliberately split into three responsibilities:
+
+- **authoring** produces the starter workspace
+- **test authoring** produces visible and hidden test scripts against that real workspace
+- **the harness** verifies those scripts against a baseline matrix before publish
+
+The baseline matrix is the important guardrail. For a partial starter, we want:
+
+- untouched starter fails visible or hidden meaningfully
+- a small real improvement unlocks visible progress
+- a naive or buggy implementation can still pass visible while failing hidden
+- a stronger implementation passes both
+
+That is how the platform keeps learner guidance friendly without letting the grader collapse into `200 OK` checks.
 
 ## Draft timeline
 

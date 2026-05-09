@@ -898,9 +898,8 @@ class SQLiteWorkflowStore:
         runtime_dependencies = payload.get("runtime_dependencies")
         capabilities = payload.get("capabilities")
         assessment_strategy = payload.get("assessment_strategy")
-        production_contract = payload.get("production_contract") or {}
-        tool_registry = payload.get("tool_registry") or {}
-        tools = tool_registry.get("tools") or []
+        project_contract = payload.get("project_contract")
+        legacy_production_contract = payload.get("production_contract") or {}
         editable_files = (
             (runtime_dependencies or {}).get("editable_files")
             or self._infer_editable_files(payload)
@@ -908,12 +907,54 @@ class SQLiteWorkflowStore:
         )
         visible_fixture_files = (runtime_dependencies or {}).get("visible_fixture_files")
         if visible_fixture_files is None:
-            eval_cases = payload.get("eval_dataset", {}).get("cases", [])
-            has_retrieval_fixture = any(
-                isinstance(case, dict) and "retrieval" in " ".join(str(tag) for tag in case.get("tags", [])).lower()
-                for case in eval_cases
-            )
-            visible_fixture_files = ["data/corpus.json"] if has_retrieval_fixture else []
+            visible_fixture_files = []
+
+        public_endpoints = payload.get("public_endpoints")
+        if not isinstance(public_endpoints, list) or not public_endpoints:
+            canonical_endpoints = legacy_production_contract.get("canonical_endpoints") or []
+            public_endpoints = []
+            for endpoint in canonical_endpoints:
+                if not isinstance(endpoint, dict):
+                    continue
+                method = str(endpoint.get("method") or "POST").upper()
+                path = str(endpoint.get("path") or "").strip()
+                if not path.startswith("/"):
+                    continue
+                public_endpoints.append(
+                    {
+                        "method": method if method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "POST",
+                        "path": path,
+                        "required": bool(endpoint.get("required", True)),
+                    }
+                )
+        if not any(isinstance(endpoint, dict) and endpoint.get("path") == "/health" for endpoint in public_endpoints):
+            public_endpoints = [
+                *public_endpoints,
+                {"method": "GET", "path": "/health", "required": True},
+            ]
+
+        if project_contract is None:
+            project_contract = {
+                "family": "generic_backend_service",
+                "system_kind": payload.get("summary") or payload.get("title") or "Generated service",
+                "core_entities": [],
+                "primary_read_paths": [endpoint["path"] for endpoint in public_endpoints if endpoint.get("method") == "GET"],
+                "primary_write_paths": [
+                    endpoint["path"]
+                    for endpoint in public_endpoints
+                    if endpoint.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
+                ],
+                "invariants": ["The service keeps a stable public contract while learners implement the internals."],
+                "operational_concerns": ["The generated bundle must boot, expose health, and pass visible checks."],
+                "runtime_binding": {
+                    "implementation_language": (runtime_dependencies or {}).get("implementation_language") or "python",
+                    "application_framework": (runtime_dependencies or {}).get("application_framework") or "fastapi",
+                    "backing_services": [],
+                    "seed_artifacts": [],
+                    "integration_points": [],
+                },
+                "runtime_plan": payload.get("runtime_plan") or {},
+            }
 
         deliverables = payload.get("deliverables")
 
@@ -963,10 +1004,10 @@ class SQLiteWorkflowStore:
                 "answer_synthesis_required": False,
                 "citations_required": False,
                 "abstention_required": False,
-                "tool_use_required": bool(tools),
-                "traceability_required": True,
-                "durable_state_required": bool(production_contract.get("supports_resume")),
-                "approval_flow_required": any(tool.get("approval_required") for tool in tools),
+                "tool_use_required": False,
+                "traceability_required": False,
+                "durable_state_required": bool((runtime_dependencies or {}).get("primary_database")),
+                "approval_flow_required": False,
             },
             "assessment_strategy": assessment_strategy
             or {
@@ -975,6 +1016,8 @@ class SQLiteWorkflowStore:
                 "cumulative_deliverable_gates": True,
                 "learner_submission_enabled": True,
             },
+            "project_contract": project_contract,
+            "public_endpoints": public_endpoints,
             "deliverables": deliverables or [],
         }
         return normalized

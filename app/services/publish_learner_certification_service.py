@@ -11,6 +11,7 @@ from app.domain.publish import (
     PublishLearnerCertificationReport,
     PublishSnapshot,
 )
+from app.services.bundle_validation import validate_seeded_learner_workspace
 from app.services.learner_package_runtime import (
     project_brief_markdown,
     remap_assignment_report_to_deliverables,
@@ -115,6 +116,28 @@ class PublishLearnerCertificationService:
                     status=PublishCertificationCheckStatus.passed,
                     summary="The seeded workspace includes the project brief and deliverables overview.",
                     detail=project_brief_markdown(snapshot)[:500] or None,
+                )
+            )
+
+            workspace_validation = validate_seeded_learner_workspace(
+                snapshot.task_agent_spec,
+                workspace_root,
+                deliverable_ids=[deliverable.deliverable_id for deliverable in learner_package.deliverables],
+            )
+            if not workspace_validation.valid:
+                return self._failed_report(
+                    origin=PublishCertificationFailureOrigin.repairable_generation,
+                    key="seeded_workspace_invalid",
+                    summary="The seeded learner workspace is not coherent enough for a learner to start from directly.",
+                    detail="; ".join(f"{issue.code}: {issue.message}" for issue in workspace_validation.errors[:3]),
+                    extra_checks=checks,
+                )
+
+            checks.append(
+                PublishCertificationCheck(
+                    key="seeded_workspace_validated",
+                    status=PublishCertificationCheckStatus.passed,
+                    summary="The seeded learner workspace passed deterministic README and starter-surface validation.",
                 )
             )
 

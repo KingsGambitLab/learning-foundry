@@ -20,6 +20,8 @@ from app.domain.task_agent import TaskAgentServiceSpec
 from app.domain.workflow import WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.artifact_materializer import ArtifactMaterializer
+from app.services.coursegen_logging import log_coursegen_event
+from app.services.generated_test_harness import GeneratedTestScriptRunner
 from app.services.learner_studio_service import LearnerStudioService
 
 
@@ -48,6 +50,7 @@ class DockerSandboxRunner:
             start_timeout_s=min(run_timeout_s, 90),
             host="127.0.0.1",
         )
+        self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 90))
 
     def status(self) -> SandboxAvailability:
         try:
@@ -81,43 +84,87 @@ class DockerSandboxRunner:
         availability = self.status()
         started = time.perf_counter()
         now = datetime.now(UTC)
+        log_coursegen_event(
+            "sandbox_execute_started",
+            workflow_run_id=run.id,
+            title=run.title,
+            docker_available=availability.available,
+        )
 
         if run.artifacts.task_agent_spec is None:
-            return SandboxExecutionResult(
+            result = SandboxExecutionResult(
                 status=SandboxExecutionStatus.unavailable,
                 available=availability.available,
                 generated_at=now,
                 duration_ms=0,
                 error="Sandbox execution only supports task-agent workflow runs.",
             )
+            log_coursegen_event(
+                "sandbox_execute_completed",
+                workflow_run_id=run.id,
+                title=run.title,
+                sandbox_status=result.status.value,
+                error=result.error,
+                duration_ms=result.duration_ms,
+            )
+            return result
 
         if not availability.available:
-            return SandboxExecutionResult(
+            result = SandboxExecutionResult(
                 status=SandboxExecutionStatus.unavailable,
                 available=False,
                 generated_at=now,
                 duration_ms=0,
                 error=availability.message,
             )
+            log_coursegen_event(
+                "sandbox_execute_completed",
+                workflow_run_id=run.id,
+                title=run.title,
+                sandbox_status=result.status.value,
+                error=result.error,
+                duration_ms=result.duration_ms,
+            )
+            return result
 
         try:
             bundle = self._materialize_workspace(run)
             workspace_root = Path(bundle.public_dir)
+            log_coursegen_event(
+                "sandbox_workspace_ready",
+                workflow_run_id=run.id,
+                title=run.title,
+                workspace_root=str(workspace_root),
+            )
             starter_root = workspace_root / "starter"
             if starter_root.exists():
-                return self._execute_starter_harness(
+                result = self._execute_starter_harness(
                     workspace_root=workspace_root,
                     spec=run.artifacts.task_agent_spec,
+                    workflow_run_id=run.id,
                     now=now,
                     started=started,
                 )
-            return self._execute_legacy_runtime(
-                workspace_root=workspace_root,
-                now=now,
-                started=started,
+            else:
+                result = self._execute_legacy_runtime(
+                    workspace_root=workspace_root,
+                    now=now,
+                    started=started,
+                )
+            log_coursegen_event(
+                "sandbox_execute_completed",
+                workflow_run_id=run.id,
+                title=run.title,
+                sandbox_status=result.status.value,
+                build_succeeded=result.build_succeeded,
+                run_succeeded=result.run_succeeded,
+                deliverable_report_count=len(result.deliverable_reports),
+                duration_ms=result.duration_ms,
+                error=result.error,
             )
+            return result
         except subprocess.TimeoutExpired as exc:
-            return SandboxExecutionResult(
+            result = SandboxExecutionResult(
                 status=SandboxExecutionStatus.failed,
                 available=True,
                 build_succeeded=False,
@@ -134,6 +181,17 @@ class DockerSandboxRunner:
                 build_stderr=self._coerce_bytes(getattr(exc, "stderr", b"")),
                 error=f"Docker sandbox timed out: {exc}",
             )
+            log_coursegen_event(
+                "sandbox_execute_completed",
+                workflow_run_id=run.id,
+                title=run.title,
+                sandbox_status=result.status.value,
+                build_succeeded=result.build_succeeded,
+                run_succeeded=result.run_succeeded,
+                duration_ms=result.duration_ms,
+                error=result.error,
+            )
+            return result
 
     def _materialize_workspace(self, run: WorkflowRun):
         if run.artifacts.workspace_snapshot is not None:
@@ -254,6 +312,7 @@ class DockerSandboxRunner:
         *,
         workspace_root: Path,
         spec: TaskAgentServiceSpec,
+        workflow_run_id: str,
         now: datetime,
         started: float,
     ) -> SandboxExecutionResult:
@@ -267,11 +326,31 @@ class DockerSandboxRunner:
         all_builds_succeeded = True
         all_runs_succeeded = True
         any_cached = False
+        log_coursegen_event(
+            "sandbox_starter_harness_started",
+            workflow_run_id=workflow_run_id,
+            workspace_root=str(workspace_root),
+            deliverable_count=len(spec.deliverables),
+        )
 
         for deliverable in spec.deliverables:
             starter_root = workspace_root / "starter" / deliverable.id
+            log_coursegen_event(
+                "sandbox_deliverable_started",
+                workflow_run_id=workflow_run_id,
+                deliverable_id=deliverable.id,
+                deliverable_title=deliverable.title,
+                starter_root=str(starter_root),
+            )
             if not starter_root.exists():
                 all_builds_succeeded = False
+                log_coursegen_event(
+                    "sandbox_deliverable_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    sandbox_status="failed",
+                    error="Starter workspace is missing for this deliverable.",
+                )
                 deliverable_reports.append(
                     DeliverableSandboxReport(
                         deliverable_id=deliverable.id,
@@ -298,16 +377,28 @@ class DockerSandboxRunner:
             base_url = f"http://127.0.0.1:{host_port}"
             logs = ""
             try:
+                log_coursegen_event(
+                    "sandbox_deliverable_support_services_starting",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    dependency_service_count=len(self.runtime_harness._dependency_services(starter_root)),
+                    network_name=network_name,
+                )
                 self.runtime_harness._start_runtime_support_services(
                     starter_root,
                     network_name=network_name,
                     container_prefix=container_name,
                 )
+                log_coursegen_event(
+                    "sandbox_deliverable_support_services_started",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    dependency_service_count=len(self.runtime_harness._dependency_services(starter_root)),
+                )
                 local_run_command = [
                     self.docker_binary,
                     "run",
                     "-d",
-                    "--rm",
                     "--name",
                     container_name,
                     "-p",
@@ -339,6 +430,14 @@ class DockerSandboxRunner:
                     ),
                 ]
                 run_command = local_run_command
+                log_coursegen_event(
+                    "sandbox_deliverable_runtime_launching",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    image_name=image_name,
+                    host_port=host_port,
+                    container_name=container_name,
+                )
                 run_result = subprocess.run(
                     local_run_command,
                     cwd=starter_root,
@@ -350,6 +449,13 @@ class DockerSandboxRunner:
                 if run_result.returncode != 0:
                     all_runs_succeeded = False
                     logs = self.runtime_harness._container_logs(container_name) or ""
+                    log_coursegen_event(
+                        "sandbox_deliverable_runtime_launch_failed",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        return_code=run_result.returncode,
+                        error="Could not start the starter runtime container.",
+                    )
                     run_stdout_parts.append(f"[{deliverable.id}] {run_result.stdout}".strip())
                     run_stderr_parts.append(f"[{deliverable.id}] {run_result.stderr}\n{logs}".strip())
                     deliverable_reports.append(
@@ -365,31 +471,82 @@ class DockerSandboxRunner:
                     continue
 
                 healthcheck_path = self.runtime_harness._healthcheck_path(starter_root, spec)
+                log_coursegen_event(
+                    "sandbox_deliverable_healthcheck_wait_started",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    healthcheck_url=f"{base_url}{healthcheck_path}",
+                )
                 self.runtime_harness._wait_for_http(
                     f"{base_url}{healthcheck_path}",
                     container_name=container_name,
                 )
-                checks_passed, check_output, check_error = self._run_public_checks(manifest, base_url)
+                log_coursegen_event(
+                    "sandbox_deliverable_healthcheck_wait_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    healthcheck_url=f"{base_url}{healthcheck_path}",
+                )
+                log_coursegen_event(
+                    "sandbox_deliverable_public_checks_started",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    base_url=base_url,
+                )
+                contract_passed, contract_output, contract_error = self._probe_contract_smoke(manifest, base_url)
+                checks_passed, check_output, check_error = self._run_visible_suite(
+                    starter_root=starter_root,
+                    manifest=manifest,
+                    base_url=base_url,
+                )
                 logs = self.runtime_harness._container_logs(container_name) or ""
-                run_stdout_parts.append(f"[{deliverable.id}] {check_output}".strip())
+                combined_output = "\n\n".join(
+                    part
+                    for part in (contract_output, check_output)
+                    if part and part.strip()
+                )
+                run_stdout_parts.append(f"[{deliverable.id}] {combined_output}".strip())
                 if logs:
                     run_stderr_parts.append(f"[{deliverable.id}] {logs}".strip())
-                if not checks_passed:
+                if not contract_passed:
                     all_runs_succeeded = False
+                log_coursegen_event(
+                    "sandbox_deliverable_public_checks_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    contract_passed=contract_passed,
+                    checks_passed=checks_passed,
+                    error=check_error,
+                )
                 deliverable_reports.append(
-                    DeliverableSandboxReport(
-                        deliverable_id=deliverable.id,
-                        compile_succeeded=True,
-                        runtime_succeeded=checks_passed,
-                        health_status_code=200,
-                        stdout=check_output,
-                        stderr=logs,
-                        error=check_error,
+                        DeliverableSandboxReport(
+                            deliverable_id=deliverable.id,
+                            compile_succeeded=True,
+                            runtime_succeeded=contract_passed,
+                            public_checks_passed=checks_passed,
+                            health_status_code=200,
+                            stdout=combined_output,
+                            stderr=logs,
+                            error=contract_error or check_error,
+                        )
                     )
+                log_coursegen_event(
+                    "sandbox_deliverable_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    sandbox_status="passed" if contract_passed else "failed",
+                    error=check_error,
                 )
             except Exception as exc:  # noqa: BLE001
                 all_runs_succeeded = False
                 logs = self.runtime_harness._container_logs(container_name) or ""
+                log_coursegen_event(
+                    "sandbox_deliverable_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    sandbox_status="failed",
+                    error=str(exc),
+                )
                 run_stderr_parts.append(f"[{deliverable.id}] {exc}\n{logs}".strip())
                 deliverable_reports.append(
                     DeliverableSandboxReport(
@@ -409,7 +566,7 @@ class DockerSandboxRunner:
                 )
 
         success = all_builds_succeeded and all_runs_succeeded and bool(deliverable_reports)
-        return SandboxExecutionResult(
+        result = SandboxExecutionResult(
             status=SandboxExecutionStatus.passed if success else SandboxExecutionStatus.failed,
             available=True,
             build_succeeded=all_builds_succeeded,
@@ -429,61 +586,86 @@ class DockerSandboxRunner:
             if success
             else "Starter deliverable verification failed on the authored runtime harness.",
         )
+        log_coursegen_event(
+            "sandbox_starter_harness_completed",
+            workflow_run_id=workflow_run_id,
+            workspace_root=str(workspace_root),
+            sandbox_status=result.status.value,
+            deliverable_report_count=len(result.deliverable_reports),
+            duration_ms=result.duration_ms,
+            error=result.error,
+        )
+        return result
 
     def _starter_runtime_image_tag(self, workspace_root: Path) -> str:
         cache_key = self._workspace_cache_key(workspace_root)
         return f"{self.cache_namespace}:{cache_key[:24]}"
 
-    def _run_public_checks(self, manifest: dict, base_url: str) -> tuple[bool, str, str | None]:
-        public_cases = manifest.get("public_check_cases") or []
+    def _probe_contract_smoke(self, manifest: dict, base_url: str) -> tuple[bool, str, str | None]:
         public_checks = manifest.get("public_checks") or []
-        if not public_cases:
+        if not public_checks:
             return False, "No public checks were configured for this deliverable.", "No public checks were configured."
-
-        checks_by_case = {
-            check.get("case_id"): check
-            for check in public_checks
-            if isinstance(check, dict) and check.get("case_id")
-        }
-        required_fields = self._required_output_fields(manifest)
-        passed = True
+        contract_passed = True
         lines: list[str] = []
-        for case in public_cases:
-            case_id = str(case.get("id") or "unnamed_case")
-            check = checks_by_case.get(case_id) or {}
-            title = str(check.get("title") or case_id)
+        for check in public_checks:
+            if not isinstance(check, dict):
+                continue
+            title = str(check.get("title") or check.get("request_path") or "visible check")
+            method = str(check.get("request_method") or "POST").upper()
+            request_path = str(check.get("request_path") or "").strip()
+            if not request_path.startswith("/"):
+                contract_passed = False
+                lines.append(f"[FAIL] {title}: invalid request path")
+                continue
             try:
-                response = self._json_request("POST", f"{base_url}/run", case.get("input") or {})
+                response = self._json_request(method, f"{base_url}{request_path}", check.get("request_body") or None)
             except urllib.error.HTTPError as exc:
-                passed = False
+                contract_passed = False
                 lines.append(f"[FAIL] {title}: HTTP {exc.code}")
                 continue
             except Exception as exc:  # noqa: BLE001
-                passed = False
+                contract_passed = False
                 lines.append(f"[FAIL] {title}: {exc}")
                 continue
 
-            output = response.get("output") or {}
-            missing = [field for field in required_fields if field not in output]
-            mismatches = [
-                f"{key} expected {value!r} got {output.get(key)!r}"
-                for key, value in (case.get("expected_output") or {}).items()
-                if output.get(key) != value
-            ]
-            if missing or mismatches:
-                passed = False
-                lines.append(f"[FAIL] {title}")
-                if missing:
-                    lines.append(f"  Missing output fields: {', '.join(missing)}")
-                lines.extend(f"  {mismatch}" for mismatch in mismatches)
+            expected_status = int(check.get("expected_status") or 200)
+            if expected_status >= 400:
+                lines.append(f"[WARN] {title}")
+                lines.append(f"  Non-success expected status {expected_status} is not supported by the sandbox checker yet.")
                 continue
             lines.append(f"[PASS] {title}")
 
-        if passed:
+        if contract_passed:
             lines.append("")
-            lines.append("Starter deliverable public checks passed in Docker.")
+            lines.append("Starter deliverable kept the public contract stable in Docker.")
             return True, "\n".join(lines), None
-        return False, "\n".join(lines), "One or more public starter checks failed."
+        return False, "\n".join(lines), "One or more starter smoke checks could not exercise the published contract."
+
+    def _run_visible_suite(
+        self,
+        *,
+        starter_root: Path,
+        manifest: dict,
+        base_url: str,
+    ) -> tuple[bool, str, str | None]:
+        command = str(manifest.get("visible_check_command") or "python checks/run_visible_checks.py")
+        report = self.test_script_runner.run_suite(
+            workspace_root=starter_root,
+            command=command,
+            base_url=base_url,
+            suite_type="visible",
+        )
+        lines = [
+            f"Visible suite: {report.summary}",
+        ]
+        for case in report.tests:
+            marker = "PASS" if case.status == "passed" else "FAIL"
+            lines.append(f"[{marker}] {case.title}: {case.summary}")
+            for diagnostic in case.diagnostics[:3]:
+                lines.append(f"  - {diagnostic}")
+        if not report.valid:
+            return False, "\n".join(lines), "Visible test script did not emit a valid report."
+        return report.passed, "\n".join(lines), None
 
     def _json_request(self, method: str, url: str, payload: dict | None = None) -> dict:
         data = None
@@ -494,14 +676,6 @@ class DockerSandboxRunner:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
-
-    def _required_output_fields(self, manifest: dict) -> list[str]:
-        schema = manifest.get("output_schema") or {}
-        required = schema.get("required")
-        if isinstance(required, list) and required:
-            return [str(field) for field in required]
-        properties = schema.get("properties") or {}
-        return [str(field) for field in properties.keys()]
 
     def _workspace_cache_key(self, workspace_root: Path) -> str:
         digest = hashlib.sha256()

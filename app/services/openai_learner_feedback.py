@@ -146,7 +146,7 @@ class OpenAILearnerFeedbackService:
                 {
                     "title": check.title,
                     "learner_goal": check.learner_goal,
-                    "expected_assertions": check.expected_assertions,
+                    "expected_response_contains": check.expected_response_contains,
                     "files_to_use": check.files_to_use,
                 }
                 for check in deliverable.public_checks
@@ -320,9 +320,10 @@ class OpenAILearnerFeedbackService:
             first_check = deliverable.public_checks[0]
             if first_check.title:
                 steps.append(f"Run the visible check '{first_check.title}' locally and inspect the raw response it produces.")
-            if first_check.expected_assertions:
+            if first_check.expected_response_contains:
                 steps.append(
-                    f"Compare the response against these expectations: {self._join_phrases(first_check.expected_assertions[:2])}."
+                    "Compare the response against these expectations: "
+                    f"{self._join_phrases(first_check.expected_response_contains[:2])}."
                 )
         focus_files = [path for path in deliverable.visible_files if path in editable_files] or list(editable_files.keys())[:2]
         if focus_files:

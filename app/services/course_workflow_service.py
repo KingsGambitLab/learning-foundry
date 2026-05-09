@@ -35,7 +35,7 @@ from app.domain.course import (
     QueueCourseRevisionResponse,
 )
 from app.domain.registry import PackageType, RiskClass
-from app.domain.task_agent import AssignmentDesignSpec, DeliverableSpec, RetrievalMode, TaskAgentServiceSpec
+from app.domain.task_agent import AssignmentDesignSpec, RetrievalMode
 from app.domain.publish import PublishSnapshot, PublishedVersionList, PublishedVersionSummary
 from app.domain.publish import PublishCertificationCheckStatus, PublishCertificationFailureOrigin, PublishLearnerCertificationReport
 from app.domain.testing import (
@@ -69,7 +69,6 @@ from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_patterns import CoursePattern, course_pattern_by_slug
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design, infer_risk_class
-from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.lms_service import default_learner_workspace_dir
 from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.publish_snapshot_service import PublishSnapshotService
@@ -870,7 +869,11 @@ class CourseWorkflowService:
                     )
                 )
 
+        generation_in_progress = refreshed_run.active_operation == CourseAsyncOperation.generation
         stage, status = self._course_stage_from_deliverables(deliverable_drafts)
+        if generation_in_progress:
+            stage = CourseRunStage.drafting
+            status = CourseRunStatus.active
         refreshed_run.deliverables = deliverable_drafts
         refreshed_run.stage = stage if refreshed_run.status != CourseRunStatus.published else CourseRunStage.published
         refreshed_run.status = status if refreshed_run.status != CourseRunStatus.published else CourseRunStatus.published
@@ -1072,11 +1075,13 @@ class CourseWorkflowService:
             if check.status != PublishCertificationCheckStatus.skipped
         ]
         node_executions = list(run.artifacts.node_executions)
+        next_iteration = max((node.iteration for node in node_executions), default=0) + 1
         node_executions.append(
             WorkflowNodeExecution(
                 node_id=f"{WorkflowNodeKind.reviewer_learner_runtime.value}_{len(node_executions) + 1}",
                 kind=WorkflowNodeKind.reviewer_learner_runtime,
-                attempt=max((node.attempt for node in node_executions), default=1),
+                iteration=next_iteration,
+                attempt=1,
                 status=WorkflowNodeStatus.failed,
                 summary="Final learner-path certification failed before publish.",
                 created_at=datetime.now(UTC),
@@ -1213,6 +1218,7 @@ class CourseWorkflowService:
         course_run: CourseRun,
         linked_runs: dict[str, WorkflowRun],
     ) -> CourseReviewReport:
+        generation_in_progress = course_run.active_operation == CourseAsyncOperation.generation
         deliverable_reports: list[CourseDeliverableReview] = []
         linked_workflows: list[CourseLinkedWorkflowSummary] = []
         linked_workflow_ids: set[str] = set()
@@ -1224,7 +1230,11 @@ class CourseWorkflowService:
         for position, deliverable in enumerate(course_run.deliverables, start=1):
             linked_run = linked_runs.get(deliverable.workflow_run_id) if deliverable.workflow_run_id else None
             linked_summary = self._linked_workflow_summary(linked_run)
-            deliverable_blockers = self._deliverable_blockers(deliverable, linked_run)
+            deliverable_blockers = self._deliverable_blockers(
+                deliverable,
+                linked_run,
+                generation_in_progress=generation_in_progress,
+            )
             bundle_available = bool(
                 linked_run and linked_run.artifacts.materialized_bundle is not None
             )
@@ -1297,11 +1307,15 @@ class CourseWorkflowService:
         )
 
     def _create_survey_deliverable(self, deliverable: CreateCourseDeliverableRequest, course_title: str, course_summary: str) -> CourseDeliverableDraft:
-        intake = GenerationIntake(
+        intake = self._generation_intake_from_design_context(
             title=deliverable.title,
-            problem_statement=deliverable.summary or f"Build the '{deliverable.title}' assignment for the '{course_title}' course. {course_summary}",
+            problem_statement=(
+                deliverable.summary
+                or f"Build the '{deliverable.title}' assignment for the '{course_title}' course. {course_summary}"
+            ),
             learning_outcomes=deliverable.learning_outcomes,
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
+            design_spec=deliverable.design_spec,
         )
         if deliverable.design_spec is not None:
             child_run = self.workflow_service.create_run_from_explicit_plan(
@@ -1332,11 +1346,12 @@ class CourseWorkflowService:
         *,
         execute_nodes: bool = True,
     ):
-        course_intake = GenerationIntake(
+        course_intake = self._generation_intake_from_design_context(
             title=title,
             problem_statement=summary,
             learning_outcomes=self._combined_learning_outcomes(deliverables),
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
+            design_spec=shared_design_spec,
         )
         if shared_design_spec is not None:
             return self.workflow_service.create_run_from_explicit_plan(
@@ -1420,16 +1435,24 @@ class CourseWorkflowService:
     ) -> list[CreateCourseDeliverableRequest]:
         if shared_run.artifacts.task_agent_spec is None or not deliverables:
             return deliverables
-        return [
-            deliverable.model_copy(
-                update={
-                    "title": deliverable.title.strip(),
-                    "summary": (deliverable.summary or deliverable.title).strip(),
-                    "learning_outcomes": list(deliverable.learning_outcomes),
-                }
+        authored_deliverables = list(shared_run.artifacts.task_agent_spec.deliverables)
+        aligned: list[CreateCourseDeliverableRequest] = []
+        for index, deliverable in enumerate(deliverables):
+            if index >= len(authored_deliverables):
+                aligned.append(deliverable)
+                continue
+            authored = authored_deliverables[index]
+            aligned.append(
+                deliverable.model_copy(
+                    update={
+                        "deliverable_slug": deliverable.deliverable_slug or authored.id,
+                        "title": authored.title.strip(),
+                        "summary": authored.objective.strip(),
+                        "learning_outcomes": list(authored.learning_outcomes or deliverable.learning_outcomes),
+                    }
+                )
             )
-            for deliverable in deliverables
-        ]
+        return aligned
 
     def _ensure_progressive_workflow_matches_deliverables(
         self,
@@ -1438,112 +1461,8 @@ class CourseWorkflowService:
         *,
         execute_nodes: bool = True,
     ) -> WorkflowRun:
-        spec = shared_run.artifacts.task_agent_spec
-        if (
-            spec is None
-            or not deliverables
-            or shared_run.status == WorkflowStatus.published
-        ):
-            return shared_run
-        updated_spec = self._reshape_progressive_spec_to_deliverables(spec, deliverables)
-        if updated_spec.model_dump(mode="json") == spec.model_dump(mode="json"):
-            return shared_run
-        updated_spec = ensure_task_agent_deliverable_briefs(updated_spec, overwrite=True)
-        return self.workflow_service.update_task_agent_spec(
-            shared_run.id,
-            updated_spec,
-            execute_nodes=execute_nodes,
-        )
-
-    def _reshape_progressive_spec_to_deliverables(
-        self,
-        spec: TaskAgentServiceSpec,
-        deliverables: list[CreateCourseDeliverableRequest],
-    ) -> TaskAgentServiceSpec:
-        current_deliverables = list(spec.deliverables)
-        current_count = len(current_deliverables)
-        desired_count = len(deliverables)
-        if current_count == 0 or desired_count == 0:
-            return spec
-
-        def source_index_for_new(new_index: int) -> int:
-            if current_count == 1:
-                return 0
-            if desired_count <= current_count:
-                if desired_count == 1:
-                    return current_count - 1
-                return min(
-                    round(new_index * (current_count - 1) / (desired_count - 1)),
-                    current_count - 1,
-                )
-            if new_index == desired_count - 1:
-                return current_count - 1
-            return min(new_index, current_count - 2)
-
-        def new_index_for_old(old_index: int) -> int:
-            if desired_count == 1 or current_count == 1:
-                return 0
-            if desired_count >= current_count:
-                if old_index == current_count - 1:
-                    return desired_count - 1
-                return old_index
-            return min(
-                round(old_index * (desired_count - 1) / (current_count - 1)),
-                desired_count - 1,
-            )
-
-        new_deliverable_ids = [f"deliverable_{index + 1}" for index in range(desired_count)]
-        rebuilt_deliverables: list[DeliverableSpec] = []
-        for index, planned_deliverable in enumerate(deliverables):
-            source_deliverable = current_deliverables[source_index_for_new(index)]
-            rebuilt_deliverables.append(
-                DeliverableSpec(
-                    id=new_deliverable_ids[index],
-                    title=planned_deliverable.title.strip(),
-                    objective=(planned_deliverable.summary or planned_deliverable.title).strip(),
-                    starter_type=source_deliverable.starter_type,
-                    overlay_ids=list(source_deliverable.overlay_ids),
-                    learning_outcomes=list(planned_deliverable.learning_outcomes or source_deliverable.learning_outcomes),
-                    learner_brief=source_deliverable.learner_brief,
-                    public_checks=list(source_deliverable.public_checks),
-                )
-            )
-
-        old_to_new = {
-            deliverable.id: new_deliverable_ids[new_index_for_old(index)]
-            for index, deliverable in enumerate(current_deliverables)
-        }
-        rebuilt_behaviors = [
-            behavior.model_copy(
-                update={
-                    "first_required_in": old_to_new.get(
-                        behavior.first_required_in,
-                        new_deliverable_ids[-1],
-                    )
-                }
-            )
-            for behavior in spec.behaviors
-        ]
-        rebuilt_qualities = [
-            quality.model_copy(
-                update={
-                    "first_required_in": old_to_new.get(
-                        quality.first_required_in,
-                        new_deliverable_ids[-1],
-                    )
-                }
-            )
-            for quality in spec.qualities
-        ]
-
-        return spec.model_copy(
-            deep=True,
-            update={
-                "deliverables": rebuilt_deliverables,
-                "behaviors": rebuilt_behaviors,
-                "qualities": rebuilt_qualities,
-            },
-        )
+        del deliverables, execute_nodes
+        return shared_run
 
     def _course_stage_from_deliverables(self, deliverables: list[CourseDeliverableDraft]) -> tuple[CourseRunStage, CourseRunStatus]:
         statuses = {deliverable.workflow_status for deliverable in deliverables}
@@ -1574,9 +1493,40 @@ class CourseWorkflowService:
 
         return CreatorCourseSetupChoices(
             starter_type=runtime_dependencies.starter_type,
+            implementation_language=runtime_dependencies.implementation_language,
+            application_framework=runtime_dependencies.application_framework,
             primary_database=runtime_dependencies.primary_database,
             cache_backend=runtime_dependencies.cache_backend,
             tech_stack=list(runtime_dependencies.tech_stack),
+            data_sources=list(runtime_dependencies.data_sources),
+        )
+
+    def _generation_intake_from_design_context(
+        self,
+        *,
+        title: str,
+        problem_statement: str,
+        learning_outcomes: list[str],
+        package_type_hint: PackageType | None,
+        design_spec: AssignmentDesignSpec | None,
+    ) -> GenerationIntake:
+        runtime_dependencies = design_spec.runtime_dependencies if design_spec is not None else None
+        return GenerationIntake(
+            title=title,
+            problem_statement=problem_statement,
+            learning_outcomes=learning_outcomes,
+            package_type_hint=package_type_hint,
+            starter_type=(runtime_dependencies.starter_type if runtime_dependencies is not None else None),
+            implementation_language=(
+                runtime_dependencies.implementation_language if runtime_dependencies is not None else None
+            ),
+            application_framework=(
+                runtime_dependencies.application_framework if runtime_dependencies is not None else None
+            ),
+            primary_database=(runtime_dependencies.primary_database if runtime_dependencies is not None else None),
+            cache_backend=(runtime_dependencies.cache_backend if runtime_dependencies is not None else None),
+            tech_stack=(list(runtime_dependencies.tech_stack) if runtime_dependencies is not None else []),
+            data_sources=(list(runtime_dependencies.data_sources) if runtime_dependencies is not None else []),
         )
 
     def _creator_diagnostics(
@@ -1612,7 +1562,7 @@ class CourseWorkflowService:
                 )
             )
 
-        if review.blockers:
+        if review.blockers and course_run.active_operation is None:
             diagnostics.append(
                 TestingDiagnostic(
                     code="review_blocked",
@@ -1630,7 +1580,7 @@ class CourseWorkflowService:
             for workflow in review.linked_workflows
             if workflow.pending_gate is not None
         ]
-        if pending_workflows:
+        if pending_workflows and course_run.active_operation is None:
             pending = pending_workflows[0]
             diagnostics.append(
                 TestingDiagnostic(
@@ -1639,7 +1589,7 @@ class CourseWorkflowService:
                     summary="A linked assignment workflow is waiting on review.",
                     detail=f"Workflow `{pending.title}` is paused at `{pending.pending_gate.value}`.",
                     recommended_action="Review the linked assignment step and approve or request changes.",
-                    blocking=True,
+                    blocking=False,
                     context={
                         "workflow_run_id": pending.run_id,
                         "pending_gate": pending.pending_gate.value,
@@ -1742,6 +1692,7 @@ class CourseWorkflowService:
                 runtime_dependencies=spec.runtime_dependencies,
                 capabilities=spec.capabilities,
                 assessment_strategy=spec.assessment_strategy,
+                project_contract=spec.project_contract,
                 risk_class=spec.risk_class,
                 domain_pack=spec.domain_pack,
                 overlays=list(spec.overlays),
@@ -1946,6 +1897,8 @@ class CourseWorkflowService:
         self,
         deliverable: CourseDeliverableDraft,
         linked_run: WorkflowRun | None,
+        *,
+        generation_in_progress: bool = False,
     ) -> list[str]:
         blockers: list[str] = []
         if not deliverable.workflow_run_id:
@@ -1954,16 +1907,15 @@ class CourseWorkflowService:
         if linked_run is None:
             blockers.append("Linked assignment workflow run is missing.")
             return blockers
+        if generation_in_progress:
+            blockers.append("Linked assignment workflow is still running automated generation and review.")
+            return blockers
         if linked_run.status == WorkflowStatus.blocked:
             blockers.append("Linked assignment workflow is blocked.")
         if linked_run.artifacts.task_agent_spec is None:
             blockers.append("Linked assignment workflow does not have a learner-ready spec yet.")
         if linked_run.artifacts.review_summary is not None:
             blockers.extend(linked_run.artifacts.review_summary.blockers)
-        if linked_run.pending_gate is not None:
-            blockers.append(f"Linked assignment workflow is waiting on `{linked_run.pending_gate.value}`.")
-        if linked_run.status != WorkflowStatus.published:
-            blockers.append("Linked assignment workflow is not published yet.")
         return blockers
 
     def _linked_workflow_summary(self, linked_run: WorkflowRun | None) -> CourseLinkedWorkflowSummary | None:
@@ -2007,6 +1959,10 @@ class CourseWorkflowService:
         course_run: CourseRun,
         linked_workflows: list[CourseLinkedWorkflowSummary],
     ) -> list[str]:
+        if course_run.active_operation == CourseAsyncOperation.generation:
+            return [
+                "Wait for background generation to finish. Live workflow node progress now appears in the draft timeline and the course generation log.",
+            ]
         actions: list[str] = []
         if course_run.stage == CourseRunStage.drafting:
             actions.append("We are still building this draft. Keep this page open or reload it later to see fresh progress.")
@@ -2129,10 +2085,12 @@ class CourseWorkflowService:
             event_type=node.kind.value,
             stage=workflow_run.stage.value,
             status=node.status.value,
+            iteration=node.iteration,
             attempt=node.attempt,
             payload={
                 "node_id": node.node_id,
                 "kind": node.kind.value,
+                "iteration": node.iteration,
                 "status": node.status.value,
                 "summary": node.summary,
                 "findings": [finding.model_dump(mode="json") for finding in node.findings],
@@ -2157,6 +2115,8 @@ class CourseWorkflowService:
             "run_created": "Workflow run created",
             "workflow_authoring_completed": "Workflow authoring completed",
             "workflow_authoring_revised": "Workflow authoring revised",
+            "workflow_node_started": "Workflow node started",
+            "workflow_node_completed": "Workflow node completed",
             "run_revision_created": "Workflow revision created",
             "task_agent_spec_updated": "Assignment spec updated",
             "task_agent_workspace_materialized": "Workspace materialized",
@@ -2211,6 +2171,22 @@ class CourseWorkflowService:
             design_status = payload.get("design_status")
             parts = [part for part in [draft_kind, design_status] if part]
             return f"Initialized workflow run ({', '.join(parts)})." if parts else "Initialized workflow run."
+        if event_type in {"workflow_node_started", "workflow_node_completed"}:
+            node_kind = payload.get("node_kind")
+            attempt = payload.get("attempt")
+            status = payload.get("status")
+            parts = []
+            if node_kind:
+                parts.append(node_kind)
+            if attempt is not None:
+                parts.append(f"attempt {attempt}")
+            if status:
+                parts.append(status)
+            summary = payload.get("summary")
+            head = " · ".join(parts) if parts else None
+            if head and summary:
+                return f"{head} · {summary}"
+            return head or summary
         if event_type == "hil_gate_decision":
             gate = payload.get("gate")
             decision = payload.get("decision")

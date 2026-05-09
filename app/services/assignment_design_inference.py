@@ -28,6 +28,8 @@ from app.domain.task_agent import (
     WorkspaceScope,
 )
 from app.domain.registry import StarterType
+from app.services.public_surface_quality import extract_project_entities, pluralize_phrase
+from app.services.task_agent_starter_templates import PREVIEW_LAUNCHER_PATH
 
 
 class DesignSupportStatus(str, Enum):
@@ -231,6 +233,8 @@ def build_project_contract(
     text = " ".join([title, problem_statement]).lower()
     source_specs = list(data_sources or [])
     source_titles = [source.title for source in source_specs]
+    inferred_entities = extract_project_entities(title, problem_statement)
+    primary_entity = inferred_entities[0] if inferred_entities else None
     runtime_binding = build_project_runtime_binding(
         family=family,
         implementation_language=implementation_language,
@@ -253,8 +257,16 @@ def build_project_contract(
     if family == ProjectFamily.grounded_retrieval_service:
         return ProjectContractSpec(
             family=family,
-            system_kind="Grounded retrieval and answer service",
-            core_entities=["retrieval corpus", *source_titles] if source_titles else ["retrieval corpus", "grounded response"],
+            system_kind=(
+                f"{primary_entity.title()} retrieval service"
+                if primary_entity
+                else "Grounded retrieval and answer service"
+            ),
+            core_entities=(
+                [*inferred_entities, *source_titles]
+                if inferred_entities
+                else ["retrieval corpus", *source_titles] if source_titles else ["retrieval corpus", "grounded response"]
+            ),
             primary_read_paths=[
                 "retrieve supporting passages for a query",
                 "compose a grounded answer with citations",
@@ -272,8 +284,16 @@ def build_project_contract(
     if family == ProjectFamily.ranked_retrieval_service:
         return ProjectContractSpec(
             family=family,
-            system_kind="Ranked retrieval service",
-            core_entities=["retrieval corpus", *source_titles] if source_titles else ["retrieval corpus", "search result"],
+            system_kind=(
+                f"{primary_entity.title()} search service"
+                if primary_entity
+                else "Ranked retrieval service"
+            ),
+            core_entities=(
+                [*inferred_entities, *source_titles]
+                if inferred_entities
+                else ["retrieval corpus", *source_titles] if source_titles else ["retrieval corpus", "search result"]
+            ),
             primary_read_paths=["retrieve and rank relevant results for a query"],
             primary_write_paths=[],
             invariants=[
@@ -285,17 +305,19 @@ def build_project_contract(
             runtime_plan=runtime_plan,
         )
     if family == ProjectFamily.control_plane_service:
+        entity = primary_entity or "control definition"
+        entity_plural = pluralize_phrase(entity)
         return ProjectContractSpec(
             family=family,
-            system_kind="Control-plane backend service",
-            core_entities=["control definitions", "decision rules", "request context", "audit events"],
+            system_kind=f"{entity.title()} control plane",
+            core_entities=inferred_entities or ["control definitions", "decision rules", "request context", "audit events"],
             primary_read_paths=[
-                "evaluate the active control definition for a request context",
-                "serve low-latency decisions for live traffic",
+                f"evaluate the active {entity} for a request context",
+                f"serve low-latency {entity_plural} decisions for live traffic",
             ],
             primary_write_paths=[
-                "create or update control definitions safely",
-                "publish control changes with traceable state transitions",
+                f"create or update {entity_plural} safely",
+                f"publish {entity_plural} changes with traceable state transitions",
             ],
             invariants=[
                 "Decisions are deterministic for the same context and active definition.",
@@ -307,12 +329,14 @@ def build_project_contract(
             runtime_plan=runtime_plan,
         )
     if family == ProjectFamily.transactional_stateful_service:
+        entity = primary_entity or "record"
+        entity_plural = pluralize_phrase(entity)
         return ProjectContractSpec(
             family=family,
-            system_kind="Transactional stateful backend service",
-            core_entities=["durable records", "mutable workflow state"],
-            primary_read_paths=["serve the current state safely under load"],
-            primary_write_paths=["apply state transitions without violating invariants"],
+            system_kind=f"{entity.title()} service",
+            core_entities=inferred_entities or ["durable records", "mutable workflow state"],
+            primary_read_paths=[f"serve the current {entity} state safely under load"],
+            primary_write_paths=[f"create or update {entity_plural} without violating invariants"],
             invariants=[
                 "Concurrent or repeated writes do not corrupt critical state.",
                 "State transitions preserve the service's core business invariants.",
@@ -322,12 +346,14 @@ def build_project_contract(
             runtime_plan=runtime_plan,
         )
     if family == ProjectFamily.workflow_agent_service:
+        entity = primary_entity or "workflow request"
+        entity_plural = pluralize_phrase(entity)
         return ProjectContractSpec(
             family=family,
-            system_kind="Workflow or agent orchestration service",
-            core_entities=["requests", "tool runs", "operator decisions", "run traces"],
-            primary_read_paths=["inspect request context and route work through bounded workflows"],
-            primary_write_paths=["perform reversible actions or escalate for approval"],
+            system_kind=f"{entity.title()} workflow service",
+            core_entities=inferred_entities or ["requests", "tool runs", "operator decisions", "run traces"],
+            primary_read_paths=[f"inspect {entity_plural} and route work through bounded workflows"],
+            primary_write_paths=[f"progress {entity_plural} without breaking the published contract"],
             invariants=[
                 "The service preserves a stable response contract.",
                 "Operator-visible traces explain why the workflow took each step.",
@@ -336,11 +362,12 @@ def build_project_contract(
             runtime_binding=runtime_binding,
             runtime_plan=runtime_plan,
         )
+    entity = primary_entity or "service request"
     return ProjectContractSpec(
         family=ProjectFamily.generic_backend_service,
-        system_kind="General backend service",
-        core_entities=["service request", "service response"],
-        primary_read_paths=["handle supported requests through a stable contract"],
+        system_kind=f"{entity.title()} service",
+        core_entities=inferred_entities or ["service request", "service response"],
+        primary_read_paths=[f"handle supported {entity} flows through a stable contract"],
         primary_write_paths=[],
         invariants=["The service preserves the published contract for supported requests."],
         operational_concerns=["error handling", "observability"],
@@ -517,7 +544,7 @@ def runtime_target_commands_for_stack(
         elif normalized_framework == "flask":
             run_command = "flask --app app run --host 0.0.0.0 --port ${PORT:-8000}"
         else:
-            run_command = "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"
+            run_command = f"python {PREVIEW_LAUNCHER_PATH} --host 0.0.0.0"
         return install_command, run_command, "python checks/run_visible_checks.py"
 
     if normalized_language in {"typescript", "javascript"}:
@@ -548,6 +575,30 @@ def runtime_target_commands_for_stack(
         return "cargo fetch", "cargo run", "python checks/run_visible_checks.py"
 
     return None, None, "python checks/run_visible_checks.py"
+
+
+def runtime_verify_commands_for_stack(
+    *,
+    implementation_language: str | None,
+    application_framework: str | None,
+) -> list[str]:
+    normalized_language = (implementation_language or "").strip().lower() or None
+    normalized_framework = (application_framework or "").strip().lower() or None
+
+    if normalized_language == "python":
+        if normalized_framework == "django":
+            return ["python manage.py check"]
+        return [
+            "python -c \"from app import app as _coursegen_app; print(type(_coursegen_app).__name__)\""
+        ]
+
+    if normalized_language == "go":
+        return ["go build ./..."]
+
+    if normalized_language == "rust":
+        return ["cargo check"]
+
+    return []
 
 
 def runtime_entrypoint_for_stack(
@@ -741,9 +792,22 @@ def build_project_runtime_plan(
                 ProjectRuntimeCommandSpec(
                     phase="seed",
                     command=f"Materialize `{source.title}` at `{source.workspace_path}`.",
-                    target_service_id="app",
-                )
+                target_service_id="app",
             )
+        )
+
+    verify_steps = [
+        ProjectRuntimeCommandSpec(
+            phase="verify",
+            command=command,
+            target_service_id="app",
+            notes="Run a fast framework-native preflight before the preview server boots.",
+        )
+        for command in runtime_verify_commands_for_stack(
+            implementation_language=implementation_language,
+            application_framework=application_framework,
+        )
+    ]
 
     run_steps: list[ProjectRuntimeCommandSpec] = []
     if run_command:
@@ -784,6 +848,7 @@ def build_project_runtime_plan(
         services=services,
         setup_steps=setup_steps,
         seed_steps=seed_steps,
+        verify_steps=verify_steps,
         run_steps=run_steps,
         check_steps=check_steps,
         notes=notes,
@@ -841,7 +906,7 @@ def runtime_commands_for_stack(
         application_framework=application_framework,
         package_manager=package_manager,
     )
-    preview_command = run_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}"
+    preview_command = run_command or f"python {PREVIEW_LAUNCHER_PATH} --host 127.0.0.1"
     local_run_command = preview_command
     visible_check_command = visible_check_command or "python checks/run_visible_checks.py"
     return local_run_command, visible_check_command, preview_command

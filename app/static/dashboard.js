@@ -862,12 +862,13 @@
           `;
         }
 
-        const tools = spec.tool_registry?.tools || [];
-        const writeCount = tools.filter((t) => t.safety === "write").length;
-        const irreversibleCount = tools.filter((t) => t.safety === "irreversible" || t.approval_required).length;
-        const behaviors = spec.behaviors || [];
-        const qualities = spec.qualities || [];
         const deliverables = spec.deliverables || [];
+        const publicEndpoints = spec.public_endpoints || [];
+        const totalChecks = deliverables.reduce((count, deliverable) => count + ((deliverable.public_checks || []).length), 0);
+        const runtimePlan = spec.project_contract?.runtime_plan || {};
+        const language = runtimePlan.implementation_language || spec.runtime_dependencies?.implementation_language || "unspecified";
+        const framework = runtimePlan.application_framework || spec.runtime_dependencies?.application_framework || "framework unspecified";
+        const systemKind = spec.project_contract?.system_kind || "Generated service";
         const eyebrowByGate = {
           gate_1_spec_review: "First review",
           gate_2_progression_review: "Deliverables review",
@@ -887,8 +888,10 @@
 
         const facts = [];
         facts.push(`<li><strong>Deliverables:</strong> ${deliverables.length}</li>`);
-        facts.push(`<li><strong>Tools the system can use:</strong> ${tools.length}${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} write data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
-        facts.push(`<li><strong>Checks:</strong> ${behaviors.length} learner-visible · ${qualities.length} quality bars</li>`);
+        facts.push(`<li><strong>System kind:</strong> ${escapeHtml(systemKind)}</li>`);
+        facts.push(`<li><strong>Public routes:</strong> ${publicEndpoints.length}</li>`);
+        facts.push(`<li><strong>Visible checks:</strong> ${totalChecks}</li>`);
+        facts.push(`<li><strong>Runtime:</strong> ${escapeHtml(`${language}${framework ? ` • ${framework}` : ""}`)}</li>`);
 
         return `
           <div class="review-plain-summary">
@@ -1007,102 +1010,69 @@
           `;
         }
 
-        const endpointSummary = (spec.production_contract?.canonical_endpoints || [])
-          .map((endpoint) => `${endpoint.method} ${endpoint.path}`);
-        const tools = spec.tool_registry?.tools || [];
         const deliverables = spec.deliverables || [];
-        const behaviors = spec.behaviors || [];
-        const qualities = spec.qualities || [];
-        const modes = (spec.supported_modes || []).map(titleCase);
+        const publicEndpoints = spec.public_endpoints || [];
+        const endpointSummary = publicEndpoints.map((endpoint) => `${endpoint.method} ${endpoint.path}`);
+        const totalChecks = deliverables.reduce((count, deliverable) => count + ((deliverable.public_checks || []).length), 0);
+        const runtimePlan = spec.project_contract?.runtime_plan || {};
+        const language = runtimePlan.implementation_language || spec.runtime_dependencies?.implementation_language || "unspecified";
+        const framework = runtimePlan.application_framework || spec.runtime_dependencies?.application_framework || "framework unspecified";
+        const packageManager = runtimePlan.package_manager || "not specified";
+        const systemKind = spec.project_contract?.system_kind || "Generated service";
+        const projectFamily = spec.project_contract?.family || "generic_backend_service";
         const pendingGate = workflow.pending_gate || "gate_1_spec_review";
         const reviewKicker = pendingGate === "gate_2_progression_review"
           ? "Deliverables snapshot"
           : pendingGate === "gate_3_pre_publish"
             ? "Final publish review"
             : "Assignment spec snapshot";
-        const checksSummary = qualities.length
-          ? `${pluralize(behaviors.length, "behavior check")} • ${pluralize(qualities.length, "quality bar")}`
-          : `${pluralize(behaviors.length, "behavior check")} • quality bars defined`;
         const summaryRows = [
-          renderSpecSummaryRow("Build pattern", friendlyBuildPattern(spec.archetype)),
+          renderSpecSummaryRow("System kind", systemKind),
           renderSpecSummaryRow("Use case", `${spec.domain_pack ? friendlyUseCase(spec.domain_pack) : "General"} • ${friendlyRisk(spec.risk_class)}`),
-          renderSpecSummaryRow("Modes", modes.join(", ") || "No modes listed"),
-          renderSpecSummaryRow("Tools", summarizeToolPolicy(tools)),
-          renderSpecSummaryRow("Checks", checksSummary),
+          renderSpecSummaryRow("Runtime", `${language}${framework ? ` • ${framework}` : ""}`),
+          renderSpecSummaryRow("Package manager", packageManager),
+          renderSpecSummaryRow("Visible checks", pluralize(totalChecks, "check")),
           renderSpecSummaryRow("Endpoints", pluralize(endpointSummary.length, "route")),
+          renderSpecSummaryRow("Deliverables", pluralize(deliverables.length, "deliverable")),
         ];
         const expandedSections = [
-          renderSpecSection("Contract frame", [
-            `<div class="review-item"><p><strong>Build pattern</strong></p><p>${escapeHtml(friendlyBuildPattern(spec.archetype))}</p></div>`,
+          renderSpecSection("Project frame", [
+            `<div class="review-item"><p><strong>System kind</strong></p><p>${escapeHtml(systemKind)}</p></div>`,
+            `<div class="review-item"><p><strong>Project family</strong></p><p>${escapeHtml(projectFamily)}</p></div>`,
             `<div class="review-item"><p><strong>Course shape</strong></p><p>${escapeHtml(friendlyCourseShape(spec.package_type))}</p></div>`,
             `<div class="review-item"><p><strong>Use case</strong></p><p>${escapeHtml(spec.domain_pack ? friendlyUseCase(spec.domain_pack) : "General")}</p></div>`,
             `<div class="review-item"><p><strong>Risk class</strong></p><p>${escapeHtml(friendlyRisk(spec.risk_class))}</p></div>`,
           ]),
-          renderSpecSection("Contract schemas", [
-            `<div class="review-item"><p><strong>Input schema</strong></p><p>${escapeHtml(summarizeSchemaFields(spec.task_schema))}</p></div>`,
-            `<div class="review-item"><p><strong>Output schema</strong></p><p>${escapeHtml(summarizeSchemaFields(spec.output_schema))}</p></div>`,
-            `<div class="review-item"><p><strong>Run state schema</strong></p><p>${escapeHtml(summarizeSchemaFields(spec.run_state_schema))}</p></div>`,
-            `<div class="review-item"><p><strong>Trace schema</strong></p><p>${escapeHtml(summarizeSchemaFields(spec.trace_schema))}</p></div>`,
+          renderSpecSection("Runtime plan", [
+            `<div class="review-item"><p><strong>Language</strong></p><p>${escapeHtml(language)}</p></div>`,
+            `<div class="review-item"><p><strong>Framework</strong></p><p>${escapeHtml(framework)}</p></div>`,
+            `<div class="review-item"><p><strong>Package manager</strong></p><p>${escapeHtml(packageManager)}</p></div>`,
+            `<div class="review-item"><p><strong>Preview command</strong></p><p>${escapeHtml(spec.runtime_dependencies?.preview_command || "Not specified")}</p></div>`,
+            `<div class="review-item"><p><strong>Visible check command</strong></p><p>${escapeHtml(spec.runtime_dependencies?.visible_check_command || "Not specified")}</p></div>`,
           ]),
-          renderSpecSection("Tools and approval policy", tools.map((tool) => `
-            <div class="review-item ${toolCardClass(tool)}">
-              <p><strong>${escapeHtml(tool.id)}</strong></p>
-              <p>${escapeHtml(tool.description)}</p>
-              <div class="pill-row">
-                ${pill(friendlyToolSafety(tool.safety))}
-                ${tool.approval_required ? pill("Requires approval") : ""}
-                ${tool.dry_run_supported ? pill("Dry run supported") : ""}
-              </div>
-            </div>
-          `).concat(!tools.length ? [`<div class="review-item"><p>No tools listed.</p></div>`] : [])),
-          renderSpecSection("Checks and quality bars", [
-            ...behaviors.map((behavior) => `
-              <div class="review-item">
-                <p><strong>${escapeHtml(behavior.description)}</strong></p>
-              </div>
-            `),
-            ...qualities.map((quality) => `
-              <div class="review-item">
-                <p><strong>${escapeHtml(quality.description)}</strong></p>
-              </div>
-            `),
-          ]),
-          renderSpecSection("Modes and endpoints", [
-            `<div class="review-item"><p><strong>Supported modes</strong></p><p>${escapeHtml(modes.join(", ") || "No modes listed")}</p></div>`,
-            `<div class="review-item"><p><strong>Endpoints</strong></p><p>${escapeHtml(endpointSummary.join(", ") || "No endpoints listed")}</p></div>`,
-          ]),
-        ];
-
-        if (pendingGate !== "gate_1_spec_review") {
-          expandedSections.push(renderSpecSection("Deliverables", deliverables.map((deliverable, index) => `
+          renderSpecSection("Public surface", endpointSummary.map((endpoint) => `
             <div class="review-item">
-              <p><strong>${escapeHtml(`${index + 1}. ${deliverable.title}`)}</strong></p>
-              <p>${escapeHtml(deliverable.objective)}</p>
-              <div class="pill-row">
-                ${pill(friendlyStarterType(deliverable.starter_type))}
-                ${(deliverable.overlay_ids || []).map((overlay) => pill(friendlyFocusArea(overlay))).join("")}
-              </div>
+              <p><strong>${escapeHtml(endpoint)}</strong></p>
             </div>
-          `).concat(!deliverables.length ? [`<div class="review-item"><p>No deliverable plan is attached yet.</p></div>`] : [])));
-          expandedSections.push(renderSpecSection("Progression gates", [
-            ...behaviors
-              .filter((behavior) => behavior.first_required_in)
-              .map((behavior) => `
-                <div class="review-item">
-                  <p><strong>${escapeHtml(behavior.description)}</strong></p>
-                  <p>${escapeHtml(`Required from ${behavior.first_required_in}`)}</p>
+          `).concat(!endpointSummary.length ? [`<div class="review-item"><p>No public endpoints listed.</p></div>`] : [])),
+          renderSpecSection("Visible checks", deliverables.flatMap((deliverable) => (deliverable.public_checks || []).map((check) => `
+              <div class="review-item">
+                <p><strong>${escapeHtml(check.title || check.id)}</strong></p>
+                <p>${escapeHtml(check.learner_goal || check.request_path)}</p>
+              </div>
+            `)).concat(!totalChecks ? [`<div class="review-item"><p>No visible checks are attached yet.</p></div>`] : [])),
+          renderSpecSection("Deliverables", deliverables.map((deliverable, index) => `
+              <div class="review-item">
+                <p><strong>${escapeHtml(`${index + 1}. ${deliverable.title}`)}</strong></p>
+                <p>${escapeHtml(deliverable.objective)}</p>
+                <div class="pill-row">
+                  ${pill(friendlyStarterType(deliverable.starter_type))}
+                  ${(deliverable.overlay_ids || []).map((overlay) => pill(friendlyFocusArea(overlay))).join("")}
                 </div>
-              `),
-            ...qualities
-              .filter((quality) => quality.first_required_in)
-              .map((quality) => `
-                <div class="review-item">
-                  <p><strong>${escapeHtml(quality.description)}</strong></p>
-                  <p>${escapeHtml(`Required from ${quality.first_required_in}`)}</p>
-                </div>
-              `),
-          ]));
-        }
+                <p>${escapeHtml(((deliverable.learner_starter_surface?.primary_editable_paths) || spec.runtime_dependencies?.editable_files || []).join(", ") || "Editable files are inferred from the starter bundle.")}</p>
+              </div>
+            `).concat(!deliverables.length ? [`<div class="review-item"><p>No deliverable plan is attached yet.</p></div>`] : [])),
+        ];
 
         return `
           <div class="review-spec-card">

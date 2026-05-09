@@ -15,6 +15,7 @@ from app.domain.grading import LiveAssignmentGradeReport, LiveGradeTaskAgentRequ
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
+from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH, PREVIEW_LAUNCHER_PATH
 
 
 class LearnerStudioError(RuntimeError):
@@ -86,7 +87,6 @@ class LearnerStudioService:
             self.docker_binary,
             "run",
             "-d",
-            "--rm",
             "--name",
             container_name,
             "-p",
@@ -201,7 +201,6 @@ class LearnerStudioService:
                 self.docker_binary,
                 "run",
                 "-d",
-                "--rm",
                 "--name",
                 container_name,
                 "-p",
@@ -249,7 +248,10 @@ class LearnerStudioService:
             )
             return self.runner.grade_assignment_live(
                 spec,
-                LiveGradeTaskAgentRequest(base_url=base_url),
+                LiveGradeTaskAgentRequest(
+                    base_url=base_url,
+                    workspace_root=str(workspace_path),
+                ),
             )
         except TaskAgentRunnerError as exc:
             raise LearnerStudioError(str(exc)) from exc
@@ -263,7 +265,7 @@ class LearnerStudioService:
             )
 
     def _runtime_manifest(self, workspace_path: Path) -> dict[str, object]:
-        manifest_path = workspace_path / "starter_manifest.json"
+        manifest_path = workspace_path / HIDDEN_MANIFEST_PATH
         if not manifest_path.exists():
             return {}
         try:
@@ -271,10 +273,10 @@ class LearnerStudioService:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _setup_commands(self, workspace_path: Path) -> list[str]:
+    def _runtime_commands(self, workspace_path: Path, *, phase: str) -> list[str]:
         manifest = self._runtime_manifest(workspace_path)
         runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
-        steps = runtime_plan.get("setup_steps") or []
+        steps = runtime_plan.get(f"{phase}_steps") or []
         commands: list[str] = []
         for step in steps:
             if not isinstance(step, dict):
@@ -284,6 +286,12 @@ class LearnerStudioService:
             if command and target in (None, "app"):
                 commands.append(str(command))
         return commands
+
+    def _setup_commands(self, workspace_path: Path) -> list[str]:
+        return self._runtime_commands(workspace_path, phase="setup")
+
+    def _verify_commands(self, workspace_path: Path) -> list[str]:
+        return self._runtime_commands(workspace_path, phase="verify")
 
     def _runtime_bootstrap_commands(self, workspace_path: Path) -> list[str]:
         manifest = self._runtime_manifest(workspace_path)
@@ -312,7 +320,7 @@ class LearnerStudioService:
             return preview_command
         if spec.runtime_dependencies.preview_command:
             return spec.runtime_dependencies.preview_command
-        return "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"
+        return f"python {PREVIEW_LAUNCHER_PATH} --host 0.0.0.0"
 
     def _runtime_launch_script(
         self,
@@ -327,6 +335,14 @@ class LearnerStudioService:
             *self._runtime_shell_exports(workspace_path),
             *self._runtime_bootstrap_commands(workspace_path),
             *(self._setup_commands(workspace_path) if include_setup else []),
+            *[
+                line
+                for index, command in enumerate(self._verify_commands(workspace_path), start=1)
+                for line in (
+                    f"echo '[coursegen] verify step {index} started'",
+                    command,
+                )
+            ],
             f"exec {self._preview_command(workspace_path, spec)}",
         ]
         return "\n".join(lines)
@@ -564,7 +580,6 @@ class LearnerStudioService:
                     self.docker_binary,
                     "run",
                     "-d",
-                    "--rm",
                     "--name",
                     container_name,
                     "--network",
@@ -684,6 +699,15 @@ class LearnerStudioService:
                     return
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+            if container_name and not self._container_running(container_name):
+                details = (
+                    f"Container '{container_name}' stopped before '{url}' became healthy. "
+                    f"Last error: {last_error}"
+                )
+                logs = self._container_logs(container_name)
+                if logs:
+                    details = f"{details}\n\nContainer logs:\n{logs}"
+                raise LearnerStudioError(details)
             time.sleep(1.0)
         details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
         if container_name:

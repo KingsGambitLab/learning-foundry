@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from app.domain.ai import AIUsageSummary, merge_ai_usage
@@ -35,15 +37,32 @@ from app.services.assignment_design_inference import (
 )
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
+from app.services.bundle_validation import validate_materialized_bundle
+from app.services.coursegen_logging import log_coursegen_event
 from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
 from app.services.failure_context_builder import build_failure_context
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
 from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
-from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService, TaskAgentAuthoringStatus
+from app.services.openai_task_agent_authoring import (
+    OpenAITaskAgentAuthoringService,
+    TaskAgentAuthoringSource,
+    TaskAgentAuthoringStatus,
+)
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
 from app.services.task_agent_grader import grade_task_agent_submission
 from app.storage.sqlite_store import SQLiteWorkflowStore
+
+_GRAPH_EXECUTION_NODE_KINDS = {
+    WorkflowNodeKind.authoring_runtime,
+    WorkflowNodeKind.authoring_tests,
+    WorkflowNodeKind.authoring_repair,
+    WorkflowNodeKind.reviewer_runtime,
+    WorkflowNodeKind.reviewer_repair,
+    WorkflowNodeKind.reviewer_code,
+    WorkflowNodeKind.reviewer_pedagogy,
+    WorkflowNodeKind.reviewer_tests,
+}
 
 
 class WorkflowConflictError(ValueError):
@@ -114,6 +133,13 @@ class WorkflowService:
 
         self._refresh_review_summary(run)
         bundle = self.materializer.materialize_run(run, overwrite=request.overwrite)
+        if run.artifacts.task_agent_spec is not None:
+            bundle_validation = validate_materialized_bundle(run.artifacts.task_agent_spec, bundle)
+            if not bundle_validation.valid:
+                raise WorkflowConflictError(
+                    "The materialized learner bundle is inconsistent with the assignment contract. "
+                    + "; ".join(issue.code for issue in bundle_validation.errors[:3])
+                )
         run.artifacts.materialized_bundle = bundle
         run.updated_at = datetime.now(UTC)
         self.store.save_run(run)
@@ -312,11 +338,42 @@ class WorkflowService:
     ) -> WorkflowRun:
         now = datetime.now(UTC)
         run_id = f"run_{uuid4().hex[:12]}"
+        log_coursegen_event(
+            "workflow_authoring_started",
+            workflow_run_id=run_id,
+            title=intake.title,
+            package_type=design_spec.course_structure.package_type.value,
+            implementation_language=design_spec.runtime_dependencies.implementation_language,
+            application_framework=design_spec.runtime_dependencies.application_framework,
+        )
         authoring_result = self.task_agent_authoring_service.generate_scaffold(
             title=intake.title,
             summary=intake.problem_statement,
             design_spec=design_spec,
         )
+        log_coursegen_event(
+            "workflow_authoring_scaffold_generated",
+            workflow_run_id=run_id,
+            title=intake.title,
+            source=authoring_result.source.value,
+            origin_template=authoring_result.origin_template,
+            note_count=len(authoring_result.notes),
+        )
+        if self._should_block_on_live_authoring_failure(authoring_result):
+            log_coursegen_event(
+                "workflow_authoring_failed",
+                workflow_run_id=run_id,
+                title=intake.title,
+                reason="live_authoring_fallback_blocked",
+                notes=authoring_result.notes[:5],
+            )
+            return self._create_authoring_failure_run(
+                intake,
+                notes=[
+                    "Live assignment authoring did not complete successfully, so the workflow stopped before reviewer execution.",
+                    *authoring_result.notes,
+                ],
+            )
         task_agent_spec = authoring_result.spec
         origin_template = authoring_result.origin_template
         validation = validate_task_agent_spec(task_agent_spec)
@@ -376,6 +433,13 @@ class WorkflowService:
                 "deliverable_count": len(task_agent_spec.deliverables),
             },
         )
+        log_coursegen_event(
+            "workflow_authoring_completed",
+            workflow_run_id=run.id,
+            title=run.title,
+            deliverable_count=len(task_agent_spec.deliverables),
+            execute_nodes=execute_nodes,
+        )
         if execute_nodes and run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
             run = self.execute_langgraph_nodes(run.id)
         return run
@@ -414,6 +478,50 @@ class WorkflowService:
             run = self.execute_langgraph_nodes(run.id)
         return run
 
+    def _should_block_on_live_authoring_failure(self, authoring_result) -> bool:
+        if authoring_result.source != TaskAgentAuthoringSource.deterministic_fallback:
+            return False
+        status = authoring_result.status
+        if not status.sdk_installed or not status.api_key_present:
+            return False
+        message = " ".join([status.message, *authoring_result.notes]).lower()
+        return "fell back to the deterministic starter template" in message
+
+    def _create_authoring_failure_run(
+        self,
+        intake: GenerationIntake,
+        *,
+        notes: list[str],
+    ) -> WorkflowRun:
+        now = datetime.now(UTC)
+        run_id = f"run_{uuid4().hex[:12]}"
+        artifacts = WorkflowArtifacts(
+            draft_kind=DraftKind.scope_blocked,
+            notes=[
+                "No learner-ready starter project was created because live assignment authoring failed.",
+                *notes,
+            ],
+        )
+        run = WorkflowRun(
+            id=run_id,
+            title=intake.title,
+            created_at=now,
+            updated_at=now,
+            stage=WorkflowStage.blocked,
+            status=WorkflowStatus.blocked,
+            pending_gate=None,
+            intake=intake,
+            artifacts=artifacts,
+            notes=notes,
+        )
+        self.store.save_run(run)
+        self.store.append_event(
+            run.id,
+            "workflow_authoring_failed",
+            {"status": run.status.value, "message": notes[0] if notes else "Live assignment authoring failed."},
+        )
+        return run
+
     def execute_langgraph_nodes(self, run_id: str) -> WorkflowRun:
         run = self._require_run(run_id)
         if run.stage == WorkflowStage.published or run.status == WorkflowStatus.published:
@@ -425,7 +533,36 @@ class WorkflowService:
 
         if run.artifacts.workspace_snapshot is None:
             run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
-        run = self.node_runtime.execute(run)
+        log_coursegen_event(
+            "workflow_node_loop_started",
+            workflow_run_id=run.id,
+            title=run.title,
+            stage=run.stage.value,
+            status=run.status.value,
+        )
+        try:
+            run = self.node_runtime.execute(
+                run,
+                on_node_started=self._record_node_started,
+                on_node_finished=self._record_node_finished,
+            )
+        except Exception as exc:
+            self.store.append_event(
+                run.id,
+                "langgraph_nodes_failed",
+                {
+                    "error": str(exc),
+                    "stage": run.stage.value,
+                    "status": run.status.value,
+                },
+            )
+            log_coursegen_event(
+                "workflow_node_loop_failed",
+                workflow_run_id=run.id,
+                title=run.title,
+                error=str(exc),
+            )
+            raise
         validation = validate_task_agent_spec(run.artifacts.task_agent_spec)
         run.artifacts.validation_summary = validation.model_dump(mode="json")
         run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.deliverable_gates]
@@ -434,7 +571,7 @@ class WorkflowService:
             run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
         self._apply_node_stage(run)
         run.updated_at = datetime.now(UTC)
-        self.store.save_run(run)
+        self._persist_run_progress(run)
         latest_node_by_kind = {
             node.kind: node
             for node in run.artifacts.node_executions
@@ -454,7 +591,110 @@ class WorkflowService:
                 "workspace_root": run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot is not None else None,
             },
         )
+        log_coursegen_event(
+            "workflow_node_loop_completed",
+            workflow_run_id=run.id,
+            title=run.title,
+            stage=run.stage.value,
+            status=run.status.value,
+            node_count=len(run.artifacts.node_executions),
+        )
         return run
+
+    def _record_node_started(
+        self,
+        run: WorkflowRun,
+        kind: WorkflowNodeKind,
+        attempt: int,
+    ) -> None:
+        self.store.append_event(
+            run.id,
+            "workflow_node_started",
+            {
+                "node_kind": kind.value,
+                "attempt": attempt,
+                "stage": run.stage.value,
+                "status": run.status.value,
+            },
+        )
+        log_coursegen_event(
+            "workflow_node_started",
+            workflow_run_id=run.id,
+            title=run.title,
+            node_kind=kind.value,
+            attempt=attempt,
+            stage=run.stage.value,
+            status=run.status.value,
+        )
+
+    def _record_node_finished(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNodeExecution,
+    ) -> None:
+        run.updated_at = datetime.now(UTC)
+        self._persist_run_progress(run)
+        self.store.append_event(
+            run.id,
+            "workflow_node_completed",
+            {
+                "node_kind": node.kind.value,
+                "iteration": node.iteration,
+                "attempt": node.attempt,
+                "status": node.status.value,
+                "summary": node.summary,
+            },
+        )
+        log_coursegen_event(
+            "workflow_node_completed",
+            workflow_run_id=run.id,
+            title=run.title,
+            node_kind=node.kind.value,
+            attempt=node.attempt,
+            node_status=node.status.value,
+            summary=node.summary,
+        )
+
+    def _persist_run_progress(self, run: WorkflowRun) -> None:
+        self.store.save_run(run)
+        self._write_workspace_progress_files(run)
+
+    def _write_workspace_progress_files(self, run: WorkflowRun) -> None:
+        workspace = run.artifacts.workspace_snapshot
+        if workspace is None:
+            return
+        private_dir = Path(workspace.private_dir)
+        private_dir.mkdir(parents=True, exist_ok=True)
+        spec_payload = (
+            run.artifacts.task_agent_spec.model_dump(mode="json")
+            if run.artifacts.task_agent_spec is not None
+            else None
+        )
+        self._write_progress_json(private_dir / "task_agent_spec.json", spec_payload)
+        self._write_progress_json(private_dir / "validation_summary.json", run.artifacts.validation_summary or {})
+        self._write_progress_json(private_dir / "progression_preview.json", run.artifacts.progression_preview)
+        self._write_progress_json(
+            private_dir / "workflow_snapshot.json",
+            {
+                "run_id": run.id,
+                "title": run.title,
+                "stage": run.stage.value,
+                "status": run.status.value,
+                "pending_gate": run.pending_gate.value if run.pending_gate else None,
+                "origin_template": run.artifacts.origin_template,
+            },
+        )
+        self._write_progress_json(
+            private_dir / "node_executions.json",
+            [node.model_dump(mode="json") for node in run.artifacts.node_executions],
+        )
+        self._write_progress_json(
+            private_dir / "review_summary.json",
+            run.artifacts.review_summary.model_dump(mode="json") if run.artifacts.review_summary is not None else {},
+        )
+
+    def _write_progress_json(self, path: Path, payload) -> None:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     def apply_gate_decision(self, run_id: str, decision: GateDecisionRequest) -> WorkflowRun:
         run = self._require_run(run_id)
@@ -489,11 +729,18 @@ class WorkflowService:
         if decision.gate == HILGate.gate_1_spec_review:
             if run.artifacts.task_agent_spec is not None:
                 validation = run.artifacts.validation_summary or {}
-                if not validation.get("valid", True):
+                if not validation.get("valid", False):
                     raise WorkflowConflictError("The task-agent draft is not valid yet. Fix validation errors before requesting review.")
+                if run.artifacts.workspace_snapshot is None:
+                    raise WorkflowConflictError(
+                        "Authoring must rerun after the latest spec change before the spec review gate can be approved."
+                    )
                 author_node = self._node_by_kind(run, WorkflowNodeKind.authoring_runtime)
+                authoring_tests_node = self._node_by_kind(run, WorkflowNodeKind.authoring_tests)
                 if author_node is None or author_node.status != WorkflowNodeStatus.passed:
                     raise WorkflowConflictError("Authoring must pass Docker sandbox verification before the spec review gate can be approved.")
+                if authoring_tests_node is None or authoring_tests_node.status != WorkflowNodeStatus.passed:
+                    raise WorkflowConflictError("Generated visible and hidden tests must be authored successfully before the spec review gate can be approved.")
             else:
                 raise WorkflowConflictError("This workflow does not have a reviewable assignment spec yet.")
             run.stage = WorkflowStage.awaiting_hil_gate_2
@@ -535,10 +782,22 @@ class WorkflowService:
             failure_context=build_failure_context(run, latest_node) if latest_node is not None else None,
             origin_template=run.artifacts.origin_template,
         )
-        run.artifacts.task_agent_spec = revision.spec
+        revised_spec = ensure_task_agent_deliverable_briefs(revision.spec, overwrite=False)
+        validation = validate_task_agent_spec(revised_spec)
+        if not validation.valid:
+            raise WorkflowConflictError(
+                "Human feedback revision produced an invalid task-agent draft. "
+                "Fix the generated spec before rerunning review."
+            )
+        run.artifacts.task_agent_spec = revised_spec
         run.artifacts.origin_template = revision.origin_template
         self._invalidate_generated_artifacts(run, reason="human-feedback revision")
         run.artifacts.ai_usage = merge_ai_usage(run.artifacts.ai_usage, revision.usage)
+        run.artifacts.validation_summary = validation.model_dump(mode="json")
+        run.artifacts.progression_preview = [
+            summary.model_dump(mode="json")
+            for summary in validation.deliverable_gates
+        ]
         if revision.notes:
             run.notes.extend(revision.notes)
         self.store.append_event(
@@ -546,7 +805,7 @@ class WorkflowService:
             "workflow_authoring_revised",
             {
                 "message": "Updated the learner-ready assignment draft after human review feedback.",
-                "deliverable_count": len(revision.spec.deliverables),
+                "deliverable_count": len(revised_spec.deliverables),
                 "origin_template": revision.origin_template,
             },
         )
@@ -567,13 +826,13 @@ class WorkflowService:
 
     def _artifact_plan_for_task_agent(self, spec: TaskAgentServiceSpec) -> list[str]:
         lines = [
-            "learner-ready spec with deterministic test bindings",
-            "deliverable activation plan derived from readiness markers",
-            "starter plan per deliverable based on starter_type",
+            "learner-ready runtime plan and public endpoint contract",
+            "deliverable activation plan derived from visible checks",
+            "starter plan per deliverable based on learner-owned files",
             "per-deliverable learning content and evaluation bundle",
         ]
-        if spec.production_contract.supports_dry_run:
-            lines.append("dry-run and approval-gate contract in final artifact set")
+        if spec.capabilities.approval_flow_required:
+            lines.append("approval-sensitive behavior covered in the final learner bundle")
         return lines
 
     def _require_run(self, run_id: str) -> WorkflowRun:
@@ -593,6 +852,16 @@ class WorkflowService:
             if node.kind == kind:
                 return node
         return None
+
+    def _latest_graph_iteration(self, run: WorkflowRun) -> int:
+        return max(
+            (
+                node.iteration
+                for node in run.artifacts.node_executions
+                if node.kind in _GRAPH_EXECUTION_NODE_KINDS
+            ),
+            default=0,
+        )
 
     def _refresh_review_summary(self, run: WorkflowRun) -> WorkflowReviewSummary:
         policy = self._loop_policy()
@@ -623,10 +892,12 @@ class WorkflowService:
             run.artifacts.review_summary = review_summary
             return review_summary
 
+        latest_iteration = self._latest_graph_iteration(run)
         authoring_nodes = [
             node
             for node in run.artifacts.node_executions
-            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.authoring_repair}
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.authoring_tests, WorkflowNodeKind.authoring_repair}
+            and (latest_iteration == 0 or node.iteration == latest_iteration)
         ]
         reviewer_nodes = [
             node
@@ -638,12 +909,13 @@ class WorkflowService:
                 WorkflowNodeKind.reviewer_pedagogy,
                 WorkflowNodeKind.reviewer_tests,
             }
+            and (latest_iteration == 0 or node.iteration == latest_iteration)
         ]
 
         authoring_summary = self._phase_summary(authoring_nodes, policy.max_authoring_attempts)
         reviewer_summary = self._phase_summary(reviewer_nodes, policy.max_reviewer_attempts)
         validation = run.artifacts.validation_summary or {}
-        valid = validation.get("valid", True)
+        valid = validation.get("valid", False)
 
         reviewer_kinds = (
             WorkflowNodeKind.reviewer_runtime,
@@ -652,7 +924,14 @@ class WorkflowService:
             WorkflowNodeKind.reviewer_tests,
         )
         authoring_runtime = self._node_by_kind(run, WorkflowNodeKind.authoring_runtime)
-        authoring_passed = authoring_runtime is not None and authoring_runtime.status == WorkflowNodeStatus.passed
+        authoring_tests = self._node_by_kind(run, WorkflowNodeKind.authoring_tests)
+        authoring_passed = (
+            run.artifacts.workspace_snapshot is not None
+            and authoring_runtime is not None
+            and authoring_runtime.status == WorkflowNodeStatus.passed
+            and authoring_tests is not None
+            and authoring_tests.status == WorkflowNodeStatus.passed
+        )
         reviewer_passed = all(
             (node := self._node_by_kind(run, kind)) is not None and node.status == WorkflowNodeStatus.passed
             for kind in reviewer_kinds
@@ -663,16 +942,30 @@ class WorkflowService:
             blockers.append("Spec validation is still failing.")
         if not authoring_passed:
             if authoring_summary.exhausted:
-                blockers.append(
-                    f"Authoring loop exhausted after {authoring_summary.attempts_used}/{authoring_summary.max_attempts} attempts."
-                )
+                if (
+                    authoring_summary.latest_node_kind == WorkflowNodeKind.authoring_repair
+                    and authoring_summary.latest_status == WorkflowNodeStatus.failed
+                    and authoring_nodes
+                ):
+                    blockers.append(authoring_nodes[-1].summary)
+                else:
+                    blockers.append(
+                        f"Authoring loop exhausted after {authoring_summary.attempts_used}/{authoring_summary.max_attempts} attempts."
+                    )
             else:
                 blockers.append("Authoring runtime verification has not passed yet.")
         if authoring_passed and not reviewer_passed:
             if reviewer_summary.exhausted:
-                blockers.append(
-                    f"Reviewer loop exhausted after {reviewer_summary.attempts_used}/{reviewer_summary.max_attempts} attempts."
-                )
+                if (
+                    reviewer_summary.latest_node_kind == WorkflowNodeKind.reviewer_repair
+                    and reviewer_summary.latest_status == WorkflowNodeStatus.failed
+                    and reviewer_nodes
+                ):
+                    blockers.append(reviewer_nodes[-1].summary)
+                else:
+                    blockers.append(
+                        f"Reviewer loop exhausted after {reviewer_summary.attempts_used}/{reviewer_summary.max_attempts} attempts."
+                    )
             else:
                 blockers.append("Reviewer nodes have not all passed yet.")
 
@@ -706,7 +999,11 @@ class WorkflowService:
         attempts_used = max(node.attempt for node in nodes)
         passed = latest.status == WorkflowNodeStatus.passed
         remaining = max(max_attempts - attempts_used, 0)
-        exhausted = not passed and attempts_used >= max_attempts
+        stopped_early = latest.kind in {
+            WorkflowNodeKind.authoring_repair,
+            WorkflowNodeKind.reviewer_repair,
+        } and latest.status == WorkflowNodeStatus.failed
+        exhausted = not passed and (attempts_used >= max_attempts or stopped_early)
         return WorkflowLoopPhaseSummary(
             attempts_used=attempts_used,
             max_attempts=max_attempts,

@@ -27,6 +27,7 @@ class DeliverableSandboxReport(BaseModel):
     deliverable_id: str
     compile_succeeded: bool
     runtime_succeeded: bool
+    public_checks_passed: bool | None = None
     health_status_code: int | None = None
     stdout: str = ""
     stderr: str = ""

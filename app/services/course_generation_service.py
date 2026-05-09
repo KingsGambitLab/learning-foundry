@@ -37,8 +37,8 @@ from app.domain.task_agent import (
     RetrievalMode,
     WorkspaceScope,
 )
-from app.domain.workflow import DecisionOutcome, GateDecisionRequest
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
+from app.services.coursegen_logging import coursegen_log_path, log_coursegen_event
 from app.services.course_workflow_service import CourseWorkflowService
 from app.services.openai_course_planner import (
     OpenAICourseGenerationError,
@@ -390,7 +390,20 @@ class CourseGenerationService:
         request: GenerateCourseFromBriefRequest,
     ) -> None:
         try:
+            log_coursegen_event(
+                "course_generation_job_started",
+                course_run_id=course_run_id,
+                mode="brief",
+                goal=request.goal,
+                log_path=str(coursegen_log_path()),
+            )
             normalized_plan, source, status, usage = self._generate_normalized_plan(request)
+            log_coursegen_event(
+                "course_generation_plan_ready",
+                course_run_id=course_run_id,
+                source=source.value,
+                deliverable_count=len(normalized_plan.deliverables),
+            )
             built = self.course_workflow_service.apply_generated_plan(
                 course_run_id,
                 plan=normalized_plan,
@@ -400,6 +413,13 @@ class CourseGenerationService:
                 execute_shared_workflow_nodes=False,
                 clear_active_operation=False,
             )
+            log_coursegen_event(
+                "course_generation_plan_applied",
+                course_run_id=built.id,
+                shared_workflow_run_id=built.shared_workflow_run_id,
+                stage=built.stage.value,
+                status=built.status.value,
+            )
             self._finalize_background_generation(
                 built.id,
                 generation_status=status,
@@ -407,6 +427,12 @@ class CourseGenerationService:
             )
         except Exception as exc:
             status = self.live_planner.status()
+            log_coursegen_event(
+                "course_generation_job_failed",
+                course_run_id=course_run_id,
+                mode="brief",
+                error=str(exc),
+            )
             self.course_workflow_service.mark_generation_failed(
                 course_run_id,
                 error=str(exc),
@@ -420,19 +446,49 @@ class CourseGenerationService:
     ) -> None:
         try:
             plan = request.plan
+            log_coursegen_event(
+                "course_generation_job_started",
+                course_run_id=course_run_id,
+                mode="creator_plan",
+                goal=plan.goal,
+                deliverable_count=len(plan.deliverables),
+                log_path=str(coursegen_log_path()),
+            )
+            log_coursegen_event(
+                "course_generation_creator_plan_compilation_started",
+                course_run_id=course_run_id,
+                goal=plan.goal,
+                deliverable_count=len(plan.deliverables),
+            )
+            generated_plan = self._generated_plan_from_creator_plan(plan)
+            log_coursegen_event(
+                "course_generation_creator_plan_compilation_completed",
+                course_run_id=course_run_id,
+                deliverable_count=len(generated_plan.deliverables),
+                package_type=generated_plan.package_type.value,
+            )
+            log_coursegen_event(
+                "course_generation_apply_generated_plan_started",
+                course_run_id=course_run_id,
+                deliverable_count=len(generated_plan.deliverables),
+            )
             built = self.course_workflow_service.apply_generated_plan(
                 course_run_id,
-                plan=self._generated_plan_from_creator_plan(plan),
+                plan=generated_plan,
                 source=CourseGenerationSource.deterministic_fallback,
                 generation_status=self.live_planner.status(),
                 execute_shared_workflow_nodes=False,
                 clear_active_operation=False,
             )
+            log_coursegen_event(
+                "course_generation_plan_applied",
+                course_run_id=built.id,
+                shared_workflow_run_id=built.shared_workflow_run_id,
+                stage=built.stage.value,
+                status=built.status.value,
+            )
             if len(built.deliverables) == len(plan.deliverables):
                 for stored_deliverable, planned_deliverable in zip(built.deliverables, plan.deliverables, strict=False):
-                    stored_deliverable.title = planned_deliverable.title
-                    stored_deliverable.summary = planned_deliverable.summary
-                    stored_deliverable.learning_outcomes = list(planned_deliverable.learning_outcomes)
                     stored_deliverable.notes = list(
                         dict.fromkeys(
                             [
@@ -472,6 +528,12 @@ class CourseGenerationService:
                 completion_message="Draft finished building from the approved creator plan.",
             )
         except Exception as exc:
+            log_coursegen_event(
+                "course_generation_job_failed",
+                course_run_id=course_run_id,
+                mode="creator_plan",
+                error=str(exc),
+            )
             self.course_workflow_service.mark_generation_failed(
                 course_run_id,
                 error=str(exc),
@@ -489,24 +551,29 @@ class CourseGenerationService:
         if course_run is None:
             raise KeyError(course_run_id)
         if course_run.shared_workflow_run_id is not None:
-            workflow_run = self.course_workflow_service.workflow_service.execute_langgraph_nodes(
-                course_run.shared_workflow_run_id
+            log_coursegen_event(
+                "course_generation_workflow_execution_started",
+                course_run_id=course_run.id,
+                shared_workflow_run_id=course_run.shared_workflow_run_id,
             )
-            while workflow_run.pending_gate is not None:
-                workflow_run = self.course_workflow_service.workflow_service.apply_gate_decision(
-                    workflow_run.id,
-                    GateDecisionRequest(
-                        gate=workflow_run.pending_gate,
-                        decision=DecisionOutcome.approve,
-                        comment="Auto-approved by the default creator-flow setting.",
-                    ),
+            if self.course_workflow_service.workflow_service.node_runtime is not None:
+                self.course_workflow_service.workflow_service.execute_langgraph_nodes(
+                    course_run.shared_workflow_run_id
                 )
             course_run = self.course_workflow_service.sync_run(course_run.id)
+            log_coursegen_event(
+                "course_generation_workflow_execution_completed",
+                course_run_id=course_run.id,
+                shared_workflow_run_id=course_run.shared_workflow_run_id,
+                stage=course_run.stage.value,
+                status=course_run.status.value,
+            )
         course_run.active_operation = None
         course_run.updated_at = datetime.now(UTC)
         course_run.generation_status = generation_status
         course_run.last_error = None
         self.course_workflow_service.store.save_course_run(course_run)
+        course_run = self.course_workflow_service.sync_run(course_run.id)
         self.course_workflow_service.store.append_course_event(
             course_run.id,
             "course_generation_completed",
@@ -515,6 +582,13 @@ class CourseGenerationService:
                 "deliverable_count": len(course_run.deliverables),
                 "shared_workflow_run_id": course_run.shared_workflow_run_id,
             },
+        )
+        log_coursegen_event(
+            "course_generation_job_completed",
+            course_run_id=course_run.id,
+            stage=course_run.stage.value,
+            status=course_run.status.value,
+            shared_workflow_run_id=course_run.shared_workflow_run_id,
         )
 
     def _generate_normalized_plan(

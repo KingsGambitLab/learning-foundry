@@ -21,7 +21,7 @@ from app.services.learner_brief_builder import (
     render_learner_deliverable_markdown,
     render_learner_starter_readme,
 )
-from app.services.task_agent_starter_templates import task_agent_starter_relative_paths
+from app.services.task_agent_starter_templates import default_preview_command, task_agent_starter_relative_paths
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -132,6 +132,8 @@ class PublishSnapshotService:
             starter_readme = self._learner_starter_readme(
                 spec=spec,
                 course_deliverable_title=course_deliverable.title,
+                course_deliverable_summary=course_deliverable.summary,
+                learning_outcomes=list(course_deliverable.learning_outcomes),
                 learner_brief=learner_brief,
                 public_checks=public_checks,
             )
@@ -235,14 +237,18 @@ class PublishSnapshotService:
         *,
         spec,
         course_deliverable_title: str,
+        course_deliverable_summary: str,
+        learning_outcomes: list[str],
         learner_brief,
         public_checks,
     ) -> str:
         return render_learner_starter_readme(
             title=course_deliverable_title,
             brief=learner_brief,
+            summary=course_deliverable_summary,
+            learning_outcomes=learning_outcomes,
             visible_check_command=spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
-            preview_command=spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}",
+            preview_command=spec.runtime_dependencies.preview_command or default_preview_command(spec, host="127.0.0.1"),
             public_checks=public_checks,
         )
 
@@ -255,11 +261,7 @@ class PublishSnapshotService:
         content_markdown: str,
         starter_readme: str,
     ) -> list[LearnerPackageFile]:
-        seed_files: list[LearnerPackageFile] = [
-            self._read_seed_file(workflow_run_id, "runtime/__init__.py", "public/runtime/__init__.py"),
-            self._read_seed_file(workflow_run_id, "runtime/task_agent_runtime.py", "public/runtime/task_agent_runtime.py"),
-            self._read_seed_file(workflow_run_id, "runtime/requirements.txt", "public/runtime/requirements.txt"),
-        ]
+        seed_files: list[LearnerPackageFile] = []
         if spec_deliverable_id is None:
             return seed_files
         seed_files[:0] = [

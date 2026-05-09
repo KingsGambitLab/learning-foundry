@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -17,26 +19,34 @@ from app.domain.workflow import (
     WorkflowNodeStatus,
     WorkflowRun,
 )
+from app.services.coursegen_logging import log_coursegen_event
+from app.services.bundle_validation import inspect_materialized_starter_surface, validate_materialized_bundle
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.failure_context_builder import build_failure_context
-from app.services.grader_planner import build_all_task_agent_review_area_plans
-from app.services.review_area_coverage import summarize_review_area_hidden_coverage
+from app.services.generated_test_harness import GeneratedTestBaselineVerifier
+from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringService
+from app.services.public_surface_quality import starter_surface_markers
 from app.services.spec_validation import validate_task_agent_spec
+from app.services.task_agent_retry_service import TaskAgentRetryService
 from app.services.task_agent_repair_service import TaskAgentRepairService
+from app.services.task_agent_starter_templates import HIDDEN_GRADER_SCRIPT_PATH, HIDDEN_MANIFEST_PATH
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
 
 
-AuthoringRoute = Literal["authoring_repair", "reviewer_runtime", "end"]
-ReviewerRoute = Literal["reviewer_repair", "authoring_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
+AuthoringRoute = Literal["authoring_repair", "authoring_tests", "reviewer_runtime", "end"]
+ReviewerRoute = Literal["reviewer_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
+RetryRoute = Literal["authoring_runtime", "authoring_tests", "reviewer_tests", "end"]
 _UNSET = object()
 
 
 class AssignmentGraphState(TypedDict):
     run: WorkflowRun
     node_executions: list[WorkflowNodeExecution]
+    active_iteration: int
     authoring_attempt: int
     reviewer_attempt: int
     cached_sandbox_result: SandboxExecutionResult | None
+    next_retry_node: str | None
 
 
 class LangGraphAssignmentGraph:
@@ -46,12 +56,22 @@ class LangGraphAssignmentGraph:
         *,
         repair_service: TaskAgentRepairService | None = None,
         workspace_authoring_service: TaskAgentWorkspaceAuthoringService | None = None,
+        authoring_service=None,
+        test_authoring_service: OpenAITestScriptAuthoringService | None = None,
+        retry_service: TaskAgentRetryService | None = None,
+        baseline_verifier: GeneratedTestBaselineVerifier | None = None,
         max_authoring_attempts: int = 3,
         max_reviewer_attempts: int = 2,
     ) -> None:
         self.sandbox_runner = sandbox_runner
         self.repair_service = repair_service or TaskAgentRepairService()
         self.workspace_authoring_service = workspace_authoring_service or TaskAgentWorkspaceAuthoringService()
+        self.test_authoring_service = test_authoring_service or OpenAITestScriptAuthoringService(enabled=False)
+        self.retry_service = retry_service or TaskAgentRetryService(
+            authoring_service=authoring_service,
+            workspace_authoring_service=self.workspace_authoring_service,
+        )
+        self.baseline_verifier = baseline_verifier or GeneratedTestBaselineVerifier()
         self.max_authoring_attempts = max_authoring_attempts
         self.max_reviewer_attempts = max_reviewer_attempts
         self.graph = self._build_graph().compile()
@@ -65,24 +85,49 @@ class LangGraphAssignmentGraph:
             max_reviewer_attempts=self.max_reviewer_attempts,
         )
 
-    def execute(self, run: WorkflowRun) -> WorkflowRun:
+    def execute(
+        self,
+        run: WorkflowRun,
+        *,
+        on_node_started: Callable[[WorkflowRun, WorkflowNodeKind, int], None] | None = None,
+        on_node_finished: Callable[[WorkflowRun, WorkflowNodeExecution], None] | None = None,
+    ) -> WorkflowRun:
         if run.artifacts.task_agent_spec is None:
             return run
+        existing_executions = [
+            node.model_copy(deep=True)
+            for node in run.artifacts.node_executions
+        ]
         state: AssignmentGraphState = {
             "run": run.model_copy(deep=True),
-            "node_executions": [],
+            "node_executions": existing_executions,
+            "active_iteration": max(
+                (node.iteration for node in existing_executions),
+                default=0,
+            )
+            + 1,
             "authoring_attempt": 0,
             "reviewer_attempt": 0,
             "cached_sandbox_result": None,
+            "next_retry_node": None,
         }
-        result = self.graph.invoke(state)
-        updated_run = result["run"]
-        updated_run.artifacts.node_executions = result["node_executions"]
-        return updated_run
+        current_node = "authoring_runtime"
+        while current_node is not None:
+            kind = self._kind_for_node_name(current_node)
+            attempt = self._planned_attempt(current_node, state)
+            if on_node_started is not None:
+                on_node_started(self._run_snapshot(state), kind, attempt)
+            state = self._invoke_node(current_node, state)
+            latest = state["node_executions"][-1]
+            if on_node_finished is not None:
+                on_node_finished(self._run_snapshot(state), latest)
+            current_node = self._next_node(current_node, state)
+        return self._run_snapshot(state)
 
     def _build_graph(self) -> StateGraph:
         graph = StateGraph(AssignmentGraphState)
         graph.add_node("authoring_runtime", self._authoring_runtime_node)
+        graph.add_node("authoring_tests", self._authoring_tests_node)
         graph.add_node("authoring_repair", self._authoring_repair_node)
         graph.add_node("reviewer_runtime", self._reviewer_runtime_node)
         graph.add_node("reviewer_repair", self._reviewer_repair_node)
@@ -96,11 +141,29 @@ class LangGraphAssignmentGraph:
             self._after_authoring_runtime,
             {
                 "authoring_repair": "authoring_repair",
+                "authoring_tests": "authoring_tests",
                 "reviewer_runtime": "reviewer_runtime",
                 "end": END,
             },
         )
-        graph.add_edge("authoring_repair", "authoring_runtime")
+        graph.add_conditional_edges(
+            "authoring_tests",
+            self._after_authoring_tests,
+            {
+                "authoring_repair": "authoring_repair",
+                "reviewer_runtime": "reviewer_runtime",
+                "end": END,
+            },
+        )
+        graph.add_conditional_edges(
+            "authoring_repair",
+            self._after_authoring_repair,
+            {
+                "authoring_runtime": "authoring_runtime",
+                "authoring_tests": "authoring_tests",
+                "end": END,
+            },
+        )
 
         graph.add_conditional_edges(
             "reviewer_runtime",
@@ -116,7 +179,6 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_code,
             {
                 "reviewer_repair": "reviewer_repair",
-                "authoring_repair": "authoring_repair",
                 "reviewer_pedagogy": "reviewer_pedagogy",
                 "end": END,
             },
@@ -126,7 +188,6 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_pedagogy,
             {
                 "reviewer_repair": "reviewer_repair",
-                "authoring_repair": "authoring_repair",
                 "reviewer_tests": "reviewer_tests",
                 "end": END,
             },
@@ -136,14 +197,82 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_tests,
             {
                 "reviewer_repair": "reviewer_repair",
-                "authoring_repair": "authoring_repair",
                 "end": END,
             },
         )
-        graph.add_edge("reviewer_repair", "reviewer_runtime")
+        graph.add_conditional_edges(
+            "reviewer_repair",
+            self._after_reviewer_repair,
+            {
+                "authoring_runtime": "authoring_runtime",
+                "reviewer_tests": "reviewer_tests",
+                "end": END,
+            },
+        )
         return graph
 
+    def _invoke_node(self, node_name: str, state: AssignmentGraphState) -> AssignmentGraphState:
+        node_map = {
+            "authoring_runtime": self._authoring_runtime_node,
+            "authoring_tests": self._authoring_tests_node,
+            "authoring_repair": self._authoring_repair_node,
+            "reviewer_runtime": self._reviewer_runtime_node,
+            "reviewer_repair": self._reviewer_repair_node,
+            "reviewer_code": self._reviewer_code_node,
+            "reviewer_pedagogy": self._reviewer_pedagogy_node,
+            "reviewer_tests": self._reviewer_tests_node,
+        }
+        return node_map[node_name](state)
+
+    def _next_node(self, node_name: str, state: AssignmentGraphState) -> str | None:
+        if node_name == "authoring_runtime":
+            route = self._after_authoring_runtime(state)
+        elif node_name == "authoring_tests":
+            route = self._after_authoring_tests(state)
+        elif node_name == "authoring_repair":
+            route = self._after_authoring_repair(state)
+        elif node_name == "reviewer_runtime":
+            route = self._after_reviewer_runtime(state)
+        elif node_name == "reviewer_code":
+            route = self._after_reviewer_code(state)
+        elif node_name == "reviewer_pedagogy":
+            route = self._after_reviewer_pedagogy(state)
+        elif node_name == "reviewer_tests":
+            route = self._after_reviewer_tests(state)
+        elif node_name == "reviewer_repair":
+            route = self._after_reviewer_repair(state)
+        else:
+            raise KeyError(f"Unknown node '{node_name}'.")
+        return None if route == "end" else route
+
+    def _run_snapshot(self, state: AssignmentGraphState) -> WorkflowRun:
+        run = state["run"].model_copy(deep=True)
+        run.artifacts.node_executions = list(state["node_executions"])
+        return run
+
+    def _planned_attempt(self, node_name: str, state: AssignmentGraphState) -> int:
+        if node_name == "authoring_runtime":
+            return state["authoring_attempt"] + 1
+        if node_name == "authoring_tests":
+            return state["authoring_attempt"] or 1
+        if node_name == "authoring_repair":
+            return state["authoring_attempt"]
+        if node_name == "reviewer_runtime":
+            return state["reviewer_attempt"] + 1
+        return state["reviewer_attempt"]
+
+    def _kind_for_node_name(self, node_name: str) -> WorkflowNodeKind:
+        return WorkflowNodeKind(node_name)
+
     def _after_authoring_runtime(self, state: AssignmentGraphState) -> AuthoringRoute:
+        latest = state["node_executions"][-1]
+        if latest.status == WorkflowNodeStatus.passed:
+            return "authoring_tests"
+        if state["authoring_attempt"] < self.max_authoring_attempts:
+            return "authoring_repair"
+        return "end"
+
+    def _after_authoring_tests(self, state: AssignmentGraphState) -> AuthoringRoute:
         latest = state["node_executions"][-1]
         if latest.status == WorkflowNodeStatus.passed:
             return "reviewer_runtime"
@@ -188,48 +317,83 @@ class LangGraphAssignmentGraph:
         state: AssignmentGraphState,
         latest: WorkflowNodeExecution,
     ) -> ReviewerRoute:
-        if self._needs_structural_reauthoring(state, latest):
-            return "authoring_repair"
         return "reviewer_repair"
 
-    def _needs_structural_reauthoring(
-        self,
-        state: AssignmentGraphState,
-        latest: WorkflowNodeExecution,
-    ) -> bool:
-        failure_context = build_failure_context(state["run"], latest)
-        issue_codes = {issue.code for issue in failure_context.validation_issues}
-        structural_issue_codes = {
-            "missing_learner_starter_surface",
-            "missing_primary_editable_paths",
-            "missing_required_endpoints",
-            "brief_starter_surface_drift",
-        }
-        if issue_codes & structural_issue_codes:
-            return True
+    def _after_authoring_repair(self, state: AssignmentGraphState) -> RetryRoute:
+        latest = state["node_executions"][-1]
+        if latest.status == WorkflowNodeStatus.passed:
+            return state.get("next_retry_node") or "authoring_runtime"
+        return "end"
 
-        finding_text = " ".join(
-            f"{finding.title} {finding.detail}"
-            for finding in failure_context.findings
-        ).lower()
-        structural_phrases = (
-            "thin wrapper",
-            "placeholder starter endpoints remain",
-            "missing a starter surface",
-            "starter surface has no primary files",
-            "brief drifts from the starter surface",
-        )
-        return any(phrase in finding_text for phrase in structural_phrases)
+    def _after_reviewer_repair(self, state: AssignmentGraphState) -> RetryRoute:
+        latest = state["node_executions"][-1]
+        if latest.status == WorkflowNodeStatus.passed:
+            return state.get("next_retry_node") or "authoring_runtime"
+        return "end"
 
     def _authoring_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
-        run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])
+        attempt = state["authoring_attempt"] + 1
+        log_coursegen_event(
+            "authoring_runtime_workspace_authoring_started",
+            workflow_run_id=state["run"].id,
+            title=state["run"].title,
+            attempt=attempt,
+        )
+        try:
+            run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])
+        except Exception as exc:
+            log_coursegen_event(
+                "authoring_runtime_workspace_authoring_failed",
+                workflow_run_id=state["run"].id,
+                title=state["run"].title,
+                attempt=attempt,
+                error=str(exc),
+            )
+            raise
+        log_coursegen_event(
+            "authoring_runtime_workspace_authoring_completed",
+            workflow_run_id=run.id,
+            title=run.title,
+            attempt=attempt,
+            updated_file_count=len(authoring_result.updated_files),
+            updated_files=authoring_result.updated_files[:10],
+        )
         state_with_workspace = {
             **state,
             "run": run,
             "cached_sandbox_result": None,
         }
-        state_with_sandbox, sandbox_result = self._sandbox_result(state_with_workspace, force=True)
-        attempt = state["authoring_attempt"] + 1
+        log_coursegen_event(
+            "authoring_runtime_sandbox_started",
+            workflow_run_id=run.id,
+            title=run.title,
+            attempt=attempt,
+            workspace_root=(
+                run.artifacts.workspace_snapshot.root_dir
+                if run.artifacts.workspace_snapshot is not None
+                else None
+            ),
+        )
+        try:
+            state_with_sandbox, sandbox_result = self._sandbox_result(state_with_workspace, force=True)
+        except Exception as exc:
+            log_coursegen_event(
+                "authoring_runtime_sandbox_failed",
+                workflow_run_id=run.id,
+                title=run.title,
+                attempt=attempt,
+                error=str(exc),
+            )
+            raise
+        log_coursegen_event(
+            "authoring_runtime_sandbox_completed",
+            workflow_run_id=run.id,
+            title=run.title,
+            attempt=attempt,
+            sandbox_status=sandbox_result.status.value,
+            deliverable_report_count=len(sandbox_result.deliverable_reports),
+            duration_ms=sandbox_result.duration_ms,
+        )
         findings: list[ReviewerFinding] = [
             ReviewerFinding(
                 category="authoring_runtime",
@@ -274,44 +438,132 @@ class LangGraphAssignmentGraph:
             cached_sandbox_result=sandbox_result,
         )
 
+    def _authoring_tests_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
+        attempt = state["authoring_attempt"] or 1
+        try:
+            run, test_result = self.test_authoring_service.author_workspace_tests(state["run"])
+        except Exception as exc:
+            return self._append_node(
+                state,
+                kind=WorkflowNodeKind.authoring_tests,
+                attempt=attempt,
+                status=WorkflowNodeStatus.failed,
+                summary="Authoring tests failed to generate learner-visible and hidden scripts.",
+                findings=[
+                    ReviewerFinding(
+                        category="test_authoring",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Generated test scripts could not be authored",
+                        detail=str(exc),
+                        code="generated_test_authoring_failed",
+                    )
+                ],
+                sandbox_result=None,
+                authoring_attempt=attempt,
+                cached_sandbox_result=state.get("cached_sandbox_result"),
+                next_retry_node=None,
+            )
+
+        findings: list[ReviewerFinding] = []
+        status = WorkflowNodeStatus.passed
+        workspace = run.artifacts.workspace_snapshot
+        if workspace is None:
+            status = WorkflowNodeStatus.failed
+            findings.append(
+                ReviewerFinding(
+                    category="test_authoring",
+                    severity=ReviewerFindingSeverity.error,
+                    title="Workspace missing for generated tests",
+                    detail="Test authoring needs a materialized learner workspace before it can write scripts.",
+                    code="generated_test_workspace_missing",
+                )
+            )
+        else:
+            public_dir = Path(workspace.public_dir)
+            for deliverable in run.artifacts.task_agent_spec.deliverables:  # type: ignore[union-attr]
+                starter_root = public_dir / "starter" / deliverable.id
+                visible_path = starter_root / "checks" / "run_visible_checks.py"
+                hidden_path = starter_root / HIDDEN_GRADER_SCRIPT_PATH
+                if not visible_path.exists() or not hidden_path.exists():
+                    status = WorkflowNodeStatus.failed
+                    findings.append(
+                        ReviewerFinding(
+                            category="test_authoring",
+                            severity=ReviewerFindingSeverity.error,
+                            title=f"Generated tests missing for {deliverable.id}",
+                            detail="Both visible and hidden test scripts must exist in the materialized starter workspace.",
+                            code="generated_test_scripts_missing",
+                            location=f"starter/{deliverable.id}",
+                        )
+                    )
+            if status == WorkflowNodeStatus.passed:
+                findings.append(
+                    ReviewerFinding(
+                        category="test_authoring",
+                        severity=ReviewerFindingSeverity.info,
+                        title="Generated test scripts materialized",
+                        detail=test_result.message,
+                    )
+                )
+                if not test_result.available:
+                    findings.append(
+                        ReviewerFinding(
+                            category="test_authoring",
+                            severity=ReviewerFindingSeverity.warning,
+                            title="Generated tests stayed on the existing workspace scripts",
+                            detail=test_result.message,
+                            code="generated_test_authoring_unavailable",
+                        )
+                    )
+
+        return self._append_node(
+            {**state, "run": run},
+            kind=WorkflowNodeKind.authoring_tests,
+            attempt=attempt,
+            status=status,
+            summary="Authoring tests generated runnable visible and hidden scripts against the materialized starter workspace.",
+            findings=findings,
+            sandbox_result=None,
+            authoring_attempt=state["authoring_attempt"] or attempt,
+            cached_sandbox_result=state.get("cached_sandbox_result"),
+            next_retry_node=None,
+        )
+
     def _authoring_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         latest = state["node_executions"][-1]
         failure_context = build_failure_context(state["run"], latest)
-        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(
+        if latest.kind == WorkflowNodeKind.authoring_tests:
+            return self._repair_generated_tests(
+                state,
+                latest=latest,
+                failure_context=failure_context,
+                kind=WorkflowNodeKind.authoring_repair,
+                attempt=state["authoring_attempt"],
+                next_retry_node="authoring_tests",
+            )
+        run, retry_result = self.retry_service.retry(
             state["run"],
             latest,
             failure_context=failure_context,
         )
-        run, spec_repaired, spec_message = self.repair_service.apply(
-            run,
-            latest,
-            failure_context=failure_context,
-        )
-        if spec_repaired:
-            run = self.workspace_authoring_service.sync_workspace(run)
-        repaired = workspace_repaired or spec_repaired
-        status = WorkflowNodeStatus.passed if repaired else WorkflowNodeStatus.failed
-        detail_lines = []
-        if workspace_message:
-            detail_lines.append(workspace_message)
-        if spec_message and spec_message != workspace_message:
-            detail_lines.append(spec_message)
+        status = WorkflowNodeStatus.passed if retry_result.should_continue else WorkflowNodeStatus.failed
         return self._append_node(
             {**state, "run": run},
             kind=WorkflowNodeKind.authoring_repair,
             attempt=state["authoring_attempt"],
             status=status,
-            summary=f"Authoring repair {'applied' if repaired else 'could not repair'} after runtime failure.",
+            summary=retry_result.summary,
             findings=[
                 ReviewerFinding(
                     category="authoring_repair",
-                    severity=ReviewerFindingSeverity.info if repaired else ReviewerFindingSeverity.error,
-                    title="Authoring repair step",
-                    detail=" ".join(detail_lines) if detail_lines else "No repair detail was available.",
+                    severity=ReviewerFindingSeverity.info if retry_result.should_continue else ReviewerFindingSeverity.error,
+                    title="Retry decision",
+                    detail=retry_result.detail,
                 )
             ],
-            sandbox_result=latest.sandbox_result,
+            sandbox_result=None,
             cached_sandbox_result=None,
+            next_retry_node="authoring_runtime" if retry_result.should_continue else None,
         )
 
     def _reviewer_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
@@ -341,6 +593,23 @@ class LangGraphAssignmentGraph:
                     detail=f"Verified {len(sandbox_result.deliverable_reports)} deliverable starter(s) in Docker.",
                 )
             )
+            starter_check_gaps = [
+                report.deliverable_id
+                for report in sandbox_result.deliverable_reports
+                if report.runtime_succeeded and report.public_checks_passed is False
+            ]
+            if starter_check_gaps:
+                findings.append(
+                    ReviewerFinding(
+                        category="runtime_review",
+                        severity=ReviewerFindingSeverity.info,
+                        title="Starter still leaves visible work for the learner",
+                        detail=(
+                            "The starter keeps the public contract stable in Docker, but visible checks still fail for: "
+                            + ", ".join(starter_check_gaps)
+                        ),
+                    )
+                )
 
         return self._append_node(
             state,
@@ -357,42 +626,242 @@ class LangGraphAssignmentGraph:
     def _reviewer_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         latest = state["node_executions"][-1]
         failure_context = build_failure_context(state["run"], latest)
-        run, workspace_repaired, workspace_message = self.workspace_authoring_service.repair_workspace(
+        if latest.kind == WorkflowNodeKind.reviewer_tests:
+            return self._repair_generated_tests(
+                state,
+                latest=latest,
+                failure_context=failure_context,
+                kind=WorkflowNodeKind.reviewer_repair,
+                attempt=state["reviewer_attempt"],
+                next_retry_node="reviewer_tests",
+            )
+        run, retry_result = self.retry_service.retry(
             state["run"],
             latest,
             failure_context=failure_context,
         )
-        run, spec_repaired, spec_message = self.repair_service.apply(
-            run,
-            latest,
-            failure_context=failure_context,
-        )
-        if spec_repaired:
-            run = self.workspace_authoring_service.sync_workspace(run)
-        repaired = workspace_repaired or spec_repaired
-        status = WorkflowNodeStatus.passed if repaired else WorkflowNodeStatus.failed
-        detail_lines = []
-        if workspace_message:
-            detail_lines.append(workspace_message)
-        if spec_message and spec_message != workspace_message:
-            detail_lines.append(spec_message)
+        status = WorkflowNodeStatus.passed if retry_result.should_continue else WorkflowNodeStatus.failed
         return self._append_node(
             {**state, "run": run},
             kind=WorkflowNodeKind.reviewer_repair,
             attempt=state["reviewer_attempt"],
             status=status,
-            summary=f"Reviewer repair {'applied' if repaired else 'could not repair'} the latest issue.",
+            summary=retry_result.summary,
             findings=[
                 ReviewerFinding(
                     category="reviewer_repair",
-                    severity=ReviewerFindingSeverity.info if repaired else ReviewerFindingSeverity.error,
-                    title="Reviewer repair step",
-                    detail=" ".join(detail_lines) if detail_lines else "No repair detail was available.",
+                    severity=ReviewerFindingSeverity.info if retry_result.should_continue else ReviewerFindingSeverity.error,
+                    title="Retry decision",
+                    detail=retry_result.detail,
                 )
             ],
-            sandbox_result=latest.sandbox_result,
+            sandbox_result=None,
             cached_sandbox_result=None,
+            next_retry_node="authoring_runtime" if retry_result.should_continue else None,
         )
+
+    def _repair_generated_tests(
+        self,
+        state: AssignmentGraphState,
+        *,
+        latest: WorkflowNodeExecution,
+        failure_context,
+        kind: WorkflowNodeKind,
+        attempt: int,
+        next_retry_node: str,
+    ) -> AssignmentGraphState:
+        deliverable_ids = self._target_deliverable_ids(state["run"], failure_context)
+        try:
+            run, test_result = self.test_authoring_service.author_workspace_tests(
+                state["run"],
+                failure_context=failure_context,
+                deliverable_ids=deliverable_ids or None,
+            )
+        except Exception as exc:
+            return self._append_node(
+                state,
+                kind=kind,
+                attempt=attempt,
+                status=WorkflowNodeStatus.failed,
+                summary="Repair could not regenerate the authored test scripts.",
+                findings=[
+                    ReviewerFinding(
+                        category="test_authoring",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Generated test repair failed",
+                        detail=str(exc),
+                        code="generated_test_repair_failed",
+                    )
+                ],
+                sandbox_result=None,
+                cached_sandbox_result=None,
+                next_retry_node=None,
+            )
+
+        should_continue = bool(test_result.updated_files) or test_result.available
+        unresolved = (
+            self._persisting_generated_test_blockers(
+                run=run,
+                failure_context=failure_context,
+                deliverable_ids=deliverable_ids,
+            )
+            if should_continue
+            else []
+        )
+        if unresolved:
+            should_continue = False
+        severity = ReviewerFindingSeverity.info if should_continue else ReviewerFindingSeverity.error
+        return self._append_node(
+            {**state, "run": run},
+            kind=kind,
+            attempt=attempt,
+            status=WorkflowNodeStatus.passed if should_continue else WorkflowNodeStatus.failed,
+            summary=(
+                "Repair regenerated learner-visible and hidden test scripts."
+                if should_continue
+                else (
+                    "Repair regenerated the test scripts, but the same blocking issues still remain."
+                    if unresolved
+                    else "Repair could not improve the generated test scripts."
+                )
+            ),
+            findings=[
+                ReviewerFinding(
+                    category="test_authoring",
+                    severity=severity,
+                    title="Generated test repair",
+                    detail=(
+                        test_result.message
+                        if not unresolved
+                        else test_result.message
+                        + " Unresolved blockers: "
+                        + ", ".join(
+                            f"{code} @ {location}" if location else code
+                            for code, location in unresolved[:5]
+                        )
+                    ),
+                    code=(
+                        None
+                        if should_continue
+                        else ("generated_test_repair_unresolved" if unresolved else "generated_test_repair_unavailable")
+                    ),
+                )
+            ],
+            sandbox_result=None,
+            cached_sandbox_result=None,
+            next_retry_node=next_retry_node if should_continue else None,
+        )
+
+    def _target_deliverable_ids(self, run: WorkflowRun, failure_context) -> list[str]:
+        spec = run.artifacts.task_agent_spec
+        if spec is None:
+            return []
+        known_ids = {deliverable.id for deliverable in spec.deliverables}
+        target_ids: set[str] = set()
+        if failure_context.sandbox is not None:
+            target_ids.update(
+                deliverable_id
+                for deliverable_id in failure_context.sandbox.failed_deliverables
+                if deliverable_id in known_ids
+            )
+        for finding in failure_context.findings:
+            location = (finding.location or "").replace("\\", "/")
+            for deliverable_id in known_ids:
+                if f"/{deliverable_id}/" in f"/{location}/":
+                    target_ids.add(deliverable_id)
+        return sorted(target_ids)
+
+    def _persisting_generated_test_blockers(
+        self,
+        *,
+        run: WorkflowRun,
+        failure_context,
+        deliverable_ids: list[str],
+    ) -> list[tuple[str, str | None]]:
+        prior_blockers = self._blocking_issue_keys(failure_context.findings, failure_context.validation_issues)
+        if not prior_blockers:
+            return []
+
+        current_blockers = self._current_generated_test_blockers(
+            run=run,
+            deliverable_ids=deliverable_ids,
+        )
+        unresolved: list[tuple[str, str | None]] = []
+        for prior_code, prior_location in sorted(prior_blockers):
+            for current_code, current_location in current_blockers:
+                if prior_code != current_code:
+                    continue
+                if prior_location is not None and current_location != prior_location:
+                    continue
+                unresolved.append((current_code, current_location))
+                break
+        return unresolved
+
+    def _current_generated_test_blockers(
+        self,
+        *,
+        run: WorkflowRun,
+        deliverable_ids: list[str],
+    ) -> set[tuple[str, str | None]]:
+        spec = run.artifacts.task_agent_spec
+        workspace = run.artifacts.workspace_snapshot
+        if spec is None or workspace is None:
+            return {("generated_test_workspace_missing", None)}
+
+        public_dir = Path(workspace.public_dir)
+        known_ids = {deliverable.id for deliverable in spec.deliverables}
+        target_ids = set(deliverable_ids) & known_ids if deliverable_ids else known_ids
+        blockers: set[tuple[str, str | None]] = set()
+        for deliverable in spec.deliverables:
+            if deliverable.id not in target_ids:
+                continue
+            deliverable_dir = public_dir / "starter" / deliverable.id
+            manifest_path = deliverable_dir / HIDDEN_MANIFEST_PATH
+            visible_check_path = deliverable_dir / "checks" / "run_visible_checks.py"
+            hidden_check_path = deliverable_dir / HIDDEN_GRADER_SCRIPT_PATH
+            if not manifest_path.exists():
+                blockers.add(("generated_test_manifest_missing", f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}"))
+                continue
+            if not visible_check_path.exists() or not hidden_check_path.exists():
+                blockers.add(("generated_test_scripts_missing", f"starter/{deliverable.id}"))
+                continue
+
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            generated_test_scripts = manifest_payload.get("generated_test_scripts") or {}
+            generated_test_source = str(generated_test_scripts.get("source") or "").strip().lower()
+            if generated_test_source in {"", "starter_default"}:
+                blockers.add(("generated_test_scripts_not_authored", f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}"))
+
+            baseline = self.baseline_verifier.verify_deliverable(
+                workspace_root=deliverable_dir,
+                spec=spec,
+                starter_type=deliverable.starter_type,
+            )
+            blockers.update(
+                (issue.code, issue.relative_path or f"starter/{deliverable.id}")
+                for issue in baseline.errors
+            )
+        return blockers
+
+    def _blocking_issue_keys(
+        self,
+        findings,
+        validation_issues,
+    ) -> set[tuple[str, str | None]]:
+        keys: set[tuple[str, str | None]] = set()
+        for issue in validation_issues:
+            keys.add((issue.code, issue.location or None))
+        for finding in findings:
+            if finding.severity != ReviewerFindingSeverity.error:
+                continue
+            code = finding.code or self._normalize_finding_code(finding.title)
+            if code:
+                keys.add((code, finding.location or None))
+        return keys
+
+    def _normalize_finding_code(self, title: str) -> str | None:
+        normalized = re.sub(r"[^a-z0-9]+", "_", title.strip().lower()).strip("_")
+        return normalized or None
 
     def _reviewer_code_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         state, sandbox_result = self._sandbox_result(state)
@@ -451,6 +920,8 @@ class LangGraphAssignmentGraph:
                         title="Placeholder starter endpoints remain",
                         detail="The workspace still contains placeholder starter code for: "
                         + ", ".join(placeholder_deliverables),
+                        code="placeholder_starter_endpoints_remain",
+                        location="starter",
                     )
                 )
             if wrapper_deliverables:
@@ -463,6 +934,8 @@ class LangGraphAssignmentGraph:
                             "The learner-owned files should contain the real application flow, not just import a generated "
                             "runtime wrapper. Affected review areas: " + ", ".join(wrapper_deliverables)
                         ),
+                        code="starter_surface_thin_wrapper",
+                        location="starter",
                     )
                 )
             if not placeholder_deliverables and not wrapper_deliverables:
@@ -474,24 +947,37 @@ class LangGraphAssignmentGraph:
                         detail="The workspace starter files expose substantive learner-owned entrypoints instead of placeholder handlers or thin runtime wrappers.",
                     )
                 )
-        if spec.production_contract.supports_dry_run:
-            findings.append(
-                ReviewerFinding(
-                    category="code_review",
-                    severity=ReviewerFindingSeverity.info,
-                    title="Dry-run contract preserved",
-                    detail="The production contract keeps dry-run support visible in the generated assignment.",
+            starter_surface_review = inspect_materialized_starter_surface(spec, state["run"].artifacts.workspace_snapshot)
+            for issue in starter_surface_review.errors:
+                findings.append(
+                    ReviewerFinding(
+                        category="code_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=issue.code,
+                        detail=issue.message,
+                        code=issue.code,
+                        location=issue.relative_path,
+                    )
                 )
-            )
-        if any(tool.safety.value == "irreversible" and not tool.approval_required for tool in spec.tool_registry.tools):
-            findings.append(
-                ReviewerFinding(
-                    category="code_review",
-                    severity=ReviewerFindingSeverity.error,
-                    title="Irreversible tool without approval",
-                    detail="At least one irreversible tool is missing an approval gate.",
+            for issue in starter_surface_review.warnings:
+                findings.append(
+                    ReviewerFinding(
+                        category="code_review",
+                        severity=ReviewerFindingSeverity.warning,
+                        title=issue.code,
+                        detail=issue.message,
+                        code=issue.code,
+                        location=issue.relative_path,
+                    )
                 )
+        findings.append(
+            ReviewerFinding(
+                category="code_review",
+                severity=ReviewerFindingSeverity.info,
+                title="Starter surface reviewed as real application code",
+                detail="Reviewer code is checking the learner-owned entrypoint directly instead of an internal workflow simulator.",
             )
+        )
 
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or any(
@@ -506,7 +992,7 @@ class LangGraphAssignmentGraph:
             status=status,
             summary="Reviewer code node checked starter project shape, safety rails, and Docker execution.",
             findings=findings,
-            sandbox_result=sandbox_result,
+            sandbox_result=None,
             cached_sandbox_result=sandbox_result,
         )
 
@@ -514,6 +1000,7 @@ class LangGraphAssignmentGraph:
         state, sandbox_result = self._sandbox_result(state)
         spec = state["run"].artifacts.task_agent_spec
         assert spec is not None
+        workspace = state["run"].artifacts.workspace_snapshot
 
         findings: list[ReviewerFinding] = []
         deliverable_count = len(spec.deliverables)
@@ -598,7 +1085,7 @@ class LangGraphAssignmentGraph:
                     ]
                 ).lower()
                 for scenario in starter_surface.domain_scenarios
-                for phrase in ["routine case", "ambiguous or risky case", "placeholder"]
+                for phrase in ["routine case", "ambiguous or risky case", "placeholder", *starter_surface_markers()]
             ):
                 findings.append(
                     ReviewerFinding(
@@ -681,6 +1168,40 @@ class LangGraphAssignmentGraph:
                         )
                     )
 
+        if workspace is None:
+            findings.append(
+                ReviewerFinding(
+                    category="pedagogy_review",
+                    severity=ReviewerFindingSeverity.error,
+                    title="Learner bundle missing",
+                    detail="The materialized learner bundle is missing, so the public packaging could not be reviewed.",
+                )
+            )
+        else:
+            bundle_validation = validate_materialized_bundle(spec, workspace)
+            for issue in bundle_validation.errors:
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=issue.code,
+                        detail=issue.message,
+                        code=issue.code,
+                        location=issue.relative_path,
+                    )
+                )
+            for issue in bundle_validation.warnings:
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.warning,
+                        title=issue.code,
+                        detail=issue.message,
+                        code=issue.code,
+                        location=issue.relative_path,
+                    )
+                )
+
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or any(
             finding.severity == ReviewerFindingSeverity.error for finding in findings
@@ -694,7 +1215,7 @@ class LangGraphAssignmentGraph:
             status=status,
             summary="Reviewer pedagogy node checked the deliverable plan after verifying the assignment in Docker.",
             findings=findings,
-            sandbox_result=sandbox_result,
+            sandbox_result=None,
             cached_sandbox_result=sandbox_result,
         )
 
@@ -704,11 +1225,6 @@ class LangGraphAssignmentGraph:
         assert spec is not None
 
         validation = validate_task_agent_spec(spec)
-        grader_plans = build_all_task_agent_review_area_plans(spec)
-        hidden_coverage = {
-            summary.deliverable_id: summary
-            for summary in summarize_review_area_hidden_coverage(spec)
-        }
         findings: list[ReviewerFinding] = []
         learner_checks_valid = True
 
@@ -719,6 +1235,8 @@ class LangGraphAssignmentGraph:
                     severity=ReviewerFindingSeverity.error,
                     title=error.code,
                     detail=error.message,
+                    code=error.code,
+                    location=error.location,
                 )
                 for error in validation.errors
             )
@@ -729,21 +1247,6 @@ class LangGraphAssignmentGraph:
                     severity=ReviewerFindingSeverity.info,
                     title="Spec validation passed",
                     detail="The assignment spec passed deterministic validation before review.",
-                )
-            )
-
-        for plan in grader_plans.deliverable_plans:
-            coverage = hidden_coverage.get(plan.deliverable_id)
-            hidden_case_count = len(coverage.hidden_case_ids) if coverage is not None else 0
-            findings.append(
-                ReviewerFinding(
-                    category="tests_review",
-                    severity=ReviewerFindingSeverity.info,
-                    title=f"Hidden grader coverage ready for {plan.deliverable_id}",
-                    detail=(
-                        f"This review area activates {plan.total_tests} hidden test(s) across "
-                        f"{hidden_case_count} tagged eval case(s)."
-                    ),
                 )
             )
 
@@ -762,12 +1265,13 @@ class LangGraphAssignmentGraph:
             public_dir = Path(workspace.public_dir)
             for deliverable in spec.deliverables:
                 deliverable_dir = public_dir / "starter" / deliverable.id
-                manifest_path = deliverable_dir / "starter_manifest.json"
+                manifest_path = deliverable_dir / HIDDEN_MANIFEST_PATH
                 visible_check_path = deliverable_dir / "checks" / "run_visible_checks.py"
+                hidden_check_path = deliverable_dir / HIDDEN_GRADER_SCRIPT_PATH
                 tasks_path = deliverable_dir / ".vscode" / "tasks.json"
                 missing_paths = [
                     path.relative_to(public_dir).as_posix()
-                    for path in (manifest_path, visible_check_path, tasks_path)
+                    for path in (manifest_path, visible_check_path, hidden_check_path, tasks_path)
                     if not path.exists()
                 ]
                 if missing_paths:
@@ -784,14 +1288,13 @@ class LangGraphAssignmentGraph:
 
                 manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
                 starter_surface = manifest_payload.get("learner_starter_surface") or {}
-                public_checks = manifest_payload.get("public_checks") or []
-                public_check_cases = manifest_payload.get("public_check_cases") or []
                 visible_check_command = manifest_payload.get("visible_check_command")
+                hidden_check_command = manifest_payload.get("hidden_check_command")
+                generated_test_scripts = manifest_payload.get("generated_test_scripts") or {}
+                generated_test_source = str(generated_test_scripts.get("source") or "").strip().lower()
                 if (
-                    not public_checks
-                    or not public_check_cases
-                    or len(public_checks) != len(public_check_cases)
-                    or visible_check_command != "python checks/run_visible_checks.py"
+                    visible_check_command != "python checks/run_visible_checks.py"
+                    or hidden_check_command != "python .coursegen/grader/run_hidden_checks.py"
                     or not starter_surface.get("primary_editable_paths")
                     or not starter_surface.get("required_endpoints")
                 ):
@@ -800,73 +1303,77 @@ class LangGraphAssignmentGraph:
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Visible learner checks incomplete for {deliverable.id}",
+                            title=f"Generated test commands incomplete for {deliverable.id}",
                             detail=(
-                                "Starter manifest must include reviewed public_checks, matching public_check_cases, "
-                                "a learner starter surface, and the standard visible_check_command."
+                                "The starter manifest must include the standard visible and hidden test commands "
+                                "plus a real learner starter surface."
                             ),
+                            code="generated_test_commands_incomplete",
+                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
                         )
                     )
                     continue
-
-                malformed_check = next(
-                    (
-                        check
-                        for check in public_checks
-                        if not check.get("title")
-                        or not check.get("learner_goal")
-                        or not check.get("expected_assertions")
-                    ),
-                    None,
-                )
-                if malformed_check is not None:
+                if generated_test_source in {"", "starter_default"}:
                     learner_checks_valid = False
                     findings.append(
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Reviewed public checks are incomplete for {deliverable.id}",
+                            title="generated_test_scripts_not_authored",
                             detail=(
-                                "Each learner-visible public check must include a title, learner goal, and expected assertions "
-                                "before the deliverable can pass review."
+                                "The starter is still using the default generated test placeholders. "
+                                "Authoring must produce real visible and hidden scripts from the materialized workspace."
                             ),
+                            code="generated_test_scripts_not_authored",
+                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
                         )
                     )
                     continue
-                placeholder_case = next(
-                    (
-                        case
-                        for case in public_check_cases
-                        if any(
-                            phrase in json.dumps(case).lower()
-                            for phrase in ["routine case", "ambiguous or risky case", "placeholder"]
-                        )
-                    ),
-                    None,
+
+                baseline = self.baseline_verifier.verify_deliverable(
+                    workspace_root=deliverable_dir,
+                    spec=spec,
+                    starter_type=deliverable.starter_type,
                 )
-                if placeholder_case is not None:
+                for issue in baseline.errors:
                     learner_checks_valid = False
                     findings.append(
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Visible learner scenarios are still placeholders for {deliverable.id}",
-                            detail="Public check cases should use domain-specific learner scenarios instead of generic placeholder cases.",
+                            title=issue.code,
+                            detail=issue.message,
+                            code=issue.code,
+                            location=issue.relative_path or f"starter/{deliverable.id}",
                         )
                     )
-                    continue
-
-                findings.append(
-                    ReviewerFinding(
-                        category="tests_review",
-                        severity=ReviewerFindingSeverity.info,
-                        title=f"Visible learner checks ready for {deliverable.id}",
-                        detail=(
-                            f"Learners can run `{visible_check_command}` with {len(public_checks)} reviewed public check(s) "
-                            "before submitting to the deeper hidden grader."
-                        ),
+                for issue in baseline.warnings:
+                    findings.append(
+                        ReviewerFinding(
+                            category="tests_review",
+                            severity=ReviewerFindingSeverity.warning,
+                            title=issue.code,
+                            detail=issue.message,
+                            code=issue.code,
+                            location=issue.relative_path or f"starter/{deliverable.id}",
+                        )
                     )
-                )
+                if baseline.valid:
+                    outcome_bits = [
+                        f"{outcome.baseline}:{outcome.suite_type}={len(outcome.report.tests)}"
+                        for outcome in baseline.outcomes
+                    ]
+                    findings.append(
+                        ReviewerFinding(
+                            category="tests_review",
+                            severity=ReviewerFindingSeverity.info,
+                            title=f"Generated tests discriminate correctly for {deliverable.id}",
+                            detail=(
+                                "Baseline matrix verified the empty repo and untouched starter against the generated visible "
+                                "and hidden scripts: " + ", ".join(outcome_bits)
+                            ),
+                        )
+                    )
 
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or not validation.valid or not learner_checks_valid:
@@ -877,9 +1384,9 @@ class LangGraphAssignmentGraph:
             kind=WorkflowNodeKind.reviewer_tests,
             attempt=state["reviewer_attempt"],
             status=status,
-            summary="Reviewer test node verified Docker execution, deterministic spec validation, and grader coverage.",
+            summary="Reviewer test node verified deterministic validation plus the generated visible/hidden test baseline matrix.",
             findings=findings,
-            sandbox_result=sandbox_result,
+            sandbox_result=None,
             cached_sandbox_result=sandbox_result,
         )
 
@@ -907,12 +1414,14 @@ class LangGraphAssignmentGraph:
         authoring_attempt: int | None = None,
         reviewer_attempt: int | None = None,
         cached_sandbox_result: SandboxExecutionResult | None | object = _UNSET,
+        next_retry_node: str | None | object = _UNSET,
     ) -> AssignmentGraphState:
         executions = list(state["node_executions"])
         executions.append(
             WorkflowNodeExecution(
                 node_id=f"{kind.value}_{len(executions) + 1}",
                 kind=kind,
+                iteration=state["active_iteration"],
                 attempt=attempt,
                 status=status,
                 summary=summary,
@@ -924,11 +1433,17 @@ class LangGraphAssignmentGraph:
         return {
             "run": state["run"],
             "node_executions": executions,
+            "active_iteration": state["active_iteration"],
             "authoring_attempt": state["authoring_attempt"] if authoring_attempt is None else authoring_attempt,
             "reviewer_attempt": state["reviewer_attempt"] if reviewer_attempt is None else reviewer_attempt,
             "cached_sandbox_result": (
                 state.get("cached_sandbox_result")
                 if cached_sandbox_result is _UNSET
                 else cached_sandbox_result
+            ),
+            "next_retry_node": (
+                state.get("next_retry_node")
+                if next_retry_node is _UNSET
+                else next_retry_node
             ),
         }

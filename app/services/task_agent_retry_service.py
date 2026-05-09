@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import json
+import re
+from enum import Enum
+from hashlib import sha256
+
+from pydantic import BaseModel
+
+from app.domain.ai import merge_ai_usage
+from app.domain.workflow import (
+    FailureContext,
+    FailureContextValidationIssue,
+    ReviewerFinding,
+    WorkflowFailureOwnerHint,
+    WorkflowNodeExecution,
+    WorkflowRun,
+)
+from app.services.bundle_validation import validate_materialized_bundle
+from app.services.failure_context_builder import build_failure_context
+from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService
+from app.services.spec_validation import ValidationResult, validate_task_agent_spec
+from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
+
+
+class TaskAgentRetryAction(str, Enum):
+    revised = "revised"
+    blocked_platform = "blocked_platform"
+    no_material_change = "no_material_change"
+    unresolved_blocker = "unresolved_blocker"
+
+
+class TaskAgentRetryResult(BaseModel):
+    action: TaskAgentRetryAction
+    applied: bool
+    should_continue: bool
+    owner_hint: WorkflowFailureOwnerHint
+    failure_signature: str | None = None
+    before_spec_hash: str | None = None
+    after_spec_hash: str | None = None
+    summary: str
+    detail: str
+
+
+class TaskAgentRetryService:
+    def __init__(
+        self,
+        *,
+        authoring_service: OpenAITaskAgentAuthoringService | None = None,
+        workspace_authoring_service: TaskAgentWorkspaceAuthoringService | None = None,
+    ) -> None:
+        self.authoring_service = authoring_service or OpenAITaskAgentAuthoringService(enabled=False)
+        self.workspace_authoring_service = workspace_authoring_service or TaskAgentWorkspaceAuthoringService()
+
+    def retry(
+        self,
+        run: WorkflowRun,
+        latest_node: WorkflowNodeExecution,
+        *,
+        failure_context: FailureContext | None = None,
+    ) -> tuple[WorkflowRun, TaskAgentRetryResult]:
+        spec = run.artifacts.task_agent_spec
+        if spec is None:
+            return run, TaskAgentRetryResult(
+                action=TaskAgentRetryAction.no_material_change,
+                applied=False,
+                should_continue=False,
+                owner_hint=WorkflowFailureOwnerHint.ambiguous,
+                summary="Retry could not run because the assignment spec is missing.",
+                detail="No task-agent spec was attached to the workflow run.",
+            )
+
+        failure_context = failure_context or build_failure_context(run, latest_node)
+        before_spec_hash = _spec_hash(spec)
+        if failure_context.owner_hint == WorkflowFailureOwnerHint.platform_runtime:
+            return run, TaskAgentRetryResult(
+                action=TaskAgentRetryAction.blocked_platform,
+                applied=False,
+                should_continue=False,
+                owner_hint=failure_context.owner_hint,
+                failure_signature=failure_context.failure_signature,
+                before_spec_hash=before_spec_hash,
+                summary="Retry stopped because the failure packet points to a platform/runtime blocker.",
+                detail=_failure_packet_summary(failure_context),
+            )
+
+        feedback = _build_feedback(run, latest_node, failure_context)
+        revision = self.authoring_service.revise_spec(
+            spec=spec,
+            title=run.title,
+            summary=run.intake.problem_statement,
+            package_type=spec.course_structure.package_type,
+            domain_pack=spec.domain_pack,
+            risk_class=spec.risk_class,
+            overlays=spec.overlays,
+            feedback=feedback,
+            failure_context=failure_context,
+            origin_template=run.artifacts.origin_template,
+        )
+        revised_spec = revision.spec
+        after_spec_hash = _spec_hash(revised_spec)
+        if after_spec_hash == before_spec_hash:
+            return run, TaskAgentRetryResult(
+                action=TaskAgentRetryAction.no_material_change,
+                applied=False,
+                should_continue=False,
+                owner_hint=failure_context.owner_hint,
+                failure_signature=failure_context.failure_signature,
+                before_spec_hash=before_spec_hash,
+                after_spec_hash=after_spec_hash,
+                summary="Retry produced no material spec changes, so the loop stopped early.",
+                detail=_failure_packet_summary(failure_context),
+            )
+
+        validation = validate_task_agent_spec(revised_spec)
+        run.artifacts.task_agent_spec = revised_spec
+        run.artifacts.origin_template = revision.origin_template
+        run.artifacts.ai_usage = merge_ai_usage(run.artifacts.ai_usage, revision.usage)
+        run.artifacts.validation_summary = validation.model_dump(mode="json")
+        run.artifacts.progression_preview = [
+            summary.model_dump(mode="json")
+            for summary in validation.deliverable_gates
+        ]
+        run.artifacts.materialized_bundle = None
+        run.artifacts.review_summary = None
+        run.artifacts.notes.append(
+            (
+                "Automated retry revised the learner-ready assignment draft from the latest failure packet "
+                f"({failure_context.owner_hint.value}, signature {failure_context.failure_signature})."
+            )
+        )
+        if revision.notes:
+            run.notes.extend(revision.notes)
+        run = self.workspace_authoring_service.sync_workspace(run)
+        unresolved = _persisting_blockers(
+            failure_context=failure_context,
+            validation_summary=validation,
+            run=run,
+        )
+        if unresolved:
+            return run, TaskAgentRetryResult(
+                action=TaskAgentRetryAction.unresolved_blocker,
+                applied=True,
+                should_continue=False,
+                owner_hint=failure_context.owner_hint,
+                failure_signature=failure_context.failure_signature,
+                before_spec_hash=before_spec_hash,
+                after_spec_hash=after_spec_hash,
+                summary=(
+                    "Retry revised the assignment spec, but the rematerialized learner workspace "
+                    "still failed the same blocking checks."
+                ),
+                detail=_unresolved_blocker_detail(failure_context, unresolved),
+            )
+        return run, TaskAgentRetryResult(
+            action=TaskAgentRetryAction.revised,
+            applied=True,
+            should_continue=True,
+            owner_hint=failure_context.owner_hint,
+            failure_signature=failure_context.failure_signature,
+            before_spec_hash=before_spec_hash,
+            after_spec_hash=after_spec_hash,
+            summary="Retry revised the assignment spec from the latest failure packet.",
+            detail=_failure_packet_summary(failure_context),
+        )
+
+
+def _spec_hash(spec) -> str:
+    payload = json.dumps(spec.model_dump(mode="json"), sort_keys=True)
+    return sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_feedback(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+    failure_context: FailureContext,
+) -> str:
+    packet = {
+        "source_node_kind": failure_context.source_node_kind.value,
+        "source_node_attempt": failure_context.source_node_attempt,
+        "phase": failure_context.phase,
+        "owner_hint": failure_context.owner_hint.value,
+        "failure_signature": failure_context.failure_signature,
+        "source_summary": failure_context.source_summary,
+        "validation_issues": [
+            issue.model_dump(mode="json")
+            for issue in failure_context.validation_issues
+        ],
+        "findings": [
+            finding.model_dump(mode="json")
+            for finding in failure_context.findings[:12]
+        ],
+        "sandbox": (
+            failure_context.sandbox.model_dump(mode="json")
+            if failure_context.sandbox is not None
+            else None
+        ),
+    }
+    return (
+        "Revise the learner-ready assignment draft using the failure packet below. "
+        "Fix the root cause revealed by the harness and reviewer feedback. "
+        "Keep the creator-selected stack and infrastructure constraints intact. "
+        "Do not leave the draft materially unchanged. "
+        f"Workflow title: {run.title}. Latest failed node: {latest_node.kind.value}.\n\n"
+        f"Failure packet:\n{json.dumps(packet, indent=2)}"
+    )
+
+
+def _failure_packet_summary(failure_context: FailureContext) -> str:
+    parts = [
+        f"owner_hint={failure_context.owner_hint.value}",
+        f"signature={failure_context.failure_signature or 'unknown'}",
+    ]
+    if failure_context.phase:
+        parts.append(f"phase={failure_context.phase}")
+    if failure_context.sandbox is not None and failure_context.sandbox.error:
+        parts.append(f"error={failure_context.sandbox.error}")
+    elif failure_context.findings:
+        parts.append(f"finding={failure_context.findings[0].detail}")
+    return "; ".join(parts)
+
+
+def _persisting_blockers(
+    *,
+    failure_context: FailureContext,
+    validation_summary: ValidationResult,
+    run: WorkflowRun,
+) -> list[tuple[str, str | None]]:
+    prior_blockers = _blocking_issue_keys(
+        findings=failure_context.findings,
+        validation_issues=failure_context.validation_issues,
+    )
+    if not prior_blockers:
+        return []
+
+    current_blockers = {
+        *(
+            (issue.code, issue.location or None)
+            for issue in validation_summary.errors
+        ),
+    }
+    workspace = run.artifacts.workspace_snapshot
+    spec = run.artifacts.task_agent_spec
+    if workspace is not None and spec is not None:
+        bundle_validation = validate_materialized_bundle(spec, workspace)
+        current_blockers.update(
+            (issue.code, issue.relative_path or None)
+            for issue in bundle_validation.errors
+        )
+
+    unresolved: list[tuple[str, str | None]] = []
+    for prior_code, prior_location in sorted(prior_blockers):
+        for current_code, current_location in current_blockers:
+            if prior_code != current_code:
+                continue
+            if prior_location is not None and current_location != prior_location:
+                continue
+            unresolved.append((current_code, current_location))
+            break
+    return unresolved
+
+
+def _blocking_issue_keys(
+    *,
+    findings: list[ReviewerFinding],
+    validation_issues: list[FailureContextValidationIssue],
+) -> set[tuple[str, str | None]]:
+    keys: set[tuple[str, str | None]] = set()
+    for issue in validation_issues:
+        keys.add((issue.code, issue.location or None))
+    for finding in findings:
+        if finding.severity.value != "error":
+            continue
+        code = finding.code or _normalize_finding_code(finding.title)
+        if code:
+            keys.add((code, finding.location or None))
+    return keys
+
+
+def _normalize_finding_code(title: str) -> str | None:
+    normalized = re.sub(r"[^a-z0-9]+", "_", title.strip().lower()).strip("_")
+    return normalized or None
+
+
+def _unresolved_blocker_detail(
+    failure_context: FailureContext,
+    unresolved: list[tuple[str, str | None]],
+) -> str:
+    issue_bits = [
+        f"{code} @ {location}" if location else code
+        for code, location in unresolved[:5]
+    ]
+    return (
+        _failure_packet_summary(failure_context)
+        + "; unresolved="
+        + ", ".join(issue_bits)
+    )

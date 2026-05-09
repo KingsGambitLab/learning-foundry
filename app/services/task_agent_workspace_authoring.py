@@ -9,7 +9,6 @@ from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowR
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
-    render_task_agent_runtime_deliverable,
 )
 
 
@@ -137,17 +136,6 @@ class TaskAgentWorkspaceAuthoringService:
             return []
 
         updated_files: list[str] = []
-        runtime_dir = Path(workspace.public_dir) / "runtime"
-        runtime_path = runtime_dir / "task_agent_runtime.py"
-        updated_files.extend(
-            self._write_if_needed(
-                runtime_path,
-                render_task_agent_runtime_deliverable(),
-                workspace.root_dir,
-                force=force,
-            )
-        )
-
         allowed_deliverables = set(deliverable_ids or [deliverable.id for deliverable in spec.deliverables])
         for deliverable in spec.deliverables:
             if deliverable.id not in allowed_deliverables:

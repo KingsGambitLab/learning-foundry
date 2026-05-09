@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
-from app.services.learner_studio_service import LearnerStudioService
+from app.services.learner_studio_service import LearnerStudioError, LearnerStudioService
 
 
 class LearnerStudioServiceTests(unittest.TestCase):
@@ -87,6 +87,7 @@ class LearnerStudioServiceTests(unittest.TestCase):
         self.assertIn("run", docker_command)
         self.assertIn("-v", docker_command)
         self.assertIn(f"{self.workspace_root.resolve()}:/workspace", docker_command)
+        self.assertNotIn("--rm", docker_command)
         self.assertNotIn("--network", docker_command)
         self.assertNotIn("--network-alias", docker_command)
         self.assertEqual(refreshed.container_name, self.existing_session.container_name)
@@ -98,7 +99,7 @@ class LearnerStudioServiceTests(unittest.TestCase):
     def test_grade_assignment_skips_docker_network_when_workspace_has_no_dependency_services(self) -> None:
         service = LearnerStudioService(image_name="course-gen-learner-studio:test")
         spec = SimpleNamespace(
-            runtime_dependencies=SimpleNamespace(preview_command="python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"),
+            runtime_dependencies=SimpleNamespace(preview_command="python .coursegen/preview_app.py --host 0.0.0.0"),
             project_contract=SimpleNamespace(runtime_plan=SimpleNamespace(services=[])),
         )
 
@@ -118,8 +119,26 @@ class LearnerStudioServiceTests(unittest.TestCase):
 
         docker_command = mock_run.call_args.args[0]
         self.assertIn("run", docker_command)
+        self.assertNotIn("--rm", docker_command)
         self.assertNotIn("--network", docker_command)
         self.assertNotIn("--network-alias", docker_command)
+
+    def test_wait_for_http_fails_fast_when_container_exits_before_healthcheck(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test", start_timeout_s=90)
+
+        with (
+            patch("app.services.learner_studio_service.httpx.get", side_effect=RuntimeError("connection refused")),
+            patch.object(service, "_container_running", return_value=False),
+            patch.object(service, "_container_logs", return_value="app boot failed"),
+        ):
+            with self.assertRaisesRegex(
+                LearnerStudioError,
+                "stopped before 'http://127.0.0.1:18001/health' became healthy",
+            ):
+                service._wait_for_http(
+                    "http://127.0.0.1:18001/health",
+                    container_name="course-gen-sandbox-deliverable_1-deadbeef",
+                )
 
 
 if __name__ == "__main__":

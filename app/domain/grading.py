@@ -87,6 +87,7 @@ class GradeTaskAgentRequest(BaseModel):
 
 class LiveGradeTaskAgentRequest(BaseModel):
     base_url: str
+    workspace_root: str | None = None
     timeout_ms: int = Field(default=10_000, ge=100, le=120_000)
     poll_interval_ms: int = Field(default=50, ge=0, le=5_000)
     max_poll_attempts: int = Field(default=25, ge=1, le=500)

@@ -200,8 +200,38 @@ class DraftTimelineApiTests(unittest.TestCase):
         node_item = next(
             item
             for item in body["items"]
-            if item["source_kind"] == "workflow_node" and item["event_type"] == "reviewer_tests"
+            if item["source_kind"] == "workflow_node"
+            and item["event_type"] == "reviewer_tests"
+            and "Placeholder scenario detected" in item["detail"]
         )
         self.assertEqual(node_item["event_type"], "reviewer_tests")
         self.assertEqual(node_item["attempt"], 2)
         self.assertIn("Placeholder scenario detected", node_item["detail"])
+
+    def test_timeline_includes_incremental_workflow_node_events(self) -> None:
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run = created.json()
+        shared_run_id = course_run["shared_workflow_run_id"]
+        assert shared_run_id is not None
+
+        app.state.workflow_service.store.append_event(
+            shared_run_id,
+            "workflow_node_started",
+            {"node_kind": "authoring_runtime", "attempt": 1},
+        )
+        app.state.workflow_service.store.append_event(
+            shared_run_id,
+            "workflow_node_completed",
+            {"node_kind": "authoring_runtime", "attempt": 1, "status": "passed", "summary": "Sandbox passed."},
+        )
+
+        response = self.client.get(f"/v1/course-runs/{course_run['id']}/timeline")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+        event_types = [item["event_type"] for item in items]
+        self.assertIn("workflow_node_started", event_types)
+        self.assertIn("workflow_node_completed", event_types)

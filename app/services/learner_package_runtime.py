@@ -100,9 +100,6 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     files_to_write[".coursegen/deliverables/index.json"] = review_area_index_json(learner_package.deliverables)
     for deliverable in learner_package.deliverables:
         files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
-        files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/deliverable_content.md"] = deliverable.content_markdown
-        files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
-        files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/deliverable.md"] = deliverable.content_markdown
 
     for relative_path, content in files_to_write.items():
         target = root / relative_path

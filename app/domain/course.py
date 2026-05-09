@@ -135,6 +135,7 @@ class DraftTimelineItem(BaseModel):
     stage: str | None = None
     status: str | None = None
     sequence_no: int | None = None
+    iteration: int | None = None
     attempt: int | None = None
     payload: dict = Field(default_factory=dict)
 

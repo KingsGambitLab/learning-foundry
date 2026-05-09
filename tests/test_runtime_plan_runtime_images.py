@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -175,6 +177,39 @@ def test_learner_runtime_launch_script_exports_corepack_prompt_override() -> Non
     assert "pnpm install --yes --dangerously-allow-all-builds" in launch_script
 
 
+def test_python_runtime_plan_includes_verify_step_and_launch_script_runs_it_before_preview() -> None:
+    spec = _build_spec(
+        title="Inventory Reservation Service",
+        summary="Build a concurrency-safe inventory reservation backend.",
+        problem_statement=(
+            "Build a multi-warehouse inventory reservation service with FastAPI, Postgres, and Redis. "
+            "Keep reservations correct under concurrency, retries, and stock transfers."
+        ),
+    )
+
+    verify_steps = spec.project_contract.runtime_plan.verify_steps
+    assert verify_steps
+    assert "from app import app as _coursegen_app" in verify_steps[0].command
+
+    starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
+    with TemporaryDirectory() as temp_dir:
+        workspace_path = Path(temp_dir)
+        for relative_path, content in starter_files.items():
+            output_path = workspace_path / relative_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+        service = LearnerStudioService()
+        launch_script = service._runtime_launch_script(
+            workspace_path=workspace_path,
+            spec=spec,
+            include_setup=False,
+        )
+
+    assert "[coursegen] verify step 1 started" in launch_script
+    assert "from app import app as _coursegen_app" in launch_script
+    assert launch_script.index("[coursegen] verify step 1 started") < launch_script.index("exec python .coursegen/preview_app.py")
+
+
 def test_starter_surface_is_authored_and_python_entrypoint_is_not_a_wrapper() -> None:
     spec = _build_spec(
         title="Grounded Internal Docs Assistant",
@@ -204,7 +239,38 @@ def test_starter_surface_is_authored_and_python_entrypoint_is_not_a_wrapper() ->
     assert manifest["learner_starter_surface"]["required_endpoints"]
 
 
-def test_generic_placeholder_workflow_specs_now_fail_validation() -> None:
+def test_python_starter_entrypoint_imports_cleanly() -> None:
+    spec = _build_spec(
+        title="Inventory Reservation Service",
+        summary="Build a concurrency-safe inventory reservation backend.",
+        problem_statement=(
+            "Build a multi-warehouse inventory reservation service with FastAPI, Postgres, and Redis. "
+            "Keep reservations correct under concurrency, retries, and stock transfers."
+        ),
+    )
+
+    starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
+    entrypoint_path = task_agent_entrypoint_path(spec)
+    with TemporaryDirectory() as temp_dir:
+        workspace_path = Path(temp_dir)
+        for relative_path, content in starter_files.items():
+            output_path = workspace_path / relative_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+        module_path = workspace_path / entrypoint_path
+        module_name = "coursegen_inventory_app"
+        importlib.invalidate_caches()
+        sys.modules.pop(module_name, None)
+        spec_obj = importlib.util.spec_from_file_location(module_name, module_path)
+        assert spec_obj is not None
+        assert spec_obj.loader is not None
+        module = importlib.util.module_from_spec(spec_obj)
+        spec_obj.loader.exec_module(module)
+
+    assert getattr(module, "app", None) is not None
+
+
+def test_generic_workflow_specs_now_start_from_a_neutral_valid_contract() -> None:
     spec = _build_spec(
         title="Workflow Agent",
         summary="Build a generic workflow agent.",
@@ -215,9 +281,14 @@ def test_generic_placeholder_workflow_specs_now_fail_validation() -> None:
 
     validation = validate_task_agent_spec(spec)
 
-    assert not validation.valid
-    error_codes = {issue.code for issue in validation.errors}
-    assert "placeholder_domain_scenario" in error_codes or "placeholder_public_check" in error_codes
+    assert validation.valid
+    assert spec.project_contract.family.value == "workflow_agent_service"
+    assert all(
+        phrase not in str(case.model_dump(mode="json")).lower()
+        for case in spec.eval_dataset.cases
+        for phrase in ("routine case", "ambiguous or risky case")
+    )
+    assert any(endpoint.path.startswith("/workflow-agent") for endpoint in spec.production_contract.canonical_endpoints)
 
 
 def test_authoring_customization_can_make_generic_workflow_spec_domain_specific() -> None:
@@ -230,7 +301,9 @@ def test_authoring_customization_can_make_generic_workflow_spec_domain_specific(
         ),
     )
     initial_validation = validate_task_agent_spec(spec)
-    assert not initial_validation.valid
+    assert initial_validation.valid
+    primary_case_id = spec.eval_dataset.cases[0].id
+    edge_case_id = spec.eval_dataset.cases[1].id
 
     service = OpenAITaskAgentAuthoringService(enabled=False)
     customized = service._apply_customization(
@@ -258,7 +331,7 @@ def test_authoring_customization_can_make_generic_workflow_spec_domain_specific(
             ),
             eval_cases=[
                 EvalCaseCustomization(
-                    id="happy_path",
+                    id=primary_case_id,
                     title="Billing refund request",
                     input={
                         "ticket_id": "T-100",
@@ -275,7 +348,7 @@ def test_authoring_customization_can_make_generic_workflow_spec_domain_specific(
                     requires_approval=True,
                 ),
                 EvalCaseCustomization(
-                    id="escalation_case",
+                    id=edge_case_id,
                     title="Suspicious login request",
                     input={
                         "ticket_id": "T-102",

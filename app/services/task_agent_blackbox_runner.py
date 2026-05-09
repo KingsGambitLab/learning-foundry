@@ -1,26 +1,19 @@
 from __future__ import annotations
 
+import json
 import time
-from collections import OrderedDict
 from typing import Any, Callable
 
 import httpx
 
-from app.domain.grader import ControlFlag
 from app.domain.grading import (
-    LiveAssignmentGradeReport,
-    ApprovalRecord,
     EvalRunEvidence,
-    EscalationRecord,
-    FailureInjectionRecord,
-    FallbackActionRecord,
+    LiveAssignmentGradeReport,
     LiveGradeTaskAgentRequest,
     LiveTaskAgentGradeReport,
     TaskAgentSubmission,
-    ToolCallRecord,
 )
-from app.domain.task_agent import TaskAgentServiceSpec
-from app.services.grader_planner import build_all_task_agent_review_area_plans, build_task_agent_grader_plan
+from app.domain.task_agent import PublicCheckSpec, TaskAgentServiceSpec
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 
 
@@ -45,40 +38,26 @@ class TaskAgentBlackBoxRunner:
         deliverable_id: str,
         request: LiveGradeTaskAgentRequest,
     ) -> TaskAgentSubmission:
-        plan = build_task_agent_grader_plan(spec, deliverable_id)
-        ordered_cases = OrderedDict((case.id, case) for case in spec.eval_dataset.cases)
-        case_ids: set[str] = set()
-        dry_run_case_ids: set[str] = set()
-
-        for entry in plan.entries:
-            if entry.dependencies.dataset_id == spec.eval_dataset.id:
-                case_ids.update(ordered_cases.keys())
-            case_ids.update(entry.dependencies.eval_case_ids)
-            if request.include_dry_runs and ControlFlag.dry_run in entry.controls:
-                dry_run_case_ids.update(entry.dependencies.eval_case_ids)
-
-        if not case_ids:
-            raise TaskAgentRunnerError(f"No eval cases were activated for deliverable '{deliverable_id}'.")
+        deliverable = next((item for item in spec.deliverables if item.id == deliverable_id), None)
+        if deliverable is None:
+            raise TaskAgentRunnerError(f"Unknown deliverable '{deliverable_id}'.")
+        if not deliverable.public_checks:
+            raise TaskAgentRunnerError(f"No visible checks were defined for deliverable '{deliverable_id}'.")
 
         client = self.client_factory(request.base_url, request.timeout_ms / 1000)
         try:
-            runs: list[EvalRunEvidence] = []
-            for case_id in ordered_cases.keys():
-                if case_id not in case_ids:
-                    continue
-                case = ordered_cases[case_id]
-                runs.append(self._execute_case(client, case.id, case.input, request, dry_run=False))
-                if case_id in dry_run_case_ids:
-                    dry_input = dict(case.input)
-                    dry_input["dry_run"] = True
-                    runs.append(self._execute_case(client, case.id, dry_input, request, dry_run=True))
+            runs = [self._execute_public_check(client, check) for check in deliverable.public_checks]
         finally:
             client.close()
 
         return TaskAgentSubmission(
             submission_id=f"blackbox::{deliverable_id}::{request.base_url}",
             runs=runs,
-            metadata={"collected_from": request.base_url, "deliverable_id": deliverable_id},
+            metadata={
+                "collected_from": request.base_url,
+                "deliverable_id": deliverable_id,
+                "public_check_ids": [check.id for check in deliverable.public_checks],
+            },
         )
 
     def collect_assignment_submission(
@@ -86,41 +65,28 @@ class TaskAgentBlackBoxRunner:
         spec: TaskAgentServiceSpec,
         request: LiveGradeTaskAgentRequest,
     ) -> TaskAgentSubmission:
-        plans = build_all_task_agent_review_area_plans(spec)
-        ordered_cases = OrderedDict((case.id, case) for case in spec.eval_dataset.cases)
-        case_ids: set[str] = set()
-        dry_run_case_ids: set[str] = set()
-
-        for plan in plans.deliverable_plans:
-            for entry in plan.entries:
-                if entry.dependencies.dataset_id == spec.eval_dataset.id:
-                    case_ids.update(ordered_cases.keys())
-                case_ids.update(entry.dependencies.eval_case_ids)
-                if request.include_dry_runs and ControlFlag.dry_run in entry.controls:
-                    dry_run_case_ids.update(entry.dependencies.eval_case_ids)
-
-        if not case_ids:
-            raise TaskAgentRunnerError("No eval cases were activated for the assignment review.")
+        all_checks = [
+            (deliverable.id, check)
+            for deliverable in spec.deliverables
+            for check in deliverable.public_checks
+        ]
+        if not all_checks:
+            raise TaskAgentRunnerError("No visible checks were defined for this assignment.")
 
         client = self.client_factory(request.base_url, request.timeout_ms / 1000)
         try:
-            runs: list[EvalRunEvidence] = []
-            for case_id in ordered_cases.keys():
-                if case_id not in case_ids:
-                    continue
-                case = ordered_cases[case_id]
-                runs.append(self._execute_case(client, case.id, case.input, request, dry_run=False))
-                if case_id in dry_run_case_ids:
-                    dry_input = dict(case.input)
-                    dry_input["dry_run"] = True
-                    runs.append(self._execute_case(client, case.id, dry_input, request, dry_run=True))
+            runs = [self._execute_public_check(client, check) for _deliverable_id, check in all_checks]
         finally:
             client.close()
 
         return TaskAgentSubmission(
             submission_id=f"blackbox::assignment::{request.base_url}",
             runs=runs,
-            metadata={"collected_from": request.base_url, "scope": "assignment"},
+            metadata={
+                "collected_from": request.base_url,
+                "scope": "assignment",
+                "public_check_ids": [check.id for _deliverable_id, check in all_checks],
+            },
         )
 
     def grade_live(
@@ -150,154 +116,67 @@ class TaskAgentBlackBoxRunner:
             assignment_report=assignment_report,
         )
 
-    def _execute_case(
+    def _execute_public_check(
         self,
         client: httpx.Client,
-        case_id: str,
-        payload: dict[str, Any],
-        request: LiveGradeTaskAgentRequest,
-        *,
-        dry_run: bool,
+        check: PublicCheckSpec,
     ) -> EvalRunEvidence:
-        run_response = self._request_json(client, "POST", "/run", json=payload)
-        run_id = str(run_response.get("run_id") or run_response.get("id") or f"{case_id}-inline")
-        state = dict(run_response)
-        resumed_after_pause = False
+        method = check.request_method.upper()
+        request_kwargs: dict[str, Any] = {}
+        if method == "GET":
+            if check.request_body:
+                request_kwargs["params"] = check.request_body
+        elif check.request_body:
+            request_kwargs["json"] = check.request_body
 
-        for _ in range(request.max_poll_attempts):
-            status = str(state.get("status", "completed")).lower()
-            if status in {"completed", "failed", "done", "finished"}:
-                break
-            if status in {"awaiting_approval", "pending_approval"}:
-                if not request.auto_approve:
-                    break
-                self._request_json(client, "POST", f"/approve/{run_id}", json={"approved": True})
-                resumed_after_pause = True
-            if request.poll_interval_ms:
-                time.sleep(request.poll_interval_ms / 1000)
-            state = self._request_json(client, "GET", f"/runs/{run_id}")
-        else:
-            raise TaskAgentRunnerError(f"Run '{run_id}' for case '{case_id}' did not settle in time.")
-
+        started_at = time.perf_counter()
         try:
-            trace_payload = self._request_json(client, "GET", f"/trace/{run_id}")
-        except TaskAgentRunnerError:
-            trace_payload = {}
-
-        return self._merge_evidence(case_id, run_id, dry_run, state, trace_payload, resumed_after_pause)
-
-    def _merge_evidence(
-        self,
-        case_id: str,
-        run_id: str,
-        dry_run: bool,
-        state: dict[str, Any],
-        trace_payload: dict[str, Any],
-        resumed_after_pause: bool,
-    ) -> EvalRunEvidence:
-        trace_events = self._parse_trace_events(state, trace_payload)
-        return EvalRunEvidence(
-            run_id=run_id,
-            case_id=case_id,
-            dry_run=dry_run,
-            output=self._parse_output(state),
-            trace_events=trace_events,
-            step_count=int(state.get("step_count", len(trace_events) or len(state.get("tool_calls", [])))),
-            latency_ms=int(state.get("latency_ms", 0)),
-            cost_usd=float(state.get("cost_usd", 0.0)),
-            tool_calls=self._parse_records(state.get("tool_calls", []), ToolCallRecord, include_order=True),
-            approvals=self._parse_records(state.get("approvals", []), ApprovalRecord, include_order=True),
-            escalations=self._parse_records(state.get("escalations", []), EscalationRecord, include_order=True),
-            failure_injections=self._parse_records(state.get("failure_injections", []), FailureInjectionRecord),
-            fallback_actions=self._parse_records(state.get("fallback_actions", []), FallbackActionRecord),
-            resumed_after_pause=bool(state.get("resumed_after_pause", resumed_after_pause)),
-            success=bool(state.get("success", str(state.get("status", "")).lower() in {"completed", "done", "finished"})),
-            quality_score=state.get("quality_score"),
-            notes=[str(item) for item in state.get("notes", [])],
-        )
-
-    def _parse_output(self, state: dict[str, Any]) -> dict[str, Any]:
-        output = state.get("output")
-        if isinstance(output, dict):
-            return output
-        return {
-            key: value
-            for key, value in state.items()
-            if key
-            not in {
-                "run_id",
-                "id",
-                "status",
-                "trace_events",
-                "tool_calls",
-                "approvals",
-                "escalations",
-                "failure_injections",
-                "fallback_actions",
-                "step_count",
-                "latency_ms",
-                "cost_usd",
-                "success",
-                "quality_score",
-                "notes",
-                "resumed_after_pause",
-            }
-        }
-
-    def _parse_trace_events(self, state: dict[str, Any], trace_payload: dict[str, Any]) -> list[str]:
-        events: list[str] = []
-        for source in (trace_payload.get("events"), state.get("trace_events")):
-            if not source:
-                continue
-            for item in source:
-                if isinstance(item, str):
-                    if item not in events:
-                        events.append(item)
-                elif isinstance(item, dict):
-                    event_name = item.get("type") or item.get("event_type") or item.get("name")
-                    if event_name and event_name not in events:
-                        events.append(str(event_name))
-        return events
-
-    def _parse_records(self, payload: Any, model, *, include_order: bool = False):
-        records: list[Any] = []
-        if not isinstance(payload, list):
-            return records
-        for index, item in enumerate(payload):
-            if isinstance(item, model):
-                records.append(item)
-            elif isinstance(item, dict):
-                normalized = dict(item)
-                if include_order and "order" not in normalized:
-                    normalized["order"] = index
-                normalized = self._normalize_record_payload(normalized, model, index=index)
-                records.append(model.model_validate(normalized))
-        return records
-
-    def _normalize_record_payload(self, payload: dict[str, Any], model, *, index: int) -> dict[str, Any]:
-        normalized = dict(payload)
-        if model is ApprovalRecord:
-            if "approved" not in normalized and "status" in normalized:
-                normalized["approved"] = str(normalized["status"]).lower() in {"approved", "accepted", "ok"}
-            if not normalized.get("approval_id"):
-                tool_id = str(normalized.get("tool_id") or "approval")
-                order = normalized.get("order", index)
-                normalized["approval_id"] = f"approval::{tool_id}::{order}"
-        return normalized
-
-    def _request_json(self, client: httpx.Client, method: str, path: str, **kwargs) -> dict[str, Any]:
-        try:
-            response = client.request(method, path, **kwargs)
+            response = client.request(method, check.request_path, **request_kwargs)
         except httpx.HTTPError as exc:
-            raise TaskAgentRunnerError(f"Request to '{path}' failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise TaskAgentRunnerError(f"Request to '{path}' failed with HTTP {response.status_code}.")
-        if not response.content:
-            return {}
+            raise TaskAgentRunnerError(f"Request to '{check.request_path}' failed: {exc}") from exc
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+        body_text = response.text
+        body_payload: dict[str, Any]
         try:
-            payload = response.json()
-        except ValueError as exc:
-            raise TaskAgentRunnerError(f"Request to '{path}' did not return JSON.") from exc
-        if not isinstance(payload, dict):
-            raise TaskAgentRunnerError(f"Request to '{path}' returned unexpected JSON payload.")
-        return payload
+            parsed = response.json()
+            body_payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+        except ValueError:
+            body_payload = {"value": body_text}
+
+        haystack = body_text or json.dumps(body_payload, sort_keys=True, ensure_ascii=True)
+        notes: list[str] = []
+        if response.status_code != check.expected_status:
+            notes.append(f"Expected HTTP {check.expected_status} but observed HTTP {response.status_code}.")
+        missing = [
+            snippet
+            for snippet in check.expected_response_contains
+            if str(snippet).strip() and str(snippet).lower() not in haystack.lower()
+        ]
+        if missing:
+            notes.append("Response is missing expected content: " + ", ".join(sorted(missing)) + ".")
+
+        output = {
+            **body_payload,
+            "_coursegen_http_status": response.status_code,
+            "_coursegen_body_text": haystack,
+        }
+        return EvalRunEvidence(
+            run_id=f"public-check::{check.id}",
+            case_id=check.id,
+            dry_run=False,
+            output=output,
+            trace_events=[],
+            step_count=1,
+            latency_ms=latency_ms,
+            cost_usd=0.0,
+            tool_calls=[],
+            approvals=[],
+            escalations=[],
+            failure_injections=[],
+            fallback_actions=[],
+            resumed_after_pause=False,
+            success=not notes,
+            quality_score=None,
+            notes=notes,
+        )
