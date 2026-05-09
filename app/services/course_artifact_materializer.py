@@ -59,8 +59,8 @@ class CourseArtifactMaterializer:
             bundle_root,
         )
         self._write_text(
-            public_dir / "content" / "module_sequence.md",
-            self._module_sequence(course_run),
+            public_dir / "content" / "deliverable_sequence.md",
+            self._deliverable_sequence(course_run),
             ArtifactVisibility.public,
             files,
             bundle_root,
@@ -73,11 +73,11 @@ class CourseArtifactMaterializer:
                 files,
                 bundle_root,
             )
-        for index, module in enumerate(course_run.modules, start=1):
-            linked_run = linked_runs.get(module.workflow_run_id) if module.workflow_run_id else None
+        for index, deliverable in enumerate(course_run.deliverables, start=1):
+            linked_run = linked_runs.get(deliverable.workflow_run_id) if deliverable.workflow_run_id else None
             self._write_text(
-                public_dir / "content" / "modules" / f"{module.module_slug}.md",
-                self._module_doc(index, module, linked_run),
+                public_dir / "content" / "deliverables" / f"{deliverable.deliverable_slug}.md",
+                self._deliverable_doc(index, deliverable, linked_run),
                 ArtifactVisibility.public,
                 files,
                 bundle_root,
@@ -91,18 +91,18 @@ class CourseArtifactMaterializer:
             bundle_root,
         )
         self._write_json(
-            private_dir / "module_index.json",
+            private_dir / "deliverable_index.json",
             [
                 {
                     "position": index,
-                    "module_slug": module.module_slug,
-                    "title": module.title,
-                    "design_spec": module.design_spec.model_dump(mode="json") if module.design_spec is not None else None,
-                    "workflow_run_id": module.workflow_run_id,
-                    "workflow_stage": module.workflow_stage,
-                    "workflow_status": module.workflow_status,
+                    "deliverable_slug": deliverable.deliverable_slug,
+                    "title": deliverable.title,
+                    "design_spec": deliverable.design_spec.model_dump(mode="json") if deliverable.design_spec is not None else None,
+                    "workflow_run_id": deliverable.workflow_run_id,
+                    "workflow_stage": deliverable.workflow_stage,
+                    "workflow_status": deliverable.workflow_status,
                 }
-                for index, module in enumerate(course_run.modules, start=1)
+                for index, deliverable in enumerate(course_run.deliverables, start=1)
             ],
             ArtifactVisibility.private,
             files,
@@ -176,9 +176,9 @@ class CourseArtifactMaterializer:
                 "",
                 "## What this bundle contains",
                 "",
-                "- Public syllabus and module sequencing notes",
-                "- Public review report with module-by-module course readiness",
-                "- Per-module author-facing docs with linked assignment workflow state",
+                "- Public syllabus and deliverable sequencing notes",
+                "- Public review report with deliverable-by-deliverable course readiness",
+                "- Per-deliverable author-facing docs with linked assignment workflow state",
                 "- Private snapshots of course/workflow linkage",
                 "",
             ]
@@ -186,27 +186,27 @@ class CourseArtifactMaterializer:
 
     def _course_syllabus(self, course_run: CourseRun) -> str:
         lines = ["# Syllabus", ""]
-        for index, module in enumerate(course_run.modules, start=1):
+        for index, deliverable in enumerate(course_run.deliverables, start=1):
             lines.extend(
                 [
-                    f"## Module {index}: {module.title}",
+                    f"## Deliverable {index}: {deliverable.title}",
                     "",
-                    module.summary,
+                    deliverable.summary,
                     "",
-                    f"- Design: {self._design_summary(module.design_spec)}",
-                    f"- Domain pack: `{module.domain_pack or 'generic'}`",
-                    f"- Overlays: {', '.join(f'`{item}`' for item in module.overlays) or 'none'}",
-                    f"- Assignment workflow: `{module.workflow_run_id or 'none'}`",
-                    f"- Assignment status: `{module.workflow_status or 'unknown'}`",
+                    f"- Design: {self._design_summary(deliverable.design_spec)}",
+                    f"- Domain pack: `{deliverable.domain_pack or 'generic'}`",
+                    f"- Overlays: {', '.join(f'`{item}`' for item in deliverable.overlays) or 'none'}",
+                    f"- Assignment workflow: `{deliverable.workflow_run_id or 'none'}`",
+                    f"- Assignment status: `{deliverable.workflow_status or 'unknown'}`",
                     "",
                 ]
             )
         return "\n".join(lines) + "\n"
 
-    def _module_sequence(self, course_run: CourseRun) -> str:
-        lines = ["# Module Sequence", ""]
-        for index, module in enumerate(course_run.modules, start=1):
-            lines.append(f"{index}. `{module.module_slug}` - {module.title}")
+    def _deliverable_sequence(self, course_run: CourseRun) -> str:
+        lines = ["# Deliverable Sequence", ""]
+        for index, deliverable in enumerate(course_run.deliverables, start=1):
+            lines.append(f"{index}. `{deliverable.deliverable_slug}` - {deliverable.title}")
         lines.append("")
         return "\n".join(lines)
 
@@ -221,10 +221,10 @@ class CourseArtifactMaterializer:
             "",
             "## Counts",
             "",
-            f"- Total modules: `{review_report.counts.total_modules}`",
-            f"- Ready modules: `{review_report.counts.ready_modules}`",
-            f"- Modules with blockers: `{review_report.counts.modules_with_blockers}`",
-            f"- Modules with linked bundles: `{review_report.counts.modules_with_bundle}`",
+            f"- Total deliverables: `{review_report.counts.total_deliverables}`",
+            f"- Ready deliverables: `{review_report.counts.ready_deliverables}`",
+            f"- Deliverables with blockers: `{review_report.counts.deliverables_with_blockers}`",
+            f"- Deliverables with linked bundles: `{review_report.counts.deliverables_with_bundle}`",
             f"- Linked workflow runs: `{review_report.counts.linked_workflow_runs}`",
             f"- Published workflow runs: `{review_report.counts.published_workflow_runs}`",
             f"- Workflow runs with bundles: `{review_report.counts.workflow_runs_with_bundle}`",
@@ -237,46 +237,46 @@ class CourseArtifactMaterializer:
         else:
             lines.append("- No immediate actions recorded.")
 
-        lines.extend(["", "## Module Review", ""])
-        for module in review_report.modules:
+        lines.extend(["", "## Deliverable Review", ""])
+        for deliverable in review_report.deliverables:
             lines.extend(
                 [
-                    f"### {module.position}. {module.title}",
+                    f"### {deliverable.position}. {deliverable.title}",
                     "",
-                    f"- Module slug: `{module.module_slug}`",
-                    f"- Workflow run: `{module.workflow_run_id or 'none'}`",
-                    f"- Ready for publish: `{module.ready_for_publish}`",
-                    f"- Linked bundle available: `{module.bundle_available}`",
+                    f"- Deliverable slug: `{deliverable.deliverable_slug}`",
+                    f"- Workflow run: `{deliverable.workflow_run_id or 'none'}`",
+                    f"- Ready for publish: `{deliverable.ready_for_publish}`",
+                    f"- Linked bundle available: `{deliverable.bundle_available}`",
                 ]
             )
-            if module.blockers:
+            if deliverable.blockers:
                 lines.append("- Blockers:")
-                lines.extend(f"  - {blocker}" for blocker in module.blockers)
-            if module.linked_workflow is not None and module.linked_workflow.bundle is not None:
+                lines.extend(f"  - {blocker}" for blocker in deliverable.blockers)
+            if deliverable.linked_workflow is not None and deliverable.linked_workflow.bundle is not None:
                 lines.append("- Linked assignment public files:")
                 lines.extend(
                     f"  - `{path}`"
-                    for path in module.linked_workflow.bundle.public_files
+                    for path in deliverable.linked_workflow.bundle.public_files
                 )
             lines.append("")
         return "\n".join(lines)
 
-    def _module_doc(self, index: int, module, linked_run: WorkflowRun | None) -> str:
+    def _deliverable_doc(self, index: int, deliverable, linked_run: WorkflowRun | None) -> str:
         lines = [
-            f"# Module {index}: {module.title}",
+            f"# Deliverable {index}: {deliverable.title}",
             "",
-            module.summary,
+            deliverable.summary,
             "",
-            f"- Module slug: `{module.module_slug}`",
-            f"- Design: {self._design_summary(module.design_spec)}",
-            f"- Domain pack: `{module.domain_pack or 'generic'}`",
-            f"- Overlays: {', '.join(f'`{item}`' for item in module.overlays) or 'none'}",
+            f"- Deliverable slug: `{deliverable.deliverable_slug}`",
+            f"- Design: {self._design_summary(deliverable.design_spec)}",
+            f"- Domain pack: `{deliverable.domain_pack or 'generic'}`",
+            f"- Overlays: {', '.join(f'`{item}`' for item in deliverable.overlays) or 'none'}",
             "",
             "## Learning outcomes",
             "",
         ]
-        if module.learning_outcomes:
-            lines.extend(f"- {outcome}" for outcome in module.learning_outcomes)
+        if deliverable.learning_outcomes:
+            lines.extend(f"- {outcome}" for outcome in deliverable.learning_outcomes)
         else:
             lines.append("- No explicit learning outcomes recorded.")
         lines.extend(
@@ -284,11 +284,11 @@ class CourseArtifactMaterializer:
                 "",
                 "## Linked assignment workflow",
                 "",
-                f"- Workflow run: `{module.workflow_run_id or 'none'}`",
-                f"- Stage: `{module.workflow_stage or 'unknown'}`",
-                f"- Status: `{module.workflow_status or 'unknown'}`",
-                f"- Draft kind: `{module.draft_kind or 'unknown'}`",
-                f"- Recommendation status: `{module.recommendation_status or 'unknown'}`",
+                f"- Workflow run: `{deliverable.workflow_run_id or 'none'}`",
+                f"- Stage: `{deliverable.workflow_stage or 'unknown'}`",
+                f"- Status: `{deliverable.workflow_status or 'unknown'}`",
+                f"- Draft kind: `{deliverable.draft_kind or 'unknown'}`",
+                f"- Recommendation status: `{deliverable.recommendation_status or 'unknown'}`",
             ]
         )
         if linked_run is not None:
@@ -310,9 +310,9 @@ class CourseArtifactMaterializer:
                 if public_files:
                     lines.append("- Assignment bundle public files:")
                     lines.extend(f"  - `{path}`" for path in public_files)
-        if module.notes:
+        if deliverable.notes:
             lines.extend(["", "## Notes", ""])
-            lines.extend(f"- {note}" for note in module.notes)
+            lines.extend(f"- {note}" for note in deliverable.notes)
         lines.append("")
         return "\n".join(lines)
 

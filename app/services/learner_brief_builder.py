@@ -4,8 +4,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from app.domain.task_agent import (
-    LearnerModuleBrief,
-    ModuleSpec,
+    LearnerDeliverableBrief,
+    DeliverableSpec,
     PublicCheckSpec,
     TaskAgentServiceSpec,
     TaskEvalCase,
@@ -13,46 +13,46 @@ from app.domain.task_agent import (
 from app.services.review_area_coverage import apply_inferred_review_area_case_tags
 
 
-def ensure_task_agent_module_briefs(
+def ensure_task_agent_deliverable_briefs(
     spec: TaskAgentServiceSpec,
     *,
     overwrite: bool = False,
 ) -> TaskAgentServiceSpec:
-    for module in spec.modules:
-        if overwrite or module.learner_brief is None:
-            module.learner_brief = build_task_agent_module_brief(spec, module)
-        if overwrite or not module.public_checks:
-            module.public_checks = build_task_agent_public_checks(spec, module)
-        if overwrite or not module.learning_outcomes:
-            module.learning_outcomes = build_task_agent_module_learning_outcomes(spec, module)
+    for deliverable in spec.deliverables:
+        if overwrite or deliverable.learner_brief is None:
+            deliverable.learner_brief = build_task_agent_deliverable_brief(spec, deliverable)
+        if overwrite or not deliverable.public_checks:
+            deliverable.public_checks = build_task_agent_public_checks(spec, deliverable)
+        if overwrite or not deliverable.learning_outcomes:
+            deliverable.learning_outcomes = build_task_agent_deliverable_learning_outcomes(spec, deliverable)
     apply_inferred_review_area_case_tags(spec)
     return spec
 
 
-def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec) -> LearnerModuleBrief:
+def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: DeliverableSpec) -> LearnerDeliverableBrief:
     if spec.capabilities.is_grounded_answer_system:
-        return build_grounded_rag_module_brief(spec, module)
+        return build_grounded_rag_deliverable_brief(spec, deliverable)
 
-    module_index = spec.module_order[module.id] + 1
+    deliverable_index = spec.deliverable_order[deliverable.id] + 1
     task_inputs = _schema_fields(spec.task_schema)
     task_outputs = _schema_fields(spec.output_schema)
     examples = _example_scenarios(spec.eval_dataset.cases)
     files_to_edit = list(spec.runtime_dependencies.editable_files or ["app.py"])
-    title_lower = module.title.lower()
+    title_lower = deliverable.title.lower()
 
-    if module_index == 1:
-        why_this_module_matters = (
+    if deliverable_index == 1:
+        why_this_deliverable_matters = (
             "This is the first learner-visible review area. Get the service returning correct, structured results "
             "before you worry about richer controls."
         )
     else:
-        why_this_module_matters = (
-            "This module builds on the working service from earlier review areas and adds one production-facing "
+        why_this_deliverable_matters = (
+            "This deliverable builds on the working service from earlier review areas and adds one production-facing "
             "capability without changing the overall contract."
         )
 
     task_to_build = (
-        f"Edit `app.py` to make the service {module.objective.rstrip('.').lower()}. "
+        f"Edit `app.py` to make the service {deliverable.objective.rstrip('.').lower()}. "
         f"Keep the public `/run` endpoint stable and return JSON that matches the published output contract."
     )
 
@@ -67,18 +67,18 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
             if task_outputs
             else "The response stays within the published output schema."
         ),
-        "The service keeps `/health` working while you extend the module behavior.",
+        "The service keeps `/health` working while you extend the deliverable behavior.",
     ]
 
     implementation_hints = [
         "Start in `app.py`; treat `runtime/` helpers and `starter_manifest.json` as read-only support files.",
-        "Make the smallest change that satisfies this module instead of jumping ahead to later production features.",
+        "Make the smallest change that satisfies this deliverable instead of jumping ahead to later production features.",
         "Prefer explicit, predictable branching over magic heuristics so grader feedback is easier to interpret.",
     ]
 
     non_goals = [
         "Do not redesign the project structure or edit the runtime helpers unless the brief explicitly asks for it.",
-        "Do not optimize for later modules before this module works end to end.",
+        "Do not optimize for later deliverables before this deliverable works end to end.",
     ]
 
     keyword_map: list[tuple[str, list[str], list[str], list[str]]] = [
@@ -86,11 +86,11 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
             "structured output",
             [
                 "Return a valid decision object for every request instead of a placeholder string or partial payload.",
-                "Handle the happy-path support cases with real values, not TODO responses.",
+                "Handle the happy-path visible cases with real values, not TODO responses.",
             ],
             [
                 "Map the incoming request into a single response object and validate that each required field is present.",
-                "Keep the handler small and deterministic; module 1 is about contract correctness, not sophistication.",
+                "Keep the handler small and deterministic; deliverable 1 is about contract correctness, not sophistication.",
             ],
             [
                 "You do not need tool calls, durable state, or approval gates yet.",
@@ -99,7 +99,7 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
         (
             "tool selection",
             [
-                "Use the right support tools before drafting a response.",
+                "Use the right runtime tools before producing the final result.",
                 "Pass the correct arguments into each tool instead of hard-coding outputs.",
             ],
             [
@@ -183,15 +183,15 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
         (
             "production final",
             [
-                "Get the whole module working together under the final success, latency, and quality bar.",
+                "Get the whole deliverable working together under the final success, latency, and quality bar.",
                 "Ship a solution that feels production-ready, not just barely correct on one path.",
             ],
             [
-                "Use the earlier modules as building blocks; this is mostly about integration and polish.",
+                "Use the earlier deliverables as building blocks; this is mostly about integration and polish.",
                 "Keep the public contract stable while improving quality across the visible scenarios.",
             ],
             [
-                "Do not throw away earlier module behavior to chase a single metric.",
+                "Do not throw away earlier deliverable behavior to chase a single metric.",
             ],
         ),
     ]
@@ -202,8 +202,8 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
             implementation_hints.extend(extra_hints)
             non_goals.extend(extra_non_goals)
 
-    return LearnerModuleBrief(
-        why_this_module_matters=why_this_module_matters,
+    return LearnerDeliverableBrief(
+        why_this_deliverable_matters=why_this_deliverable_matters,
         task_to_build=task_to_build,
         files_to_edit=files_to_edit,
         definition_of_done=_dedupe(definition_of_done, limit=5),
@@ -213,25 +213,25 @@ def build_task_agent_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec
     )
 
 
-def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSpec) -> LearnerModuleBrief:
-    module_index = spec.module_order[module.id] + 1
+def build_grounded_rag_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: DeliverableSpec) -> LearnerDeliverableBrief:
+    deliverable_index = spec.deliverable_order[deliverable.id] + 1
     task_inputs = _schema_fields(spec.task_schema)
     task_outputs = _schema_fields(spec.output_schema)
     examples = _example_scenarios(spec.eval_dataset.cases)
-    title_lower = module.title.lower()
+    title_lower = deliverable.title.lower()
     visible_sources = _learner_visible_data_sources(spec)
     primary_source = visible_sources[0] if visible_sources else None
     source_title = primary_source.title if primary_source is not None else "the visible corpus"
     source_path = primary_source.workspace_path if primary_source is not None else "data/corpus.json"
 
-    if module_index == 1:
-        why_this_module_matters = (
+    if deliverable_index == 1:
+        why_this_deliverable_matters = (
             "This first review area gets the learner-visible question answering contract into a usable state. "
             "Start by returning grounded answers with clear citation output before you optimize retrieval depth."
         )
     else:
-        why_this_module_matters = (
-            "This module extends the same grounded QA service and raises the bar on retrieval quality, abstention, "
+        why_this_deliverable_matters = (
+            "This deliverable extends the same grounded QA service and raises the bar on retrieval quality, abstention, "
             "or production readiness without changing the public learner-facing contract."
         )
 
@@ -267,7 +267,7 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
     non_goals = [
         "Do not add network calls or external vector databases in this learner starter.",
         f"Do not fabricate citations or answer beyond what {source_title} supports.",
-        "Do not redesign the project structure before this module works end to end.",
+        "Do not redesign the project structure before this deliverable works end to end.",
     ]
 
     keyword_map: list[tuple[str, list[str], list[str], list[str]]] = [
@@ -325,7 +325,7 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
         (
             "eval-driven",
             [
-                "Use the visible scenarios to tighten groundedness and abstention behavior across the module.",
+                "Use the visible scenarios to tighten groundedness and abstention behavior across the deliverable.",
             ],
             [
                 "Work from failing examples one by one instead of changing the whole system at once.",
@@ -340,7 +340,7 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
                 "Get the full grounded QA flow working together under the final latency and cost bar.",
             ],
             [
-                "Use the earlier modules as building blocks and focus on integration quality.",
+                "Use the earlier deliverables as building blocks and focus on integration quality.",
             ],
             [
                 "Do not regress groundedness to chase speed alone.",
@@ -354,8 +354,8 @@ def build_grounded_rag_module_brief(spec: TaskAgentServiceSpec, module: ModuleSp
             implementation_hints.extend(extra_hints)
             non_goals.extend(extra_non_goals)
 
-    return LearnerModuleBrief(
-        why_this_module_matters=why_this_module_matters,
+    return LearnerDeliverableBrief(
+        why_this_deliverable_matters=why_this_deliverable_matters,
         task_to_build=task_to_build,
         files_to_edit=list(spec.runtime_dependencies.editable_files or ["app.py"]),
         definition_of_done=_dedupe(definition_of_done, limit=6),
@@ -373,13 +373,13 @@ def _learner_visible_data_sources(spec: TaskAgentServiceSpec):
     ]
 
 
-def build_task_agent_module_learning_outcomes(
+def build_task_agent_deliverable_learning_outcomes(
     spec: TaskAgentServiceSpec,
-    module: ModuleSpec,
+    deliverable: DeliverableSpec,
 ) -> list[str]:
-    brief = module.learner_brief or build_task_agent_module_brief(spec, module)
-    public_checks = module.public_checks or build_task_agent_public_checks(spec, module)
-    title_lower = module.title.lower()
+    brief = deliverable.learner_brief or build_task_agent_deliverable_brief(spec, deliverable)
+    public_checks = deliverable.public_checks or build_task_agent_public_checks(spec, deliverable)
+    title_lower = deliverable.title.lower()
 
     outcomes: list[str] = []
     if "structured output" in title_lower or "run contract" in title_lower:
@@ -420,7 +420,7 @@ def build_task_agent_module_learning_outcomes(
     elif "observability" in title_lower or "trace" in title_lower:
         outcomes.extend(
             [
-                "Make the module observable enough to explain what happened during a run.",
+                "Make the deliverable observable enough to explain what happened during a run.",
                 "Emit traces or diagnostics that turn failing scenarios into debuggable evidence.",
             ]
         )
@@ -431,8 +431,8 @@ def build_task_agent_module_learning_outcomes(
     if not outcomes:
         outcomes.extend(
             [
-                f"Build the module so it can {module.objective.strip().rstrip('.').lower()}.",
-                "Use the learner-visible checks to prove the module behaves correctly before submission.",
+                f"Build the deliverable so it can {deliverable.objective.strip().rstrip('.').lower()}.",
+                "Use the learner-visible checks to prove the deliverable behaves correctly before submission.",
             ]
         )
 
@@ -441,18 +441,18 @@ def build_task_agent_module_learning_outcomes(
 
 def build_task_agent_public_checks(
     spec: TaskAgentServiceSpec,
-    module: ModuleSpec,
+    deliverable: DeliverableSpec,
     *,
     limit: int = 3,
 ) -> list[PublicCheckSpec]:
-    selected_cases = _select_public_check_cases(spec, module.id, limit=limit)
+    selected_cases = _select_public_check_cases(spec, deliverable.id, limit=limit)
     checks: list[PublicCheckSpec] = []
     for index, case in enumerate(selected_cases, start=1):
-        coverage = _public_check_coverage(spec, module.id, case.id)
+        coverage = _public_check_coverage(spec, deliverable.id, case.id)
         assertions = _public_check_assertions(case)
         checks.append(
             PublicCheckSpec(
-                id=f"{module.id}_public_check_{index}",
+                id=f"{deliverable.id}_public_check_{index}",
                 title=_public_check_title(case),
                 learner_goal=_public_check_goal(case),
                 case_id=case.id,
@@ -465,20 +465,20 @@ def build_task_agent_public_checks(
     return checks
 
 
-def combine_learner_module_briefs(
+def combine_learner_deliverable_briefs(
     *,
     fallback_task: str,
     fallback_why: str,
     fallback_files_to_edit: list[str] | None = None,
-    briefs: Iterable[LearnerModuleBrief],
-) -> LearnerModuleBrief:
+    briefs: Iterable[LearnerDeliverableBrief],
+) -> LearnerDeliverableBrief:
     brief_list = list(briefs)
     if not brief_list:
-        return LearnerModuleBrief(
-            why_this_module_matters=fallback_why,
+        return LearnerDeliverableBrief(
+            why_this_deliverable_matters=fallback_why,
             task_to_build=fallback_task,
             files_to_edit=fallback_files_to_edit or ["app.py"],
-            definition_of_done=["Implement the module goal in the learner-visible workspace and submit it for grading."],
+            definition_of_done=["Implement the deliverable goal in the learner-visible workspace and submit it for grading."],
             example_scenarios=[],
             implementation_hints=[
                 "Start with the learner-visible starter files before making broader refactors.",
@@ -487,8 +487,8 @@ def combine_learner_module_briefs(
         )
 
     first = brief_list[0]
-    return LearnerModuleBrief(
-        why_this_module_matters=first.why_this_module_matters,
+    return LearnerDeliverableBrief(
+        why_this_deliverable_matters=first.why_this_deliverable_matters,
         task_to_build=first.task_to_build or fallback_task,
         files_to_edit=_dedupe(
             (item for brief in brief_list for item in brief.files_to_edit)
@@ -530,21 +530,21 @@ def combine_public_checks(
     return combined
 
 
-def render_learner_module_markdown(
+def render_learner_deliverable_markdown(
     *,
-    module_index: int,
+    deliverable_index: int,
     title: str,
     summary: str,
     learning_outcomes: list[str],
-    brief: LearnerModuleBrief,
+    brief: LearnerDeliverableBrief,
     public_checks: list[PublicCheckSpec] | None = None,
 ) -> str:
     lines = [
-        f"# Module {module_index}: {title}",
+        f"# Deliverable {deliverable_index}: {title}",
         "",
-        "## Why this module matters",
+        "## Why this deliverable matters",
         "",
-        brief.why_this_module_matters,
+        brief.why_this_deliverable_matters,
         "",
         "## What to build",
         "",
@@ -592,7 +592,7 @@ def render_learner_module_markdown(
 def render_learner_starter_readme(
     *,
     title: str,
-    brief: LearnerModuleBrief,
+    brief: LearnerDeliverableBrief,
     public_checks: list[PublicCheckSpec] | None = None,
 ) -> str:
     lines = [
@@ -604,7 +604,7 @@ def render_learner_starter_readme(
     if brief.files_to_edit:
         lines.extend(["## Start here", ""])
         lines.extend(f"- Edit `{path}`" for path in brief.files_to_edit)
-        lines.append("- Use `module_content.md` as your module brief.")
+        lines.append("- Use `deliverable_content.md` as your deliverable brief.")
         lines.append("")
     if brief.definition_of_done:
         lines.extend(["## Done looks like", ""])
@@ -671,13 +671,13 @@ def _outcomes_from_definition_of_done(items: Iterable[str]) -> list[str]:
         if not cleaned:
             continue
         if cleaned.lower().startswith("`/run`"):
-            outcomes.append("Keep the public contract stable while extending the module behavior.")
+            outcomes.append("Keep the public contract stable while extending the deliverable behavior.")
             continue
         if cleaned.lower().startswith("the response includes"):
             outcomes.append("Return responses that satisfy the learner-visible contract consistently.")
             continue
         if cleaned.lower().startswith("the service keeps"):
-            outcomes.append("Preserve the working service surface while improving the module internals.")
+            outcomes.append("Preserve the working service surface while improving the deliverable internals.")
             continue
         outcomes.append(cleaned)
     return outcomes
@@ -697,11 +697,11 @@ def _dedupe(items: Iterable[str], *, limit: int | None = None) -> list[str]:
 
 def _select_public_check_cases(
     spec: TaskAgentServiceSpec,
-    module_id: str,
+    deliverable_id: str,
     *,
     limit: int = 3,
 ) -> list[TaskEvalCase]:
-    gate = spec.gate_for(module_id)
+    gate = spec.gate_for(deliverable_id)
     active_ids = set(gate.active_behavior_ids + gate.active_quality_ids)
     referenced_case_ids: list[str] = []
 
@@ -734,8 +734,8 @@ def _select_public_check_cases(
     return ordered_cases
 
 
-def _public_check_coverage(spec: TaskAgentServiceSpec, module_id: str, case_id: str) -> dict[str, list[str]]:
-    gate = spec.gate_for(module_id)
+def _public_check_coverage(spec: TaskAgentServiceSpec, deliverable_id: str, case_id: str) -> dict[str, list[str]]:
+    gate = spec.gate_for(deliverable_id)
     active_behavior_ids = set(gate.active_behavior_ids)
     active_quality_ids = set(gate.active_quality_ids)
     behavior_ids = [

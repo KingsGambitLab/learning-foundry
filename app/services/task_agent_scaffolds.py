@@ -22,7 +22,7 @@ from app.domain.task_agent import (
     FallbackPolicyTestParams,
     FallbackStep,
     FaultInjection,
-    ModuleSpec,
+    DeliverableSpec,
     OutputSchemaTestParams,
     P95RunLatencyTestParams,
     ProgressionMode,
@@ -46,8 +46,7 @@ from app.domain.task_agent import (
     TraceSchemaTestParams,
     WorkspaceScope,
 )
-from app.services.examples import get_support_triage_example
-from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 
 
 def _slugify(value: str) -> str:
@@ -58,40 +57,40 @@ def _slugify(value: str) -> str:
 def _apply_overlays(spec: TaskAgentServiceSpec, overlays: list[str]) -> TaskAgentServiceSpec:
     if not overlays:
         return spec
-    for module in spec.modules:
-        overlay_ids = list(module.overlay_ids)
-        if module.id == spec.modules[-1].id:
+    for deliverable in spec.deliverables:
+        overlay_ids = list(deliverable.overlay_ids)
+        if deliverable.id == spec.deliverables[-1].id:
             for overlay in overlays:
                 if overlay not in overlay_ids:
                     overlay_ids.append(overlay)
-            module.overlay_ids = overlay_ids
+            deliverable.overlay_ids = overlay_ids
     return spec
 
 
 def _compress_to_survey(spec: TaskAgentServiceSpec) -> TaskAgentServiceSpec:
     mapping = {
-        spec.modules[0].id: "module_1",
-        spec.modules[1].id: "module_2",
+        spec.deliverables[0].id: "deliverable_1",
+        spec.deliverables[1].id: "deliverable_2",
     }
-    for module in spec.modules[2:]:
-        mapping[module.id] = "module_3"
+    for deliverable in spec.deliverables[2:]:
+        mapping[deliverable.id] = "deliverable_3"
 
-    spec.modules = [
-        ModuleSpec(
-            id="module_1",
+    spec.deliverables = [
+        DeliverableSpec(
+            id="deliverable_1",
             title="Core contract",
             objective="Return structured outputs through a stable run contract.",
             starter_type=StarterType.working_buggy,
         ),
-        ModuleSpec(
-            id="module_2",
+        DeliverableSpec(
+            id="deliverable_2",
             title="Tool use and control flow",
             objective="Use tools correctly and enforce the core safety policies.",
             starter_type=StarterType.partial_implementation,
             overlay_ids=["productionization_overlay"],
         ),
-        ModuleSpec(
-            id="module_3",
+        DeliverableSpec(
+            id="deliverable_3",
             title="Final quality bar",
             objective="Meet the final task-success, latency, and quality targets.",
             starter_type=StarterType.working_suboptimal,
@@ -102,7 +101,7 @@ def _compress_to_survey(spec: TaskAgentServiceSpec) -> TaskAgentServiceSpec:
     for behavior in spec.behaviors:
         behavior.first_required_in = mapping[behavior.first_required_in]
     for quality in spec.qualities:
-        quality.first_required_in = "module_3"
+        quality.first_required_in = "deliverable_3"
     return spec
 
 
@@ -113,9 +112,6 @@ def _build_generic_task_agent_scaffold(
     risk_class: RiskClass,
     domain_pack: str | None,
 ) -> tuple[TaskAgentServiceSpec, str]:
-    if domain_pack == "support_triage":
-        return get_support_triage_example().model_copy(deep=True), "support_triage"
-
     slug = _slugify(title)
     spec = TaskAgentServiceSpec(
         title=title,
@@ -126,7 +122,7 @@ def _build_generic_task_agent_scaffold(
         course_structure=CourseStructureSpec(
             package_type=PackageType.progressive_codebase_course,
             workspace_scope=WorkspaceScope.shared_course_workspace,
-            progression_mode=ProgressionMode.independent_modules,
+            progression_mode=ProgressionMode.independent_deliverables,
             shared_codebase=True,
         ),
         runtime_dependencies=RuntimeDependencySpec(
@@ -150,7 +146,7 @@ def _build_generic_task_agent_scaffold(
         assessment_strategy=AssessmentStrategySpec(
             public_checks_required=True,
             hidden_grader_required=True,
-            cumulative_module_gates=False,
+            cumulative_deliverable_gates=False,
             learner_submission_enabled=True,
         ),
         supported_modes=[
@@ -158,28 +154,28 @@ def _build_generic_task_agent_scaffold(
             AgentMode.multi_step_workflow,
             AgentMode.async_human_in_loop,
         ],
-        modules=[
-            ModuleSpec(
-                id="module_1",
+        deliverables=[
+            DeliverableSpec(
+                id="deliverable_1",
                 title="Structured output and run contract",
                 objective="Return the expected structured output for a bounded task.",
                 starter_type=StarterType.working_buggy,
             ),
-            ModuleSpec(
-                id="module_2",
+            DeliverableSpec(
+                id="deliverable_2",
                 title="Tool selection and safe action routing",
                 objective="Choose the right tools and keep writes behind a clear policy boundary.",
                 starter_type=StarterType.partial_implementation,
             ),
-            ModuleSpec(
-                id="module_3",
+            DeliverableSpec(
+                id="deliverable_3",
                 title="Fallbacks, approvals, and traceability",
                 objective="Recover from failures and expose a replayable run trace.",
                 starter_type=StarterType.working_buggy,
                 overlay_ids=["productionization_overlay"],
             ),
-            ModuleSpec(
-                id="module_4",
+            DeliverableSpec(
+                id="deliverable_4",
                 title="Production final",
                 objective="Meet the quality, latency, and calibration targets together.",
                 starter_type=StarterType.working_suboptimal,
@@ -321,13 +317,13 @@ def _build_generic_task_agent_scaffold(
             BehaviorSpec(
                 id="structured_output",
                 description="The agent returns the expected structured result.",
-                first_required_in="module_1",
+                first_required_in="deliverable_1",
                 test=OutputSchemaTestParams(type="output_schema_test", case_ids=["happy_path", "escalation_case"]),
             ),
             BehaviorSpec(
                 id="tool_selection",
                 description="The agent chooses the bounded toolset appropriately.",
-                first_required_in="module_2",
+                first_required_in="deliverable_2",
                 test=ToolSelectionTestParams(
                     type="tool_selection_test",
                     expectations=[
@@ -339,7 +335,7 @@ def _build_generic_task_agent_scaffold(
             BehaviorSpec(
                 id="escalation_policy",
                 description="The agent escalates ambiguous cases rather than bluffing.",
-                first_required_in="module_3",
+                first_required_in="deliverable_3",
                 test=EscalationPolicyTestParams(
                     type="escalation_policy_test",
                     expectations=[
@@ -350,7 +346,7 @@ def _build_generic_task_agent_scaffold(
             BehaviorSpec(
                 id="fallbacks_and_dry_run",
                 description="The agent recovers from tool failures and avoids mutations in dry-run mode.",
-                first_required_in="module_3",
+                first_required_in="deliverable_3",
                 test=FallbackPolicyTestParams(
                     type="fallback_policy_test",
                     injections=[
@@ -362,7 +358,7 @@ def _build_generic_task_agent_scaffold(
             BehaviorSpec(
                 id="dry_run_semantics",
                 description="Dry-run mode blocks mutating side effects.",
-                first_required_in="module_3",
+                first_required_in="deliverable_3",
                 test=DryRunSemanticsTestParams(
                     type="dry_run_semantics_test",
                     case_ids=["happy_path"],
@@ -374,7 +370,7 @@ def _build_generic_task_agent_scaffold(
             QualitySpec(
                 id="task_success_final",
                 description="The agent meets the target success rate.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=TaskSuccessRateTestParams(
                     type="task_success_rate_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -384,7 +380,7 @@ def _build_generic_task_agent_scaffold(
             QualitySpec(
                 id="quality_final",
                 description="The agent output quality meets the rubric.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=TaskOutputQualityJudgeTestParams(
                     type="task_output_quality_judge_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -396,7 +392,7 @@ def _build_generic_task_agent_scaffold(
             QualitySpec(
                 id="latency_final",
                 description="The agent meets the p95 latency target.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=P95RunLatencyTestParams(
                     type="p95_run_latency_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -407,7 +403,7 @@ def _build_generic_task_agent_scaffold(
             QualitySpec(
                 id="cost_final",
                 description="The agent stays inside the cost budget.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=CostPerSuccessTestParams(
                     type="cost_per_success_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -417,7 +413,7 @@ def _build_generic_task_agent_scaffold(
             QualitySpec(
                 id="confidence_final",
                 description="The agent confidence is reasonably calibrated.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=ConfidenceCalibrationJudgeTestParams(
                     type="confidence_calibration_judge_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -426,7 +422,7 @@ def _build_generic_task_agent_scaffold(
             ),
         ],
     )
-    return spec, "generic_task_agent"
+    return spec, "generic_project_service"
 
 
 def _build_grounded_rag_scaffold(
@@ -444,7 +440,7 @@ def _build_grounded_rag_scaffold(
         course_structure=CourseStructureSpec(
             package_type=PackageType.progressive_codebase_course,
             workspace_scope=WorkspaceScope.shared_course_workspace,
-            progression_mode=ProgressionMode.independent_modules,
+            progression_mode=ProgressionMode.independent_deliverables,
             shared_codebase=True,
         ),
         runtime_dependencies=RuntimeDependencySpec(
@@ -468,35 +464,35 @@ def _build_grounded_rag_scaffold(
         assessment_strategy=AssessmentStrategySpec(
             public_checks_required=True,
             hidden_grader_required=True,
-            cumulative_module_gates=False,
+            cumulative_deliverable_gates=False,
             learner_submission_enabled=True,
         ),
         supported_modes=[
             AgentMode.routed_single_step,
             AgentMode.retrieval_plus_action,
         ],
-        modules=[
-            ModuleSpec(
-                id="module_1",
+        deliverables=[
+            DeliverableSpec(
+                id="deliverable_1",
                 title="Grounded answer contract and citation schema",
                 objective="Return grounded answers with supporting citations through a stable /run endpoint.",
                 starter_type=StarterType.working_buggy,
             ),
-            ModuleSpec(
-                id="module_2",
+            DeliverableSpec(
+                id="deliverable_2",
                 title="Retrieval selection and evidence ranking",
                 objective="Use the retrieval tools to surface the strongest supporting evidence before answering.",
                 starter_type=StarterType.partial_implementation,
             ),
-            ModuleSpec(
-                id="module_3",
+            DeliverableSpec(
+                id="deliverable_3",
                 title="Abstention and traceable retrieval flow",
                 objective="Abstain when evidence is weak and expose a readable retrieval trace.",
                 starter_type=StarterType.working_buggy,
                 overlay_ids=["productionization_overlay"],
             ),
-            ModuleSpec(
-                id="module_4",
+            DeliverableSpec(
+                id="deliverable_4",
                 title="Production final at groundedness bar",
                 objective="Meet the groundedness, latency, and operating-cost targets together.",
                 starter_type=StarterType.working_suboptimal,
@@ -641,7 +637,7 @@ def _build_grounded_rag_scaffold(
             BehaviorSpec(
                 id="grounded_answer_contract",
                 description="The service returns grounded answers with the required citation schema.",
-                first_required_in="module_1",
+                first_required_in="deliverable_1",
                 test=OutputSchemaTestParams(
                     type="output_schema_test",
                     case_ids=["ada_birth", "turing_role", "unsupported_lunar_policy"],
@@ -650,7 +646,7 @@ def _build_grounded_rag_scaffold(
             BehaviorSpec(
                 id="retrieval_tool_selection",
                 description="The service uses retrieval tools before answering supported questions.",
-                first_required_in="module_2",
+                first_required_in="deliverable_2",
                 test=ToolSelectionTestParams(
                     type="tool_selection_test",
                     expectations=[
@@ -663,7 +659,7 @@ def _build_grounded_rag_scaffold(
             BehaviorSpec(
                 id="retrieval_trace_completeness",
                 description="The service emits a readable retrieval trace for the grounded answer flow.",
-                first_required_in="module_3",
+                first_required_in="deliverable_3",
                 test=TraceSchemaTestParams(
                     type="trace_schema_test",
                     case_ids=["ada_birth", "unsupported_lunar_policy"],
@@ -679,7 +675,7 @@ def _build_grounded_rag_scaffold(
             QualitySpec(
                 id="latency_final",
                 description="The service meets the p95 latency target.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=P95RunLatencyTestParams(
                     type="p95_run_latency_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -690,7 +686,7 @@ def _build_grounded_rag_scaffold(
             QualitySpec(
                 id="cost_final",
                 description="The service stays inside the cost budget.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=CostPerSuccessTestParams(
                     type="cost_per_success_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -717,7 +713,7 @@ def _build_retrieval_scaffold(
         course_structure=CourseStructureSpec(
             package_type=PackageType.progressive_codebase_course,
             workspace_scope=WorkspaceScope.shared_course_workspace,
-            progression_mode=ProgressionMode.independent_modules,
+            progression_mode=ProgressionMode.independent_deliverables,
             shared_codebase=True,
         ),
         runtime_dependencies=RuntimeDependencySpec(
@@ -741,32 +737,32 @@ def _build_retrieval_scaffold(
         assessment_strategy=AssessmentStrategySpec(
             public_checks_required=True,
             hidden_grader_required=True,
-            cumulative_module_gates=False,
+            cumulative_deliverable_gates=False,
             learner_submission_enabled=True,
         ),
         supported_modes=[AgentMode.routed_single_step],
-        modules=[
-            ModuleSpec(
-                id="module_1",
+        deliverables=[
+            DeliverableSpec(
+                id="deliverable_1",
                 title="Retrieval contract and result schema",
                 objective="Return ranked search results through a stable /run endpoint.",
                 starter_type=StarterType.working_buggy,
             ),
-            ModuleSpec(
-                id="module_2",
+            DeliverableSpec(
+                id="deliverable_2",
                 title="Ranking quality and metadata filters",
                 objective="Improve ordering quality and respect simple filter constraints.",
                 starter_type=StarterType.partial_implementation,
             ),
-            ModuleSpec(
-                id="module_3",
+            DeliverableSpec(
+                id="deliverable_3",
                 title="Traceable retrieval flow",
                 objective="Expose retrieval traces that explain why documents were returned.",
                 starter_type=StarterType.working_buggy,
                 overlay_ids=["productionization_overlay"],
             ),
-            ModuleSpec(
-                id="module_4",
+            DeliverableSpec(
+                id="deliverable_4",
                 title="Production retrieval final",
                 objective="Meet quality, latency, and operating-cost targets together.",
                 starter_type=StarterType.working_suboptimal,
@@ -882,13 +878,13 @@ def _build_retrieval_scaffold(
             BehaviorSpec(
                 id="ranked_results_schema",
                 description="The service returns a stable ranked results payload.",
-                first_required_in="module_1",
+                first_required_in="deliverable_1",
                 test=OutputSchemaTestParams(type="output_schema_test", case_ids=["ada_birth", "turing_role"]),
             ),
             BehaviorSpec(
                 id="retrieval_tool_selection",
                 description="The service uses retrieval tools before returning results.",
-                first_required_in="module_2",
+                first_required_in="deliverable_2",
                 test=ToolSelectionTestParams(
                     type="tool_selection_test",
                     expectations=[
@@ -900,7 +896,7 @@ def _build_retrieval_scaffold(
             BehaviorSpec(
                 id="retrieval_trace_completeness",
                 description="The service emits a readable retrieval trace.",
-                first_required_in="module_3",
+                first_required_in="deliverable_3",
                 test=TraceSchemaTestParams(
                     type="trace_schema_test",
                     case_ids=["ada_birth", "turing_role"],
@@ -916,7 +912,7 @@ def _build_retrieval_scaffold(
             QualitySpec(
                 id="latency_final",
                 description="The service meets the p95 latency target.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=P95RunLatencyTestParams(
                     type="p95_run_latency_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -927,7 +923,7 @@ def _build_retrieval_scaffold(
             QualitySpec(
                 id="cost_final",
                 description="The service stays inside the cost budget.",
-                first_required_in="module_4",
+                first_required_in="deliverable_4",
                 test=CostPerSuccessTestParams(
                     type="cost_per_success_test",
                     dataset_id=f"{slug}_eval_v1",
@@ -983,8 +979,8 @@ def build_task_agent_scaffold(
             quality.test.dataset_id = spec.eval_dataset.id
 
     preferred_starter_type = design.runtime_dependencies.starter_type
-    for module in spec.modules:
-        module.starter_type = preferred_starter_type
+    for deliverable in spec.deliverables:
+        deliverable.starter_type = preferred_starter_type
 
     spec = _apply_overlays(spec, design.overlays)
     if design.course_structure.package_type == PackageType.survey_course:
@@ -1004,4 +1000,4 @@ def build_task_agent_scaffold(
             "package_type": design.course_structure.package_type,
         }
     )
-    return ensure_task_agent_module_briefs(spec, overwrite=True), origin_template
+    return ensure_task_agent_deliverable_briefs(spec, overwrite=True), origin_template

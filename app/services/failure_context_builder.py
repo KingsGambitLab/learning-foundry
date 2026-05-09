@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 from app.domain.workflow import (
     FailureContext,
-    FailureContextModuleReport,
+    FailureContextDeliverableReport,
     FailureContextSandboxSummary,
     FailureContextValidationIssue,
     ReviewerFinding,
@@ -95,7 +95,7 @@ def _sandbox_summary(latest_node: WorkflowNodeExecution) -> FailureContextSandbo
 
     failed_reports = [
         report
-        for report in sandbox_result.module_reports
+        for report in sandbox_result.deliverable_reports
         if not report.compile_succeeded or not report.runtime_succeeded or report.error or report.stderr
     ]
     return FailureContextSandboxSummary(
@@ -104,10 +104,10 @@ def _sandbox_summary(latest_node: WorkflowNodeExecution) -> FailureContextSandbo
         build_stderr_excerpt=_excerpt(sandbox_result.build_stderr),
         run_stdout_excerpt=_excerpt(sandbox_result.run_stdout),
         run_stderr_excerpt=_excerpt(sandbox_result.run_stderr),
-        failed_modules=[report.module_id for report in failed_reports],
-        module_reports=[
-            FailureContextModuleReport(
-                module_id=report.module_id,
+        failed_deliverables=[report.deliverable_id for report in failed_reports],
+        deliverable_reports=[
+            FailureContextDeliverableReport(
+                deliverable_id=report.deliverable_id,
                 compile_succeeded=report.compile_succeeded,
                 runtime_succeeded=report.runtime_succeeded,
                 error=report.error,

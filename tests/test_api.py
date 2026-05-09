@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import py_compile
 import tempfile
 import unittest
@@ -17,15 +18,25 @@ from app.domain.course import (
     CourseAsyncOperation,
     CourseGenerationSource,
     CourseGenerationStatus,
-    CreateCourseModuleRequest,
+    CreateCourseDeliverableRequest,
     GenerateCourseFromBriefRequest,
     GeneratedCoursePlan,
 )
-from app.domain.grading import GradeStatus, LiveAssignmentGradeReport, LiveTaskAgentGradeReport
+from app.domain.grading import (
+    AssignmentGradeReport,
+    GradeStatus,
+    LearnerReviewGuidance,
+    LiveAssignmentGradeReport,
+    LiveTaskAgentGradeReport,
+    DeliverableGradeReport,
+    ReviewAreaGradeReport,
+    TestGradeResult,
+)
 from app.domain.registry import PackageType, RiskClass
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
+from app.domain.publish import LearnerCoursePackage, LearnerDeliverablePackage
 from app.domain.sandbox import (
-    ModuleSandboxReport,
+    DeliverableSandboxReport,
     SandboxAvailability,
     SandboxExecutionResult,
     SandboxExecutionStatus,
@@ -39,11 +50,13 @@ from app.services.course_generation_service import CourseGenerationService
 from app.services.course_workflow_service import CourseWorkflowService
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.docker_sandbox_runner import DockerSandboxRunner
-from app.services.examples import get_support_triage_passing_submission
+from app.services.examples import get_generic_project_submission
 from app.services.intake_router import GenerationIntake
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
 from app.services.lms_service import LMSService
 from app.services.openai_course_planner import OpenAICoursePlanner
+from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
+from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services import openai_runtime_support
 from app.services.openai_task_agent_authoring import (
     EvalCaseCustomization,
@@ -55,6 +68,7 @@ from app.services.openai_task_agent_authoring import (
 )
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
+from app.services.learner_studio_service import LearnerStudioError
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
 from app.services.task_agent_starter_templates import (
     render_legacy_task_agent_root_app,
@@ -116,20 +130,20 @@ class FakeLivePlanner:
             summary=request.goal,
             package_type=PackageType.progressive_codebase_course,
             shared_design_spec=shared_design_spec,
-            modules=[
-                CreateCourseModuleRequest(
+            deliverables=[
+                CreateCourseDeliverableRequest(
                     title="Live planning foundation",
                     summary="Generated from the fake live planner.",
                     learning_outcomes=request.learning_outcomes[:2],
                     design_spec=shared_design_spec,
-                    domain_pack_hint="support_triage",
+                    domain_pack_hint="generic_project_example",
                 ),
-                CreateCourseModuleRequest(
-                    title="Live planning production module",
+                CreateCourseDeliverableRequest(
+                    title="Live planning production deliverable",
                     summary="Adds production controls and evaluation.",
                     learning_outcomes=request.learning_outcomes[:3],
                     design_spec=shared_design_spec.model_copy(update={"overlays": ["productionization_overlay"]}),
-                    domain_pack_hint="support_triage",
+                    domain_pack_hint="generic_project_example",
                     overlays_hint=["productionization_overlay"],
                 ),
             ],
@@ -203,10 +217,10 @@ class FakeSandboxRunner:
         self.calls.append(run.id)
         reports = []
         if run.artifacts.task_agent_spec is not None:
-            for module in run.artifacts.task_agent_spec.modules:
+            for deliverable in run.artifacts.task_agent_spec.deliverables:
                 reports.append(
-                    ModuleSandboxReport(
-                        module_id=module.id,
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
                         compile_succeeded=self.success,
                         runtime_succeeded=self.success,
                         health_status_code=200 if self.success else None,
@@ -230,7 +244,7 @@ class FakeSandboxRunner:
             build_stderr="" if self.success else "build failed",
             run_stdout='{"success": true}' if self.success else "",
             run_stderr="" if self.success else "run failed",
-            module_reports=reports,
+            deliverable_reports=reports,
             error=None if self.success else "sandbox failed",
         )
 
@@ -256,7 +270,7 @@ class FakeTaskAgentAuthoringService:
             summary=summary,
             design_spec=design_spec,
         )
-        spec.modules[0].title = "OpenAI-authored foundation"
+        spec.deliverables[0].title = "OpenAI-authored foundation"
         spec.summary = f"{summary} Generated with fake OpenAI."
         return TaskAgentAuthoringResult(
             spec=spec,
@@ -282,7 +296,7 @@ class FakeTaskAgentAuthoringService:
     ) -> TaskAgentAuthoringResult:
         self.last_failure_context = failure_context
         revised = spec.model_copy(deep=True)
-        revised.modules[0].title = f"Revised after feedback: {feedback[:32]}"
+        revised.deliverables[0].title = f"Revised after feedback: {feedback[:32]}"
         revised.summary = f"{summary} Revised from human review feedback."
         return TaskAgentAuthoringResult(
             spec=revised,
@@ -302,8 +316,8 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
         workspace_root = workspace.public_dir if workspace is not None else "/tmp/missing-workspace"
         if run.artifacts.task_agent_spec is not None and workspace is not None:
             public_dir = Path(workspace.public_dir)
-            for module in run.artifacts.task_agent_spec.modules:
-                app_path = public_dir / "starter" / module.id / "app.py"
+            for deliverable in run.artifacts.task_agent_spec.deliverables:
+                app_path = public_dir / "starter" / deliverable.id / "app.py"
                 try:
                     py_compile.compile(str(app_path), doraise=True)
                     compile_succeeded = True
@@ -313,8 +327,8 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
                     error = str(exc)
                     success = False
                 reports.append(
-                    ModuleSandboxReport(
-                        module_id=module.id,
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
                         compile_succeeded=compile_succeeded,
                         runtime_succeeded=compile_succeeded,
                         health_status_code=200 if compile_succeeded else None,
@@ -338,7 +352,7 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
             build_stderr="" if success else "build failed",
             run_stdout='{"success": true}' if success else "",
             run_stderr="" if success else "run failed",
-            module_reports=reports,
+            deliverable_reports=reports,
             error=None if success else "workspace compile failed",
         )
 
@@ -352,9 +366,9 @@ class BrokenFirstWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
         run, result = super().author_workspace(run)
         self.author_calls += 1
         if self.author_calls == 1 and run.artifacts.workspace_snapshot is not None:
-            broken_path = Path(run.artifacts.workspace_snapshot.public_dir) / "starter" / "module_1" / "app.py"
+            broken_path = Path(run.artifacts.workspace_snapshot.public_dir) / "starter" / "deliverable_1" / "app.py"
             broken_path.write_text("def broken(:\n", encoding="utf-8")
-            result.updated_files.append("public/starter/module_1/app.py")
+            result.updated_files.append("public/starter/deliverable_1/app.py")
             result.message = "Injected a broken starter on the first authoring pass to exercise the repair loop."
         return run, result
 
@@ -386,9 +400,9 @@ class FakeLearnerStudioService:
             notes=["Fake learner studio."],
         )
 
-    def grade_workspace(self, *, workspace_root: str, spec, module_id: str):
-        submission = get_support_triage_passing_submission()
-        grade_report = grade_task_agent_submission(spec, module_id, submission)
+    def grade_workspace(self, *, workspace_root: str, spec, deliverable_id: str):
+        submission = get_generic_project_submission()
+        grade_report = grade_task_agent_submission(spec, deliverable_id, submission)
         return LiveTaskAgentGradeReport(
             base_url="http://127.0.0.1:18080",
             submission=submission,
@@ -396,13 +410,249 @@ class FakeLearnerStudioService:
         )
 
     def grade_assignment(self, *, workspace_root: str, spec):
-        submission = get_support_triage_passing_submission()
+        submission = get_generic_project_submission()
         assignment_report = grade_assignment_submission(spec, submission)
         return LiveAssignmentGradeReport(
             base_url="http://127.0.0.1:18080",
             submission=submission,
             assignment_report=assignment_report,
         )
+
+    def stop_editor(self, session: LearnerWorkspaceSession | None) -> None:
+        return None
+
+
+class FakeFailingLearnerStudioService(FakeLearnerStudioService):
+    def grade_assignment(self, *, workspace_root: str, spec):
+        submission = get_generic_project_submission().model_copy(deep=True)
+        submission.runs = submission.runs[:1]
+        assignment_report = grade_assignment_submission(spec, submission)
+        return LiveAssignmentGradeReport(
+            base_url="http://127.0.0.1:18080",
+            submission=submission,
+            assignment_report=assignment_report,
+        )
+
+
+class FakeBrokenAppLearnerStudioService(FakeLearnerStudioService):
+    def grade_assignment(self, *, workspace_root: str, spec):
+        raise LearnerStudioError(
+            "Timed out waiting for 'http://127.0.0.1:18080/health' to respond. Last error: [Errno 61] Connection refused\n\n"
+            "Container logs:\nTraceback (most recent call last):\nImportError: broken generated app"
+        )
+
+
+class FakePlatformBrokenLearnerStudioService(FakeLearnerStudioService):
+    def launch_editor(
+        self,
+        *,
+        enrollment_id: str,
+        deliverable_id: str,
+        workspace_root: str,
+        scope: LearnerWorkspaceScope,
+        existing_session: LearnerWorkspaceSession | None = None,
+    ) -> LearnerWorkspaceSession:
+        raise LearnerStudioError("Could not start learner editor container.")
+
+
+class FakeLearnerFeedbackService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def annotate_assignment_report(self, *, assignment_report, **_kwargs):
+        self.calls += 1
+        updated = []
+        for area in assignment_report.review_areas:
+            if area.grade_report.status == GradeStatus.failed:
+                updated.append(
+                    area.model_copy(
+                        update={
+                            "feedback": LearnerReviewGuidance(
+                                strengths=["The supported cases are already behaving correctly."],
+                                fundamental_gap="The unsupported query path is still returning the wrong contract.",
+                                why_it_matters=["A grounded assistant needs to abstain cleanly when support is weak."],
+                                likely_root_cause=["The abstention branch is not normalizing the final response."],
+                                investigation_steps=[
+                                    "Run the unsupported case locally and inspect the raw JSON response.",
+                                    "Check whether citations are cleared when the assistant abstains.",
+                                ],
+                                learner_feedback="Focus on the unsupported-query path next. Positive cases are already in decent shape.",
+                            ),
+                        }
+                    )
+                )
+            else:
+                updated.append(area)
+        return assignment_report.model_copy(update={"review_areas": updated})
+
+
+class OpenAILearnerFeedbackServiceTests(unittest.TestCase):
+    def test_sparse_llm_feedback_is_filled_from_deliverable_context(self) -> None:
+        spec, _origin = build_task_agent_scaffold(
+            title="Grounded docs assistant",
+            summary="Answer from a visible corpus and abstain when support is weak.",
+            design_spec=_design_spec(
+                title="Grounded docs assistant",
+                problem_statement="Build a grounded internal docs assistant with citations and abstention.",
+                learning_outcomes=["retrieval", "grounded answers", "abstention"],
+            ),
+        )
+
+        failed_deliverable = spec.deliverables[0]
+        passed_deliverable = spec.deliverables[1]
+        learner_package = LearnerCoursePackage(
+            course_run_id="course_demo",
+            title=spec.title,
+            summary=spec.summary,
+            package_type=spec.package_type,
+            published_at=datetime.now(UTC),
+            workspace_scope=LearnerWorkspaceScope.shared_course,
+            project_brief_markdown="Build a grounded internal docs assistant that cites the visible corpus and abstains when support is weak.",
+            deliverables=[
+                LearnerDeliverablePackage(
+                    deliverable_id=failed_deliverable.id,
+                    title=failed_deliverable.title,
+                    objective=failed_deliverable.objective,
+                    deliverable_index=1,
+                    learner_brief=failed_deliverable.learner_brief,
+                    public_checks=failed_deliverable.public_checks,
+                    content_markdown="Failing deliverable content",
+                    starter_readme="Failing deliverable README",
+                    learning_outcomes=failed_deliverable.learning_outcomes,
+                    active_test_ids=[],
+                    completion_rule="Pass the review checks for this deliverable.",
+                    visible_files=spec.runtime_dependencies.editable_files,
+                ),
+                LearnerDeliverablePackage(
+                    deliverable_id=passed_deliverable.id,
+                    title=passed_deliverable.title,
+                    objective=passed_deliverable.objective,
+                    deliverable_index=2,
+                    learner_brief=passed_deliverable.learner_brief,
+                    public_checks=passed_deliverable.public_checks,
+                    content_markdown="Passing deliverable content",
+                    starter_readme="Passing deliverable README",
+                    learning_outcomes=passed_deliverable.learning_outcomes,
+                    active_test_ids=[],
+                    completion_rule="Pass the review checks for this deliverable.",
+                    visible_files=spec.runtime_dependencies.editable_files,
+                ),
+            ],
+        )
+
+        assignment_report = AssignmentGradeReport(
+            total_tests=3,
+            passed_tests=1,
+            failed_tests=2,
+            pass_rate=1 / 3,
+            status=GradeStatus.failed,
+            review_areas=[
+                ReviewAreaGradeReport(
+                    deliverable_id=failed_deliverable.id,
+                    title=failed_deliverable.title,
+                    objective=failed_deliverable.objective,
+                    deliverable_index=1,
+                    grade_report=DeliverableGradeReport(
+                        deliverable_id=failed_deliverable.id,
+                        total_tests=2,
+                        passed_tests=0,
+                        failed_tests=2,
+                        pass_rate=0.0,
+                        status=GradeStatus.failed,
+                        results=[
+                            TestGradeResult(
+                                test_id="unsupported_query",
+                                test_type="behavior",
+                                kind="expected_output",
+                                status=GradeStatus.failed,
+                                score=0.0,
+                                summary="Case 'unsupported_lunar_policy' output does not match expected subset",
+                                diagnostics=[
+                                    "Expected abstained=True and an empty citations list for unsupported questions.",
+                                ],
+                            ),
+                            TestGradeResult(
+                                test_id="answer_contract",
+                                test_type="behavior",
+                                kind="expected_output",
+                                status=GradeStatus.failed,
+                                score=0.0,
+                                summary="Supported answer contract is incomplete",
+                                diagnostics=[
+                                    "The response shape still differs from the expected contract.",
+                                ],
+                            ),
+                        ],
+                    ),
+                ),
+                ReviewAreaGradeReport(
+                    deliverable_id=passed_deliverable.id,
+                    title=passed_deliverable.title,
+                    objective=passed_deliverable.objective,
+                    deliverable_index=2,
+                    grade_report=DeliverableGradeReport(
+                        deliverable_id=passed_deliverable.id,
+                        total_tests=1,
+                        passed_tests=1,
+                        failed_tests=0,
+                        pass_rate=1.0,
+                        status=GradeStatus.passed,
+                        results=[
+                            TestGradeResult(
+                                test_id="grounded_answer",
+                                test_type="behavior",
+                                kind="expected_output",
+                                status=GradeStatus.passed,
+                                score=1.0,
+                                summary="Grounded answer cases passed",
+                                diagnostics=[],
+                            ),
+                        ],
+                    ),
+                ),
+            ],
+        )
+
+        class SparseResponsesClient:
+            def __init__(self) -> None:
+                self.responses = self
+
+            def create(self, **_kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"output_text": json.dumps({"fundamental_gap": "Unsupported questions still return a confident answer."})},
+                )()
+
+        service = OpenAILearnerFeedbackService(
+            client_factory=lambda **_kwargs: SparseResponsesClient(),
+        )
+
+        with tempfile.TemporaryDirectory() as workspace_dir, patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch.object(
+            service,
+            "_openai_sdk_available",
+            return_value=True,
+        ):
+            (Path(workspace_dir) / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            updated = service.annotate_assignment_report(
+                project_brief_markdown=learner_package.project_brief_markdown,
+                learner_package=learner_package,
+                assignment_report=assignment_report,
+                workspace_root=workspace_dir,
+                spec=spec,
+            )
+
+        failed_feedback = updated.review_areas[0].feedback
+        self.assertIsNotNone(failed_feedback)
+        assert failed_feedback is not None
+        self.assertTrue(failed_feedback.strengths)
+        self.assertTrue(failed_feedback.why_it_matters)
+        self.assertTrue(failed_feedback.likely_root_cause)
+        self.assertTrue(failed_feedback.investigation_steps)
+        self.assertTrue(failed_feedback.learner_feedback)
+        self.assertIn("Unsupported questions still return a confident answer.", failed_feedback.fundamental_gap)
+        self.assertTrue(any("passing" in item.lower() for item in failed_feedback.strengths))
+        self.assertTrue(any("visible check" in item.lower() or "response" in item.lower() for item in failed_feedback.investigation_steps))
 
 
 class CourseGenCodexApiTests(unittest.TestCase):
@@ -424,6 +674,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             workspace_authoring_service=self.workspace_authoring_service,
         )
         app.state.task_agent_blackbox_runner = TaskAgentBlackBoxRunner()
+        app.state.learner_feedback_service = OpenAILearnerFeedbackService(enabled=False)
         app.state.task_agent_authoring_service = self.disabled_authoring_service
         app.state.assignment_workspace_manager = self.workspace_manager
         app.state.creator_asset_service = self.creator_asset_service
@@ -455,7 +706,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _install_mock_blackbox_runner(self) -> None:
-        reference_submission = get_support_triage_passing_submission().model_dump(mode="json")
+        reference_submission = get_generic_project_submission().model_dump(mode="json")
         reference_runs = {run["run_id"]: run for run in reference_submission["runs"]}
         runtime_runs: dict[str, dict] = {}
 
@@ -563,7 +814,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("progressive_codebase_course", body["package_types"])
         domain_packs = {item["id"] for item in body["domain_packs"]}
         overlays = {item["id"] for item in body["overlays"]}
-        self.assertIn("support_triage", domain_packs)
+        self.assertIn("generic_project_example", domain_packs)
         self.assertIn("productionization_overlay", overlays)
 
     def test_root_renders_lms_home(self) -> None:
@@ -681,7 +932,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-runs/generate",
             json={
-                "goal": "Build a production-ready customer support agent that triages tickets, uses tools safely, and can be reviewed as a live course.",
+                "goal": "Build a production-ready feature flag service that evaluates rollout requests, uses tools safely, and can be reviewed as a live course.",
                 "learning_outcomes": [
                     "tool selection",
                     "approval gates",
@@ -725,7 +976,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-runs/generate-async",
             json={
-                "goal": "Build a production-ready customer support agent that triages tickets and uses tools safely.",
+                "goal": "Build a production-ready feature flag service that evaluates rollout requests and uses tools safely.",
                 "learning_outcomes": ["tool selection", "observability"],
             },
         )
@@ -761,7 +1012,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-runs/generate",
             json={
-                "goal": "Build a support agent course that feels production ready.",
+                "goal": "Build a control plane service course that feels production ready.",
                 "learning_outcomes": [
                     "tool selection",
                     "approval gates",
@@ -776,21 +1027,21 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIsNotNone(body["course_run"]["shared_design_spec"])
         self.assertTrue(body["course_run"]["shared_design_spec"]["capabilities"]["tool_use_required"])
         self.assertEqual(body["plan"]["deliverables"][0]["title"], body["course_run"]["deliverables"][0]["title"])
-        self.assertNotIn("checkpoint_module_ids", body["plan"]["deliverables"][0])
+        self.assertNotIn("checkpoint_deliverable_ids", body["plan"]["deliverables"][0])
         self.assertIn("Live planning", body["plan"]["deliverables"][0]["title"])
 
-    def test_progressive_course_modules_do_not_expose_checkpoint_mappings(self) -> None:
+    def test_progressive_course_deliverables_do_not_expose_checkpoint_mappings(self) -> None:
         response = self.client.post(
             "/v1/course-runs",
             json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        first_module = body["deliverables"][0]
+        first_deliverable = body["deliverables"][0]
 
-        self.assertNotIn("checkpoint_module_ids", first_module)
-        self.assertTrue(first_module["title"])
-        self.assertTrue(first_module["summary"])
+        self.assertNotIn("checkpoint_deliverable_ids", first_deliverable)
+        self.assertTrue(first_deliverable["title"])
+        self.assertTrue(first_deliverable["summary"])
 
     def test_suggest_learning_outcomes_can_use_live_planner(self) -> None:
         app.state.course_generation_service = CourseGenerationService(
@@ -800,7 +1051,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-generation/suggest-outcomes",
             json={
-                "goal": "Build a production-ready customer support agent that triages tickets, uses tools safely, and ships with evals.",
+                "goal": "Build a production-ready feature flag service that evaluates rollout requests, uses tools safely, and ships with evals.",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -813,7 +1064,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-generation/suggest-outcomes",
             json={
-                "goal": "Build a production-ready customer support agent that triages tickets, uses tools safely, and ships with evals.",
+                "goal": "Build a production-ready feature flag service that evaluates rollout requests, uses tools safely, and ships with evals.",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -873,10 +1124,10 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "Use pessimistic locking to protect the hot booking path.",
             body["plan"]["learning_outcomes"],
         )
-        module_titles = [module["title"] for module in body["plan"]["deliverables"]]
-        self.assertIn("Pessimistic locking in postgres", module_titles)
-        self.assertIn("Optimistic locking and retries in postgres", module_titles)
-        self.assertIn("Redis for availability reads", module_titles)
+        deliverable_titles = [deliverable["title"] for deliverable in body["plan"]["deliverables"]]
+        self.assertIn("Pessimistic locking in postgres", deliverable_titles)
+        self.assertIn("Optimistic locking and retries in postgres", deliverable_titles)
+        self.assertIn("Redis for availability reads", deliverable_titles)
         self.assertIn("shared production-ready codebase", body["plan"]["creator_summary"].lower())
 
     def test_create_course_run_from_creator_plan_preserves_creator_choices(self) -> None:
@@ -923,8 +1174,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
         creator_view = self.client.get(f"/v1/course-runs/{body['id']}/creator-view")
         self.assertEqual(creator_view.status_code, 200)
         creator_body = creator_view.json()
-        creator_module_titles = [module["title"] for module in creator_body["review"]["deliverables"]]
-        self.assertIn("Pessimistic locking in postgres", creator_module_titles)
+        creator_deliverable_titles = [deliverable["title"] for deliverable in creator_body["review"]["deliverables"]]
+        self.assertIn("Pessimistic locking in postgres", creator_deliverable_titles)
 
     def test_creator_plan_proposes_retrieval_data_source_when_goal_needs_corpus(self) -> None:
         response = self.client.post(
@@ -1010,7 +1261,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         uploaded_bundle_file = app.state.workflow_service.read_bundle_file(
             workflow_run_id,
-            "public/starter/module_1/data/airline_policies.md",
+            "public/starter/deliverable_1/data/airline_policies.md",
         )
         self.assertIn("Flights can be rebooked within 24 hours.", uploaded_bundle_file.content)
 
@@ -1086,9 +1337,9 @@ class CourseGenCodexApiTests(unittest.TestCase):
         creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
         self.assertEqual(creator_view.status_code, 200)
         creator_body = creator_view.json()
-        creator_module_titles = [module["title"] for module in creator_body["review"]["deliverables"]]
-        self.assertIn("Optimistic locking and retries in postgres", creator_module_titles)
-        self.assertIn("Redis for availability reads", creator_module_titles)
+        creator_deliverable_titles = [deliverable["title"] for deliverable in creator_body["review"]["deliverables"]]
+        self.assertIn("Optimistic locking and retries in postgres", creator_deliverable_titles)
+        self.assertIn("Redis for availability reads", creator_deliverable_titles)
 
     def test_creator_view_does_not_mutate_shared_workflow_when_course_copy_drifts(self) -> None:
         planned = self.client.post(
@@ -1128,11 +1379,11 @@ class CourseGenCodexApiTests(unittest.TestCase):
         after_events = app.state.workflow_service.store.list_events(shared_workflow_run_id)
         self.assertEqual(len(after_events), before_count)
         self.assertEqual(
-            app.state.workflow_service.store.get_run(shared_workflow_run_id).artifacts.task_agent_spec.modules[0].title,
+            app.state.workflow_service.store.get_run(shared_workflow_run_id).artifacts.task_agent_spec.deliverables[0].title,
             created.json()["deliverables"][0]["title"],
         )
 
-    def test_creator_plan_with_more_modules_than_base_scaffold_requires_new_hidden_coverage(self) -> None:
+    def test_creator_plan_with_more_deliverables_than_base_scaffold_requires_new_hidden_coverage(self) -> None:
         planned = self.client.post(
             "/v1/course-generation/creator-plan",
             json={
@@ -1152,9 +1403,9 @@ class CourseGenCodexApiTests(unittest.TestCase):
             index = len(plan["deliverables"]) + 1
             plan["deliverables"].append(
                 {
-                    "deliverable_slug": f"custom-module-{index}",
-                    "title": f"Custom module {index}",
-                    "summary": f"Extend the grounded assistant through custom module {index}.",
+                    "deliverable_slug": f"custom-deliverable-{index}",
+                    "title": f"Custom deliverable {index}",
+                    "summary": f"Extend the grounded assistant through custom deliverable {index}.",
                     "learning_outcomes": [f"Practice grounded behavior {index} in the learner-visible service."],
                     "creator_notes": [],
                     "design_spec": plan["shared_design_spec"],
@@ -1170,7 +1421,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
         self.assertEqual(len(course_run["deliverables"]), len(plan["deliverables"]))
-        self.assertTrue(all("checkpoint_module_ids" not in module for module in course_run["deliverables"]))
+        self.assertTrue(all("checkpoint_deliverable_ids" not in deliverable for deliverable in course_run["deliverables"]))
 
         decision = self.client.post(
             f"/v1/workflow-runs/{shared_run_id}/decisions",
@@ -1178,7 +1429,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(decision.status_code, 409)
 
-    def test_normalize_plan_preserves_shared_design_spec_across_progressive_modules(self) -> None:
+    def test_normalize_plan_preserves_shared_design_spec_across_progressive_deliverables(self) -> None:
         service = app.state.course_generation_service
         request = GenerateCourseFromBriefRequest(
             title="Operations Training",
@@ -1195,20 +1446,20 @@ class CourseGenCodexApiTests(unittest.TestCase):
             summary="A practical engineering training course.",
             package_type=PackageType.progressive_codebase_course,
             shared_design_spec=shared_design_spec,
-            modules=[
-                CreateCourseModuleRequest(
+            deliverables=[
+                CreateCourseDeliverableRequest(
                     title="Bounded agent workflow",
                     summary="Build the run contract and tool flow.",
                     learning_outcomes=["tool selection"],
                     design_spec=shared_design_spec,
-                    domain_pack_hint="support_triage",
+                    domain_pack_hint="generic_project_example",
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Production hardening",
                     summary="Add approvals, evals, and observability.",
                     learning_outcomes=["observability"],
                     design_spec=shared_design_spec.model_copy(update={"overlays": ["productionization_overlay"]}),
-                    domain_pack_hint="support_triage",
+                    domain_pack_hint="generic_project_example",
                     overlays_hint=["productionization_overlay"],
                 ),
             ],
@@ -1218,7 +1469,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         self.assertIsNotNone(normalized.shared_design_spec)
         self.assertEqual(
-            [module.design_spec for module in normalized.modules],
+            [deliverable.design_spec for deliverable in normalized.deliverables],
             [normalized.shared_design_spec, normalized.shared_design_spec],
         )
 
@@ -1254,15 +1505,15 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.get("/v1/course-patterns/tusharbisht-cs-demo-agent-to-production")
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["course_title"], "Customer Support Agent — Demo to Production")
+        self.assertEqual(body["course_title"], "Feature Flag Platform — Demo to Production")
         self.assertEqual(body["package_type"], "progressive_codebase_course")
 
     def test_design_inference_recognizes_support_agent_work(self) -> None:
         response = self.client.post(
             "/v1/designs/infer",
             json={
-                "title": "Customer support agent",
-                "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                "title": "Feature flag service",
+                "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                 "learning_outcomes": [
                     "tool selection",
                     "fallback handling",
@@ -1274,7 +1525,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["status"], "supported")
-        self.assertEqual(body["design_spec"]["domain_pack"], "support_triage")
+        self.assertEqual(body["design_spec"]["domain_pack"], "generic_project_example")
         self.assertTrue(body["design_spec"]["capabilities"]["tool_use_required"])
         self.assertIn("productionization_overlay", body["design_spec"]["overlays"])
 
@@ -1292,7 +1543,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "manual_review")
         self.assertEqual(body["design_spec"]["risk_class"], "review_required")
 
-    def test_support_triage_example_validates(self) -> None:
+    def test_generic_project_example_example_validates(self) -> None:
         example = self.client.get("/v1/examples/task-agent/support-triage")
         self.assertEqual(example.status_code, 200)
         example_body = example.json()
@@ -1306,7 +1557,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = response.json()
         self.assertTrue(body["valid"])
         self.assertEqual(body["errors"], [])
-        self.assertGreaterEqual(len(body["module_gates"]), 8)
+        self.assertGreaterEqual(len(body["deliverable_gates"]), 8)
         self.assertTrue(all(case["tags"] for case in example_body["eval_dataset"]["cases"]))
 
     def test_validation_flags_unmapped_hidden_eval_case(self) -> None:
@@ -1323,9 +1574,9 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "account_tier": "pro",
                 },
                 "expected_output": {
-                    "disposition": "needs_info",
+                    "decision": "needs_info",
                     "priority": "low",
-                    "reply_draft": "We need more information.",
+                    "response_summary": "We need more information.",
                     "confidence": 0.2,
                     "needs_human": False,
                 },
@@ -1348,8 +1599,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
     def test_validation_flags_review_area_without_hidden_grader_coverage(self) -> None:
         example = self.client.get("/v1/examples/task-agent/support-triage").json()
         for behavior in example["behaviors"]:
-            if behavior["first_required_in"] == "module_6":
-                behavior["first_required_in"] = "module_5"
+            if behavior["first_required_in"] == "deliverable_6":
+                behavior["first_required_in"] = "deliverable_5"
 
         response = self.client.post(
             "/v1/specs/task-agent/validate",
@@ -1364,28 +1615,28 @@ class CourseGenCodexApiTests(unittest.TestCase):
     def test_gate_computation_is_independent_for_review_areas(self) -> None:
         example = self.client.get("/v1/examples/task-agent/support-triage")
         response = self.client.post(
-            "/v1/specs/task-agent/gates/module_4",
+            "/v1/specs/task-agent/gates/deliverable_4",
             json=example.json(),
             headers={"content-type": "application/json"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["module_id"], "module_4")
-        self.assertEqual(body["cumulative_modules"], ["module_4"])
+        self.assertEqual(body["deliverable_id"], "deliverable_4")
+        self.assertEqual(body["cumulative_deliverables"], ["deliverable_4"])
         self.assertIn("approval_before_irreversible_reply", body["active_behavior_ids"])
         self.assertNotIn("structured_output", body["active_behavior_ids"])
         self.assertNotIn("dry_run_blocks_mutations", body["active_behavior_ids"])
 
-    def test_grader_plan_endpoint_expands_module_dependencies(self) -> None:
+    def test_grader_plan_endpoint_expands_deliverable_dependencies(self) -> None:
         example = self.client.get("/v1/examples/task-agent/support-triage")
         response = self.client.post(
-            "/v1/specs/task-agent/grader-plans/module_5",
+            "/v1/specs/task-agent/grader-plans/deliverable_5",
             json=example.json(),
             headers={"content-type": "application/json"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["module_id"], "module_5")
+        self.assertEqual(body["deliverable_id"], "deliverable_5")
         self.assertEqual(body["total_tests"], 3)
         entry_ids = {entry["test_id"] for entry in body["entries"]}
         self.assertIn("fallback_on_tool_failure", entry_ids)
@@ -1398,7 +1649,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         spec = self.client.get("/v1/examples/task-agent/support-triage")
         submission = self.client.get("/v1/examples/task-agent/support-triage/submission")
         response = self.client.post(
-            "/v1/specs/task-agent/grade/module_8",
+            "/v1/specs/task-agent/grade/deliverable_8",
             json={
                 "spec": spec.json(),
                 "submission": submission.json(),
@@ -1420,7 +1671,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                         call["status"] = "ok"
 
         response = self.client.post(
-            "/v1/specs/task-agent/grade/module_5",
+            "/v1/specs/task-agent/grade/deliverable_5",
             json={"spec": spec, "submission": submission},
         )
         self.assertEqual(response.status_code, 200)
@@ -1433,7 +1684,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         spec = self.client.get("/v1/examples/task-agent/support-triage").json()
 
         response = self.client.post(
-            "/v1/specs/task-agent/grade-live/module_8",
+            "/v1/specs/task-agent/grade-live/deliverable_8",
             json={
                 "spec": spec,
                 "live": {"base_url": "http://learner.test"},
@@ -1446,7 +1697,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(len(body["submission"]["runs"]), 3)
 
     def test_task_agent_live_grading_tolerates_missing_tool_call_order(self) -> None:
-        reference_submission = get_support_triage_passing_submission().model_dump(mode="json")
+        reference_submission = get_generic_project_submission().model_dump(mode="json")
         remaining_runs = list(reference_submission["runs"])
         runtime_runs: dict[str, dict] = {}
 
@@ -1509,7 +1760,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         spec = self.client.get("/v1/examples/task-agent/support-triage").json()
 
         response_live = self.client.post(
-            "/v1/specs/task-agent/grade-live/module_8",
+            "/v1/specs/task-agent/grade-live/deliverable_8",
             json={
                 "spec": spec,
                 "live": {"base_url": "http://learner.test"},
@@ -1535,8 +1786,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": [
                         "tool selection",
                         "fallback handling",
@@ -1551,7 +1802,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["stage"], "awaiting_hil_gate_1")
         self.assertEqual(body["pending_gate"], "gate_1_spec_review")
         self.assertEqual(body["artifacts"]["draft_kind"], "task_agent_spec")
-        self.assertEqual(body["artifacts"]["task_agent_spec"]["domain_pack"], "support_triage")
+        self.assertEqual(body["artifacts"]["task_agent_spec"]["domain_pack"], "generic_project_example")
         self.assertGreaterEqual(len(body["artifacts"]["node_executions"]), 5)
         self.assertEqual(body["artifacts"]["node_executions"][0]["kind"], "authoring_runtime")
 
@@ -1583,25 +1834,25 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["artifacts"]["origin_template"], "openai_customized:support_triage")
+        self.assertEqual(body["artifacts"]["origin_template"], "openai_customized:generic_project_example")
         self.assertIn("Customized with fake OpenAI.", body["artifacts"]["notes"])
-        self.assertEqual(body["artifacts"]["task_agent_spec"]["modules"][0]["title"], "OpenAI-authored foundation")
+        self.assertEqual(body["artifacts"]["task_agent_spec"]["deliverables"][0]["title"], "OpenAI-authored foundation")
 
     def test_workflow_nodes_endpoint_returns_langgraph_node_results(self) -> None:
         created = self.client.post(
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -1626,8 +1877,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -1641,7 +1892,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         starter_file = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/app.py"},
+            params={"path": "public/starter/deliverable_1/app.py"},
         )
         self.assertEqual(starter_file.status_code, 200)
         starter_source = starter_file.json()["content"]
@@ -1649,14 +1900,14 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         visible_checks = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/checks/run_visible_checks.py"},
+            params={"path": "public/starter/deliverable_1/checks/run_visible_checks.py"},
         )
         self.assertEqual(visible_checks.status_code, 200)
         self.assertIn("public_checks_by_case", visible_checks.json()["content"])
 
         vscode_tasks = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/.vscode/tasks.json"},
+            params={"path": "public/starter/deliverable_1/.vscode/tasks.json"},
         )
         self.assertEqual(vscode_tasks.status_code, 200)
         self.assertIn("Run visible checks", vscode_tasks.json()["content"])
@@ -1674,8 +1925,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -1684,7 +1935,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         original_readme = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/README.md"},
+            params={"path": "public/starter/deliverable_1/README.md"},
         )
         self.assertEqual(original_readme.status_code, 200)
         self.assertNotIn("deterministic audit trail for booking retries", original_readme.json()["content"])
@@ -1697,7 +1948,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIsNotNone(materialized.json()["artifacts"]["materialized_bundle"])
 
         spec = created["artifacts"]["task_agent_spec"]
-        spec["modules"][0]["learner_brief"]["task_to_build"] = (
+        spec["deliverables"][0]["learner_brief"]["task_to_build"] = (
             "Edit `app.py` to add a deterministic audit trail for booking retries."
         )
 
@@ -1708,7 +1959,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         updated_readme = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/README.md"},
+            params={"path": "public/starter/deliverable_1/README.md"},
         )
         self.assertEqual(updated_readme.status_code, 200)
         self.assertIn(
@@ -1728,8 +1979,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -1776,8 +2027,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection"],
                 }
             },
@@ -1790,7 +2041,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertTrue(body["artifacts"]["review_summary"]["authoring"]["exhausted"])
         self.assertIn("Authoring loop exhausted", "\n".join(body["artifacts"]["review_summary"]["blockers"]))
 
-    def test_authoring_repair_loop_preserves_workspace_and_fixes_broken_module_file(self) -> None:
+    def test_authoring_repair_loop_preserves_workspace_and_fixes_broken_deliverable_file(self) -> None:
         compile_sandbox = WorkspaceCompileSandboxRunner()
         broken_workspace_authoring = BrokenFirstWorkspaceAuthoringService(self.workspace_manager)
         app.state.docker_sandbox_runner = compile_sandbox
@@ -1823,8 +2074,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -1839,7 +2090,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         starter_path = (
             Path(body["artifacts"]["workspace_snapshot"]["public_dir"])
             / "starter"
-            / "module_1"
+            / "deliverable_1"
             / "app.py"
         )
         source = starter_path.read_text(encoding="utf-8")
@@ -1850,19 +2101,19 @@ class CourseGenCodexApiTests(unittest.TestCase):
         run = app.state.workflow_service.create_run_from_explicit_plan(
             intake=GenerationIntake(
                 title="Workspace repair rematerialization",
-                problem_statement="Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                 learning_outcomes=["tool selection"],
             ),
             design_spec=_design_spec(
                 title="Workspace repair rematerialization",
-                problem_statement="Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                 learning_outcomes=["tool selection"],
             ),
         )
 
         workspace = run.artifacts.workspace_snapshot
         self.assertIsNotNone(workspace)
-        readme_path = Path(workspace.public_dir) / "starter" / "module_1" / "README.md"
+        readme_path = Path(workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
         original = readme_path.read_text(encoding="utf-8")
         readme_path.write_text("STALE README\n", encoding="utf-8")
 
@@ -1916,11 +2167,11 @@ class CourseGenCodexApiTests(unittest.TestCase):
         repaired_workspace = repaired_run.artifacts.workspace_snapshot
         self.assertIsNotNone(repaired_workspace)
         repaired_readme = (
-            Path(repaired_workspace.public_dir) / "starter" / "module_1" / "README.md"
+            Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
         ).read_text(encoding="utf-8")
         self.assertEqual(repaired_readme, original)
 
-    def test_survey_course_creation_creates_module_assignment_runs(self) -> None:
+    def test_survey_course_creation_creates_deliverable_assignment_runs(self) -> None:
         stateful_design = _design_spec(
             title="TinyURL",
             problem_statement="Build a URL shortener with collision resistance, idempotency, and concurrency safety.",
@@ -1953,7 +2204,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                         "summary": "Build a support triage agent with tools, approvals, and observability.",
                         "learning_outcomes": ["tool selection", "observability"],
                         "design_spec": support_design.model_dump(mode="json"),
-                        "domain_pack_hint": "support_triage",
+                        "domain_pack_hint": "generic_project_example",
                         "overlays_hint": ["productionization_overlay"],
                     },
                 ],
@@ -1963,7 +2214,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["package_type"], "survey_course")
         self.assertEqual(len(body["deliverables"]), 2)
-        workflow_ids = {module["workflow_run_id"] for module in body["deliverables"]}
+        workflow_ids = {deliverable["workflow_run_id"] for deliverable in body["deliverables"]}
         self.assertEqual(len(workflow_ids), 2)
 
         workflow_runs = self.client.get("/v1/workflow-runs")
@@ -1979,7 +2230,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["package_type"], "progressive_codebase_course")
         self.assertIsNotNone(body["shared_workflow_run_id"])
-        workflow_ids = {module["workflow_run_id"] for module in body["deliverables"]}
+        workflow_ids = {deliverable["workflow_run_id"] for deliverable in body["deliverables"]}
         self.assertEqual(workflow_ids, {body["shared_workflow_run_id"]})
         self.assertIsNotNone(body["shared_design_spec"])
         self.assertTrue(body["shared_design_spec"]["capabilities"]["tool_use_required"])
@@ -2010,19 +2261,19 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("Materialize the course bundle", "\n".join(body["next_actions"]))
         self.assertIn("gate_1_spec_review", "\n".join(body["blockers"]))
 
-        first_module = body["deliverables"][0]
-        self.assertEqual(first_module["workflow_run_id"], shared_run_id)
-        self.assertTrue(first_module["bundle_available"])
-        self.assertIn("public/README.md", first_module["linked_workflow"]["bundle"]["public_files"])
-        self.assertTrue(first_module["linked_workflow"]["review_summary"]["review_ready"])
+        first_deliverable = body["deliverables"][0]
+        self.assertEqual(first_deliverable["workflow_run_id"], shared_run_id)
+        self.assertTrue(first_deliverable["bundle_available"])
+        self.assertIn("public/README.md", first_deliverable["linked_workflow"]["bundle"]["public_files"])
+        self.assertTrue(first_deliverable["linked_workflow"]["review_summary"]["review_ready"])
 
     def test_workflow_spec_update_revalidates(self) -> None:
         created = self.client.post(
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection"],
                 }
             },
@@ -2043,8 +2294,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["observability"],
                 }
             },
@@ -2092,8 +2343,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection"],
                 }
             },
@@ -2105,14 +2356,14 @@ class CourseGenCodexApiTests(unittest.TestCase):
             json={
                 "gate": "gate_1_spec_review",
                 "decision": "reject",
-                "comment": "Tighten the module 1 contract and make the opening module title clearer.",
+                "comment": "Tighten the deliverable 1 contract and make the opening deliverable title clearer.",
             },
         )
         self.assertEqual(decision.status_code, 200)
         body = decision.json()
         self.assertEqual(body["stage"], "awaiting_hil_gate_1")
         self.assertEqual(body["pending_gate"], "gate_1_spec_review")
-        self.assertIn("Revised after feedback", body["artifacts"]["task_agent_spec"]["modules"][0]["title"])
+        self.assertIn("Revised after feedback", body["artifacts"]["task_agent_spec"]["deliverables"][0]["title"])
         self.assertIn("fake OpenAI", "\n".join(body["notes"]))
         self.assertIsNotNone(fake_authoring.last_failure_context)
         self.assertEqual(fake_authoring.last_failure_context.source_node_kind.value, "reviewer_tests")
@@ -2124,7 +2375,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         revised_readme = self.client.get(
             f"/v1/workflow-runs/{run_id}/workspace/file",
-            params={"path": "public/starter/module_1/README.md"},
+            params={"path": "public/starter/deliverable_1/README.md"},
         )
         self.assertEqual(revised_readme.status_code, 200)
         self.assertIn("Revised after feedback", revised_readme.json()["content"])
@@ -2139,19 +2390,19 @@ class CourseGenCodexApiTests(unittest.TestCase):
         run = app.state.workflow_service.create_run_from_explicit_plan(
             intake=GenerationIntake(
                 title="Pedagogy repair flow",
-                problem_statement="Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                 learning_outcomes=["tool selection"],
             ),
             design_spec=_design_spec(
                 title="Pedagogy repair flow",
-                problem_statement="Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                 learning_outcomes=["tool selection"],
             ),
         )
 
         stored = app.state.workflow_service.get_run(run.id)
         assert stored is not None
-        stored.artifacts.task_agent_spec.modules[0].learning_outcomes = []
+        stored.artifacts.task_agent_spec.deliverables[0].learning_outcomes = []
         stored.artifacts.node_executions = []
         app.state.workflow_service.store.save_run(stored)
 
@@ -2161,10 +2412,10 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("reviewer_pedagogy", node_kinds)
         self.assertIn("reviewer_repair", node_kinds)
         self.assertIn("reviewer_tests", node_kinds)
-        self.assertTrue(updated.artifacts.task_agent_spec.modules[0].learning_outcomes)
+        self.assertTrue(updated.artifacts.task_agent_spec.deliverables[0].learning_outcomes)
         self.assertTrue(
             any(
-                "Rebuilt learner briefs, public checks, and derived module outcomes"
+                "Rebuilt learner briefs, public checks, and derived deliverable outcomes"
                 in note
                 for note in updated.notes
             )
@@ -2245,7 +2496,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 eval_cases=[
                     EvalCaseCustomization(
                         id="ada_birth",
-                        expected_output={"disposition": "answer", "needs_human": False, "confidence": "high"},
+                        expected_output={"decision": "answer", "needs_human": False, "confidence": "high"},
                     )
                 ]
             ),
@@ -2297,7 +2548,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             course_run["deliverables"][0]["deliverable_slug"],
         )
         self.assertEqual(snapshot.learner_package.deliverables[0].title, course_run["deliverables"][0]["title"])
-        self.assertNotIn("checkpoint_module_ids", snapshot.learner_package.deliverables[0].model_dump(mode="json"))
+        self.assertNotIn("checkpoint_deliverable_ids", snapshot.learner_package.deliverables[0].model_dump(mode="json"))
         self.assertIn("app.py", snapshot.learner_package.deliverables[0].visible_files)
         self.assertEqual(snapshot.learner_package.deliverables[0].learner_brief.files_to_edit, ["app.py"])
         self.assertTrue(snapshot.learner_package.deliverables[0].learner_brief.definition_of_done)
@@ -2467,8 +2718,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
         course_run = created.json()
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
-        first_module_id = course_run["deliverables"][0]["deliverable_slug"]
-        second_module_id = course_run["deliverables"][1]["deliverable_slug"]
+        first_deliverable_id = course_run["deliverables"][0]["deliverable_slug"]
+        second_deliverable_id = course_run["deliverables"][1]["deliverable_slug"]
 
         for gate in (
             "gate_1_spec_review",
@@ -2505,23 +2756,23 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(enrollment.status_code, 200)
         enrollment_body = enrollment.json()
         enrollment_id = enrollment_body["id"]
-        self.assertEqual(enrollment_body["current_deliverable_id"], first_module_id)
-        self.assertTrue(all(module["status"] == "available" for module in enrollment_body["deliverables"]))
+        self.assertEqual(enrollment_body["current_deliverable_id"], first_deliverable_id)
+        self.assertTrue(all(deliverable["status"] == "available" for deliverable in enrollment_body["deliverables"]))
 
         workspace = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/workspace",
-            json={"deliverable_id": first_module_id},
+            json={"deliverable_id": first_deliverable_id},
         )
         self.assertEqual(workspace.status_code, 200)
         workspace_body = workspace.json()
-        first_module = next(
+        first_deliverable = next(
             deliverable
             for deliverable in workspace_body["deliverables"]
-            if deliverable["deliverable_id"] == first_module_id
+            if deliverable["deliverable_id"] == first_deliverable_id
         )
-        self.assertEqual(first_module["workspace_session"]["status"], "running")
-        self.assertIn("http://127.0.0.1:18080/", first_module["workspace_session"]["editor_url"])
-        workspace_root = Path(first_module["workspace_session"]["workspace_root"])
+        self.assertEqual(first_deliverable["workspace_session"]["status"], "running")
+        self.assertIn("http://127.0.0.1:18080/", first_deliverable["workspace_session"]["editor_url"])
+        workspace_root = Path(first_deliverable["workspace_session"]["workspace_root"])
         self.assertTrue((workspace_root / "app.py").exists())
         self.assertTrue((workspace_root / "checks" / "run_visible_checks.py").exists())
 
@@ -2546,7 +2797,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         experience = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/submit",
-            json={"deliverable_id": first_module_id},
+            json={"deliverable_id": first_deliverable_id},
         )
         self.assertEqual(experience.status_code, 200)
         experience_body = experience.json()
@@ -2561,18 +2812,78 @@ class CourseGenCodexApiTests(unittest.TestCase):
         refreshed_body = refreshed.json()
         self.assertIsNone(refreshed_body["current_deliverable_id"])
         self.assertEqual(refreshed_body["status"], "completed")
-        module_1 = next(
+        deliverable_1 = next(
             deliverable
             for deliverable in refreshed_body["deliverables"]
-            if deliverable["deliverable_id"] == first_module_id
+            if deliverable["deliverable_id"] == first_deliverable_id
         )
-        module_2 = next(
+        deliverable_2 = next(
             deliverable
             for deliverable in refreshed_body["deliverables"]
-            if deliverable["deliverable_id"] == second_module_id
+            if deliverable["deliverable_id"] == second_deliverable_id
         )
-        self.assertEqual(module_1["status"], "passed")
-        self.assertEqual(module_2["status"], "passed")
+        self.assertEqual(deliverable_1["status"], "passed")
+        self.assertEqual(deliverable_2["status"], "passed")
+
+    def test_lms_submission_attaches_synthesized_feedback_to_failed_deliverables(self) -> None:
+        feedback_service = FakeLearnerFeedbackService()
+        app.state.lms_service = LMSService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            learner_studio_service=FakeFailingLearnerStudioService(),
+            learner_feedback_service=feedback_service,
+            base_dir=f"{self.temp_dir.name}/learner-workspaces",
+        )
+
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run = created.json()
+        shared_run_id = course_run["shared_workflow_run_id"]
+        for gate in (
+            "gate_1_spec_review",
+            "gate_2_progression_review",
+            "gate_3_pre_publish",
+        ):
+            decision = self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+            self.assertEqual(decision.status_code, 200)
+        self.client.post(f"/v1/course-runs/{course_run['id']}/sync")
+        published = self.client.post(f"/v1/course-runs/{course_run['id']}/publish")
+        self.assertEqual(published.status_code, 200)
+
+        enrollment = self.client.post(
+            "/v1/lms/enrollments",
+            json={"course_run_id": course_run["id"]},
+        )
+        self.assertEqual(enrollment.status_code, 200)
+        enrollment_id = enrollment.json()["id"]
+
+        submitted = self.client.post(
+            f"/v1/lms/enrollments/{enrollment_id}/submit",
+            json={},
+        )
+        self.assertEqual(submitted.status_code, 200)
+        body = submitted.json()
+        latest_report = body["latest_assignment_report"]
+        failed_review_areas = [
+            area for area in latest_report["review_areas"] if area["grade_report"]["status"] == "failed"
+        ]
+        self.assertTrue(failed_review_areas)
+        self.assertEqual(feedback_service.calls, 1)
+        self.assertIn("feedback", failed_review_areas[0])
+        self.assertEqual(
+            failed_review_areas[0]["feedback"]["fundamental_gap"],
+            "The unsupported query path is still returning the wrong contract.",
+        )
+        self.assertIn(
+            "Focus on the unsupported-query path next.",
+            failed_review_areas[0]["feedback"]["learner_feedback"],
+        )
 
     def test_enrollment_prefers_newest_submission_per_deliverable(self) -> None:
         app.state.lms_service = LMSService(
@@ -2661,7 +2972,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         course_run = created.json()
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
-        first_module_id = course_run["deliverables"][0]["deliverable_slug"]
+        first_deliverable_id = course_run["deliverables"][0]["deliverable_slug"]
 
         for gate in (
             "gate_1_spec_review",
@@ -2687,13 +2998,13 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         workspace = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/workspace",
-            json={"deliverable_id": first_module_id},
+            json={"deliverable_id": first_deliverable_id},
         )
         self.assertEqual(workspace.status_code, 200)
 
         files = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/files",
-            params={"deliverable_id": first_module_id},
+            params={"deliverable_id": first_deliverable_id},
         )
         self.assertEqual(files.status_code, 200)
         file_paths = {item["relative_path"] for item in files.json()["files"]}
@@ -2704,14 +3015,14 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         original_app = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "app.py"},
+            params={"deliverable_id": first_deliverable_id, "path": "app.py"},
         )
         self.assertEqual(original_app.status_code, 200)
         self.assertIn("create_app_from_manifest", original_app.json()["content"])
 
         starter_readme = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "README.md"},
+            params={"deliverable_id": first_deliverable_id, "path": "README.md"},
         )
         self.assertEqual(starter_readme.status_code, 200)
         self.assertIn("## What we are building", starter_readme.json()["content"])
@@ -2720,7 +3031,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         deliverables_doc = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "deliverables.md"},
+            params={"deliverable_id": first_deliverable_id, "path": "deliverables.md"},
         )
         self.assertEqual(deliverables_doc.status_code, 200)
         self.assertIn("# Project deliverables", deliverables_doc.json()["content"])
@@ -2728,7 +3039,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         starter_manifest = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "starter_manifest.json"},
+            params={"deliverable_id": first_deliverable_id, "path": "starter_manifest.json"},
         )
         self.assertEqual(starter_manifest.status_code, 200)
         starter_manifest_payload = json.loads(starter_manifest.json()["content"])
@@ -2744,7 +3055,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         visible_check_script = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "checks/run_visible_checks.py"},
+            params={"deliverable_id": first_deliverable_id, "path": "checks/run_visible_checks.py"},
         )
         self.assertEqual(visible_check_script.status_code, 200)
         self.assertIn("Visible checks passed", visible_check_script.json()["content"])
@@ -2753,7 +3064,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         write = self.client.put(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
             json={
-                "deliverable_id": first_module_id,
+                "deliverable_id": first_deliverable_id,
                 "relative_path": "app.py",
                 "content": updated_app,
             },
@@ -2763,20 +3074,20 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         reread = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": "app.py"},
+            params={"deliverable_id": first_deliverable_id, "path": "app.py"},
         )
         self.assertEqual(reread.status_code, 200)
         self.assertEqual(reread.json()["content"], updated_app)
 
         review_area_index = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": first_module_id, "path": ".coursegen/review_areas/index.json"},
+            params={"deliverable_id": first_deliverable_id, "path": ".coursegen/review_areas/index.json"},
         )
         self.assertEqual(review_area_index.status_code, 200)
         review_area_payload = json.loads(review_area_index.json()["content"])
         self.assertEqual(len(review_area_payload["review_areas"]), len(course_run["deliverables"]))
 
-    def test_lms_workspace_stays_stable_when_switching_focus_modules(self) -> None:
+    def test_lms_workspace_stays_stable_when_switching_focus_deliverables(self) -> None:
         app.state.lms_service = LMSService(
             app.state.workflow_service.store,
             app.state.workflow_service,
@@ -2792,8 +3103,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
         course_run = created.json()
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
-        first_module_id = course_run["deliverables"][0]["deliverable_slug"]
-        second_module_id = course_run["deliverables"][1]["deliverable_slug"]
+        first_deliverable_id = course_run["deliverables"][0]["deliverable_slug"]
+        second_deliverable_id = course_run["deliverables"][1]["deliverable_slug"]
 
         for gate in (
             "gate_1_spec_review",
@@ -2818,20 +3129,20 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         first_launch = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/workspace",
-            json={"deliverable_id": first_module_id},
+            json={"deliverable_id": first_deliverable_id},
         )
         self.assertEqual(first_launch.status_code, 200)
         first_session = next(
-            module["workspace_session"]
-            for module in first_launch.json()["deliverables"]
-            if module["deliverable_id"] == first_module_id
+            deliverable["workspace_session"]
+            for deliverable in first_launch.json()["deliverables"]
+            if deliverable["deliverable_id"] == first_deliverable_id
         )
 
         custom_app = "from fastapi import FastAPI\n\napp = FastAPI(title='shared-project')\n"
         write = self.client.put(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
             json={
-                "deliverable_id": first_module_id,
+                "deliverable_id": first_deliverable_id,
                 "relative_path": "app.py",
                 "content": custom_app,
             },
@@ -2840,20 +3151,20 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         second_launch = self.client.post(
             f"/v1/lms/enrollments/{enrollment_id}/workspace",
-            json={"deliverable_id": second_module_id},
+            json={"deliverable_id": second_deliverable_id},
         )
         self.assertEqual(second_launch.status_code, 200)
         second_session = next(
-            module["workspace_session"]
-            for module in second_launch.json()["deliverables"]
-            if module["deliverable_id"] == second_module_id
+            deliverable["workspace_session"]
+            for deliverable in second_launch.json()["deliverables"]
+            if deliverable["deliverable_id"] == second_deliverable_id
         )
         self.assertEqual(first_session["id"], second_session["id"])
         self.assertEqual(first_session["editor_url"], second_session["editor_url"])
 
         reread = self.client.get(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"deliverable_id": second_module_id, "path": "app.py"},
+            params={"deliverable_id": second_deliverable_id, "path": "app.py"},
         )
         self.assertEqual(reread.status_code, 200)
         self.assertEqual(reread.json()["content"], custom_app)
@@ -2874,7 +3185,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         course_run = created.json()
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
-        first_module_id = course_run["deliverables"][0]["deliverable_slug"]
+        first_deliverable_id = course_run["deliverables"][0]["deliverable_slug"]
 
         for gate in (
             "gate_1_spec_review",
@@ -2897,7 +3208,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         escape = self.client.put(
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
             json={
-                "deliverable_id": first_module_id,
+                "deliverable_id": first_deliverable_id,
                 "relative_path": "../outside.py",
                 "content": "print('nope')\n",
             },
@@ -2940,7 +3251,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIsNotNone(snapshot_id)
         snapshot = app.state.workflow_service.store.get_publish_snapshot(snapshot_id)
         assert snapshot is not None
-        expected_module_title = snapshot.learner_package.deliverables[0].title
+        expected_deliverable_title = snapshot.learner_package.deliverables[0].title
 
         original_catalog = self.client.get("/v1/lms/catalog")
         self.assertEqual(original_catalog.status_code, 200)
@@ -2955,7 +3266,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         stored_workflow = app.state.workflow_service.store.get_run(shared_run_id)
         assert stored_workflow is not None
-        stored_workflow.artifacts.task_agent_spec.modules[0].title = "Mutated live module"
+        stored_workflow.artifacts.task_agent_spec.deliverables[0].title = "Mutated live deliverable"
         app.state.workflow_service.store.save_run(stored_workflow)
 
         catalog = self.client.get("/v1/lms/catalog")
@@ -2968,7 +3279,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(enrollment.status_code, 200)
         enrollment_body = enrollment.json()
         self.assertEqual(enrollment_body["publish_snapshot_id"], snapshot_id)
-        self.assertEqual(enrollment_body["deliverables"][0]["title"], expected_module_title)
+        self.assertEqual(enrollment_body["deliverables"][0]["title"], expected_deliverable_title)
 
         versions = self.client.get(f"/v1/course-runs/{course_run_id}/published-versions")
         self.assertEqual(versions.status_code, 200)
@@ -2996,9 +3307,9 @@ class CourseGenCodexApiTests(unittest.TestCase):
         creator_feedback = self.client.post(
             f"/v1/course-runs/{course_run_id}/feedback",
             json={
-                "summary": "Module ladder feels close.",
-                "details": "The first module is clear, but I want to watch the later modules closely.",
-                "category": "module-plan",
+                "summary": "Deliverable plan feels close.",
+                "details": "The first deliverable is clear, but I want to watch the later deliverables closely.",
+                "category": "deliverable-plan",
                 "deliverable_slug": course_run["deliverables"][0]["deliverable_slug"],
             },
         )
@@ -3031,12 +3342,12 @@ class CourseGenCodexApiTests(unittest.TestCase):
             f"/v1/lms/enrollments/{enrollment_id}/feedback",
             json={
                 "summary": "The starter is easy to understand.",
-                "details": "README and module content were enough to get moving.",
+                "details": "README and deliverable content were enough to get moving.",
             },
         )
         self.assertEqual(learner_feedback.status_code, 200)
 
-        first_module = snapshot.learner_package.deliverables[0]
+        first_deliverable = snapshot.learner_package.deliverables[0]
         report = self.client.post(
             f"/v1/course-runs/{course_run_id}/learner-eval",
             json={
@@ -3045,10 +3356,10 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 "enrollment_id": enrollment_id,
                 "deliverable_results": [
                     {
-                        "deliverable_id": first_module.deliverable_id,
-                        "title": first_module.title,
-                        "deliverable_index": first_module.deliverable_index,
-                        "learner_visible_files": first_module.visible_files,
+                        "deliverable_id": first_deliverable.deliverable_id,
+                        "title": first_deliverable.title,
+                        "deliverable_index": first_deliverable.deliverable_index,
+                        "learner_visible_files": first_deliverable.visible_files,
                         "bad_attempt": {
                             "status": "failed",
                             "passed_tests": 0,
@@ -3074,7 +3385,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
         self.assertEqual(creator_view.status_code, 200)
         creator_body = creator_view.json()
-        self.assertEqual(creator_body["creator_feedback"][0]["summary"], "Module ladder feels close.")
+        self.assertEqual(creator_body["creator_feedback"][0]["summary"], "Deliverable plan feels close.")
         self.assertEqual(creator_body["latest_learner_evaluation"]["publish_snapshot_id"], snapshot_id)
         self.assertIsNotNone(creator_body["creator_choices"])
         self.assertGreaterEqual(len(creator_body["diagnostics"]), 1)
@@ -3112,7 +3423,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/course-runs/generate",
             json={
-                "goal": "Build a production-ready customer support agent that triages tickets and uses tools safely.",
+                "goal": "Build a production-ready feature flag service that evaluates rollout requests and uses tools safely.",
                 "learning_outcomes": ["tool selection", "observability"],
             },
         )
@@ -3364,6 +3675,158 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("course_run_published", completed_event_types)
         self.assertIn("course_publish_completed", completed_event_types)
 
+    def test_publish_saves_learner_certification_report_when_exact_learner_path_passes(self) -> None:
+        app.state.course_workflow_service = CourseWorkflowService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            CourseArtifactMaterializer(base_dir=f"{self.temp_dir.name}/generated"),
+            publish_certification_service=PublishLearnerCertificationService(
+                learner_studio_service=FakeLearnerStudioService(),
+                base_dir=f"{self.temp_dir.name}/publish-cert",
+                enabled=True,
+            ),
+            creator_asset_service=self.creator_asset_service,
+        )
+        app.state.course_generation_service = CourseGenerationService(
+            app.state.course_workflow_service,
+            live_planner=OpenAICoursePlanner(enabled=False),
+        )
+
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run_id = created.json()["id"]
+        shared_run_id = created.json()["shared_workflow_run_id"]
+
+        for gate in ("gate_1_spec_review", "gate_2_progression_review", "gate_3_pre_publish"):
+            self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+        self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+
+        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
+        self.assertEqual(published.status_code, 200)
+        snapshot_id = published.json()["latest_publish_snapshot_id"]
+        snapshot = app.state.workflow_service.store.get_publish_snapshot(snapshot_id)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertIsNotNone(snapshot.learner_certification)
+        assert snapshot.learner_certification is not None
+        self.assertTrue(snapshot.learner_certification.passed)
+        check_keys = {check.key for check in snapshot.learner_certification.checks}
+        self.assertIn("workspace_seeded", check_keys)
+        self.assertIn("editor_launch", check_keys)
+        self.assertIn("grading_completed", check_keys)
+        self.assertIn("deliverable_mapping", check_keys)
+
+    def test_publish_routes_repairable_learner_certification_failure_back_into_shared_workflow_revision(self) -> None:
+        app.state.course_workflow_service = CourseWorkflowService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            CourseArtifactMaterializer(base_dir=f"{self.temp_dir.name}/generated"),
+            publish_certification_service=PublishLearnerCertificationService(
+                learner_studio_service=FakeBrokenAppLearnerStudioService(),
+                base_dir=f"{self.temp_dir.name}/publish-cert",
+                enabled=True,
+            ),
+            creator_asset_service=self.creator_asset_service,
+        )
+        app.state.course_generation_service = CourseGenerationService(
+            app.state.course_workflow_service,
+            live_planner=OpenAICoursePlanner(enabled=False),
+        )
+
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run_id = created.json()["id"]
+        shared_run_id = created.json()["shared_workflow_run_id"]
+
+        for gate in ("gate_1_spec_review", "gate_2_progression_review", "gate_3_pre_publish"):
+            self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+        synced = self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+        self.assertEqual(synced.status_code, 200)
+        self.assertEqual(synced.json()["stage"], "ready_to_publish")
+
+        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
+        self.assertEqual(published.status_code, 409)
+        self.assertIn("routed the shared assignment workflow back into revision", published.json()["detail"])
+
+        refreshed = self.client.get(f"/v1/course-runs/{course_run_id}")
+        self.assertEqual(refreshed.status_code, 200)
+        refreshed_body = refreshed.json()
+        self.assertEqual(refreshed_body["stage"], "awaiting_course_review")
+        self.assertNotEqual(refreshed_body["shared_workflow_run_id"], shared_run_id)
+        self.assertIn("Learner-path certification failed before publish", refreshed_body["last_error"])
+
+        revised_shared_run = app.state.workflow_service.get_run(refreshed_body["shared_workflow_run_id"])
+        self.assertIsNotNone(revised_shared_run)
+        assert revised_shared_run is not None
+        node_kinds = [node.kind for node in revised_shared_run.artifacts.node_executions]
+        self.assertIn(WorkflowNodeKind.reviewer_learner_runtime, node_kinds)
+        learner_runtime_nodes = [
+            node
+            for node in revised_shared_run.artifacts.node_executions
+            if node.kind == WorkflowNodeKind.reviewer_learner_runtime
+        ]
+        self.assertTrue(any("ImportError" in finding.detail for node in learner_runtime_nodes for finding in node.findings))
+
+        course_events = self.client.get(f"/v1/course-runs/{course_run_id}/events")
+        self.assertEqual(course_events.status_code, 200)
+        event_types = [event["event_type"] for event in course_events.json()]
+        self.assertIn("course_publish_certification_failed", event_types)
+
+    def test_publish_blocks_platform_learner_certification_failure_without_routing_to_revision(self) -> None:
+        app.state.course_workflow_service = CourseWorkflowService(
+            app.state.workflow_service.store,
+            app.state.workflow_service,
+            CourseArtifactMaterializer(base_dir=f"{self.temp_dir.name}/generated"),
+            publish_certification_service=PublishLearnerCertificationService(
+                learner_studio_service=FakePlatformBrokenLearnerStudioService(),
+                base_dir=f"{self.temp_dir.name}/publish-cert",
+                enabled=True,
+            ),
+            creator_asset_service=self.creator_asset_service,
+        )
+        app.state.course_generation_service = CourseGenerationService(
+            app.state.course_workflow_service,
+            live_planner=OpenAICoursePlanner(enabled=False),
+        )
+
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_run_id = created.json()["id"]
+        shared_run_id = created.json()["shared_workflow_run_id"]
+
+        for gate in ("gate_1_spec_review", "gate_2_progression_review", "gate_3_pre_publish"):
+            self.client.post(
+                f"/v1/workflow-runs/{shared_run_id}/decisions",
+                json={"gate": gate, "decision": "approve"},
+            )
+        self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+
+        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
+        self.assertEqual(published.status_code, 409)
+        self.assertIn("editor could not launch", published.json()["detail"].lower())
+
+        refreshed = self.client.get(f"/v1/course-runs/{course_run_id}")
+        self.assertEqual(refreshed.status_code, 200)
+        refreshed_body = refreshed.json()
+        self.assertEqual(refreshed_body["stage"], "ready_to_publish")
+        self.assertEqual(refreshed_body["shared_workflow_run_id"], shared_run_id)
+        self.assertIn("editor could not launch", refreshed_body["last_error"].lower())
+
     def test_survey_course_materialization_creates_author_bundle(self) -> None:
         stateful_design = _design_spec(
             title="TinyURL",
@@ -3395,7 +3858,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                         "title": "Support triage agent",
                         "summary": "Build a support triage agent with tools, approvals, and observability.",
                         "design_spec": support_design.model_dump(mode="json"),
-                        "domain_pack_hint": "support_triage",
+                        "domain_pack_hint": "generic_project_example",
                     },
                 ],
             },
@@ -3450,13 +3913,13 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(materialize.status_code, 200)
 
-        module_doc = self.client.get(
+        deliverable_doc = self.client.get(
             f"/v1/course-runs/{course_run_id}/bundle/file",
-            params={"path": "public/content/modules/exercise/01-observability.md"},
+            params={"path": "public/content/deliverables/exercise/01-observability.md"},
         )
-        self.assertEqual(module_doc.status_code, 200)
-        self.assertIn(shared_run_id, module_doc.json()["content"])
-        self.assertIn("Bundle available: `True`", module_doc.json()["content"])
+        self.assertEqual(deliverable_doc.status_code, 200)
+        self.assertIn(shared_run_id, deliverable_doc.json()["content"])
+        self.assertIn("Bundle available: `True`", deliverable_doc.json()["content"])
 
         private_snapshot = self.client.get(
             f"/v1/course-runs/{course_run_id}/bundle/file",
@@ -3477,8 +3940,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -3488,12 +3951,12 @@ class CourseGenCodexApiTests(unittest.TestCase):
         collection = self.client.get(f"/v1/workflow-runs/{run_id}/grader-plans")
         self.assertEqual(collection.status_code, 200)
         self.assertEqual(collection.json()["eval_dataset_id"], "customer_support_agent_eval_v1")
-        self.assertGreaterEqual(len(collection.json()["module_plans"]), 3)
+        self.assertGreaterEqual(len(collection.json()["deliverable_plans"]), 3)
 
-        module_8 = self.client.get(f"/v1/workflow-runs/{run_id}/grader-plans/module_8")
-        self.assertEqual(module_8.status_code, 200)
-        body = module_8.json()
-        self.assertEqual(body["module_id"], "module_8")
+        deliverable_8 = self.client.get(f"/v1/workflow-runs/{run_id}/grader-plans/deliverable_8")
+        self.assertEqual(deliverable_8.status_code, 200)
+        body = deliverable_8.json()
+        self.assertEqual(body["deliverable_id"], "deliverable_8")
         self.assertEqual(
             {entry["test_id"] for entry in body["entries"]},
             {
@@ -3510,8 +3973,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -3519,7 +3982,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         run_id = created["id"]
         submission = self.client.get("/v1/examples/task-agent/support-triage/submission").json()
 
-        graded = self.client.post(f"/v1/workflow-runs/{run_id}/grade/module_8", json=submission)
+        graded = self.client.post(f"/v1/workflow-runs/{run_id}/grade/deliverable_8", json=submission)
         self.assertEqual(graded.status_code, 200)
         self.assertEqual(graded.json()["status"], "passed")
 
@@ -3534,8 +3997,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -3543,7 +4006,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         run_id = created["id"]
 
         graded = self.client.post(
-            f"/v1/workflow-runs/{run_id}/grade-live/module_8",
+            f"/v1/workflow-runs/{run_id}/grade-live/deliverable_8",
             json={"base_url": "http://learner.test"},
         )
         self.assertEqual(graded.status_code, 200)
@@ -3559,8 +4022,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -3585,11 +4048,11 @@ class CourseGenCodexApiTests(unittest.TestCase):
             params={"path": "public/README.md"},
         )
         self.assertEqual(readme.status_code, 200)
-        self.assertIn("Customer support agent", readme.json()["content"])
+        self.assertIn("Feature flag service", readme.json()["content"])
 
         starter = self.client.get(
             f"/v1/workflow-runs/{run_id}/bundle/file",
-            params={"path": "public/starter/module_1/app.py"},
+            params={"path": "public/starter/deliverable_1/app.py"},
         )
         self.assertEqual(starter.status_code, 200)
         self.assertIn("create_app_from_manifest", starter.json()["content"])
@@ -3603,17 +4066,17 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         grading_guide = self.client.get(
             f"/v1/workflow-runs/{run_id}/bundle/file",
-            params={"path": "public/content/module_1_grading.md"},
+            params={"path": "public/content/deliverable_1_grading.md"},
         )
         self.assertEqual(grading_guide.status_code, 200)
         self.assertIn("Grading Guide", grading_guide.json()["content"])
 
         private_plan = self.client.get(
             f"/v1/workflow-runs/{run_id}/bundle/file",
-            params={"path": "private/grader_plans/module_1.json"},
+            params={"path": "private/grader_plans/deliverable_1.json"},
         )
         self.assertEqual(private_plan.status_code, 200)
-        self.assertIn('"module_id": "module_1"', private_plan.json()["content"])
+        self.assertIn('"deliverable_id": "deliverable_1"', private_plan.json()["content"])
 
         runtime_dockerfile = self.client.get(
             f"/v1/workflow-runs/{run_id}/bundle/file",
@@ -3641,8 +4104,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },
@@ -3669,8 +4132,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "/v1/workflow-runs",
             json={
                 "intake": {
-                    "title": "Customer support agent",
-                    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                    "title": "Feature flag service",
+                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
                     "learning_outcomes": ["tool selection", "observability"],
                 }
             },

@@ -172,13 +172,13 @@ curl http://127.0.0.1:8000/v1/task-agent-authoring/status
 curl -X POST http://127.0.0.1:8000/v1/designs/infer \
   -H "content-type: application/json" \
   -d '{
-    "title": "Customer support agent",
-    "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
+    "title": "Feature flag control plane",
+    "problem_statement": "Build a service that evaluates feature flags, supports gradual rollouts, records audit trails, and ships with production-ready checks.",
     "learning_outcomes": [
-      "tool selection",
-      "fallback handling",
+      "rollout evaluation",
+      "safe configuration updates",
       "observability",
-      "approval gates"
+      "auditability"
     ]
   }'
 ```
@@ -197,10 +197,10 @@ curl http://127.0.0.1:8000/v1/course-generation/status
 curl -X POST http://127.0.0.1:8000/v1/course-runs/generate \
   -H "content-type: application/json" \
   -d '{
-    "goal": "Build a production-ready customer support agent that triages tickets, uses tools safely, and can be reviewed as a real course assignment.",
+    "goal": "Build a production-ready feature flag control plane with rollout targeting, audit logs, and safe configuration updates.",
     "learning_outcomes": [
-      "tool selection",
-      "approval gates",
+      "rollout evaluation",
+      "safe updates",
       "observability"
     ]
   }'
@@ -208,10 +208,15 @@ curl -X POST http://127.0.0.1:8000/v1/course-runs/generate \
 
 ## Example validation flow
 
-1. Fetch the example spec:
+1. Infer a starter project contract:
 
 ```bash
-curl http://127.0.0.1:8000/v1/examples/task-agent/support-triage
+curl -X POST http://127.0.0.1:8000/v1/designs/infer \
+  -H "content-type: application/json" \
+  -d '{
+    "title": "Feature flag control plane",
+    "problem_statement": "Build a service that evaluates feature flags, supports gradual rollouts, and records audit trails."
+  }'
 ```
 
 2. Validate it:
@@ -277,9 +282,9 @@ curl -X POST http://127.0.0.1:8000/v1/workflow-runs \
   -H "content-type: application/json" \
   -d '{
     "intake": {
-      "title": "Customer support agent",
-      "problem_statement": "Build an agent that triages tickets, uses tools, drafts replies, escalates edge cases, and is production ready.",
-      "learning_outcomes": ["tool selection", "fallback handling", "observability", "approval gates"]
+      "title": "Feature flag control plane",
+      "problem_statement": "Build a service that evaluates feature flags, supports gradual rollouts, and records audit trails.",
+      "learning_outcomes": ["rollout evaluation", "safe updates", "observability", "auditability"]
     }
   }'
 ```
@@ -418,10 +423,10 @@ curl -X POST http://127.0.0.1:8000/v1/course-runs \
         }
       },
       {
-        "module_slug": "support-agent",
-        "title": "Support triage agent",
-        "summary": "Build a support triage agent with tools, approvals, and observability.",
-        "domain_pack_hint": "support_triage",
+        "module_slug": "feature-flags",
+        "title": "Feature flag control plane",
+        "summary": "Build a feature flag service with rollouts, audit trails, and observability.",
+        "domain_pack_hint": null,
         "overlays_hint": ["productionization_overlay"]
       }
     ]
@@ -485,10 +490,10 @@ generated/<run_id>/
 
 ## Reference learner app
 
-A tiny support-triage learner app is included for local black-box smoke tests:
+A tiny feature-flag learner app can be created locally for black-box smoke tests:
 
 ```bash
-.venv/bin/python -m uvicorn examples.learner_apps.support_triage_reference:app --host 127.0.0.1 --port 8011
+python -m uvicorn app:app --host 127.0.0.1 --port 8011
 ```
 
 ## Project shape
@@ -499,7 +504,6 @@ app/
   domain/registry.py
   domain/task_agent.py
   services/course_patterns.py
-  services/examples.py
   services/intake_router.py
   services/spec_validation.py
   main.py

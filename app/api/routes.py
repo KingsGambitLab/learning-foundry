@@ -28,13 +28,13 @@ from app.domain.course import (
     SuggestLearningOutcomesResponse,
 )
 from app.domain.publish import PublishedVersionList
-from app.domain.grader import ModuleGraderPlan, TaskAgentGraderPlanCollection
+from app.domain.grader import DeliverableGraderPlan, TaskAgentGraderPlanCollection
 from app.domain.grading import (
     GradeTaskAgentRequest,
     LiveGradeTaskAgentRequest,
     LiveGradeTaskAgentSpecRequest,
     LiveTaskAgentGradeReport,
-    ModuleGradeReport,
+    DeliverableGradeReport,
     TaskAgentSubmission,
 )
 from app.domain.learner import (
@@ -42,13 +42,13 @@ from app.domain.learner import (
     LaunchWorkspaceRequest,
     LearnerEnrollment,
     LearnerEnrollmentList,
-    LearnerModuleExperience,
+    LearnerDeliverableExperience,
     LearnerWorkspaceFileContent,
     LearnerWorkspaceFileList,
     LearnerWorkspaceFileWriteResult,
     LearnerWorkspaceSession,
     PublishedCourseCatalog,
-    SubmitModuleRequest,
+    SubmitDeliverableRequest,
     WriteLearnerWorkspaceFileRequest,
 )
 from app.domain.testing import (
@@ -65,7 +65,7 @@ from app.domain.testing import (
 )
 from app.domain.registry import DESIGN_CATALOG
 from app.domain.sandbox import SandboxAvailability
-from app.domain.task_agent import ModuleGate, TaskAgentServiceSpec
+from app.domain.task_agent import DeliverableGate, TaskAgentServiceSpec
 from app.domain.workflow import (
     BundleFileContent,
     CreateWorkflowRunRequest,
@@ -84,7 +84,6 @@ from app.services.course_generation_service import CourseGenerationService
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.course_workflow_service import CourseWorkflowConflictError, CourseWorkflowService
 from app.services.docker_sandbox_runner import DockerSandboxRunner
-from app.services.examples import get_support_triage_example, get_support_triage_passing_submission
 from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
 from app.services.lms_service import LMSConflictError, LMSService
 from app.services.openai_task_agent_authoring import TaskAgentAuthoringStatus
@@ -178,17 +177,14 @@ def infer_assignment_design_for_intake(intake: GenerationIntake) -> AssignmentDe
         problem_statement=intake.problem_statement,
         learning_outcomes=intake.learning_outcomes,
         package_type_hint=intake.package_type_hint,
+        starter_type=intake.starter_type,
+        implementation_language=intake.implementation_language,
+        application_framework=intake.application_framework,
+        primary_database=intake.primary_database,
+        cache_backend=intake.cache_backend,
+        tech_stack=intake.tech_stack,
+        data_sources=intake.data_sources,
     )
-
-
-@router.get("/v1/examples/task-agent/support-triage", response_model=TaskAgentServiceSpec, tags=["examples"])
-def support_triage_example() -> TaskAgentServiceSpec:
-    return get_support_triage_example()
-
-
-@router.get("/v1/examples/task-agent/support-triage/submission", response_model=TaskAgentSubmission, tags=["examples"])
-def support_triage_submission_example() -> TaskAgentSubmission:
-    return get_support_triage_passing_submission()
 
 
 @router.post("/v1/specs/task-agent/validate", response_model=ValidationResult, tags=["validation"])
@@ -196,10 +192,10 @@ def validate_task_agent(spec: TaskAgentServiceSpec) -> ValidationResult:
     return validate_task_agent_spec(spec)
 
 
-@router.post("/v1/specs/task-agent/gates/{module_id}", response_model=ModuleGate, tags=["validation"])
-def compute_gate(module_id: str, spec: TaskAgentServiceSpec) -> ModuleGate:
+@router.post("/v1/specs/task-agent/gates/{deliverable_id}", response_model=DeliverableGate, tags=["validation"])
+def compute_gate(deliverable_id: str, spec: TaskAgentServiceSpec) -> DeliverableGate:
     try:
-        return compute_task_agent_gate(spec, module_id)
+        return compute_task_agent_gate(spec, deliverable_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -209,31 +205,31 @@ def build_task_agent_grader_plans(spec: TaskAgentServiceSpec) -> TaskAgentGrader
     return build_all_task_agent_grader_plans(spec)
 
 
-@router.post("/v1/specs/task-agent/grader-plans/{module_id}", response_model=ModuleGraderPlan, tags=["validation"])
-def build_task_agent_grader_plan_for_module(module_id: str, spec: TaskAgentServiceSpec) -> ModuleGraderPlan:
+@router.post("/v1/specs/task-agent/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["validation"])
+def build_task_agent_grader_plan_for_deliverable(deliverable_id: str, spec: TaskAgentServiceSpec) -> DeliverableGraderPlan:
     try:
-        return build_task_agent_grader_plan(spec, module_id)
+        return build_task_agent_grader_plan(spec, deliverable_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grade/{module_id}", response_model=ModuleGradeReport, tags=["grading"])
-def grade_task_agent_spec(module_id: str, payload: GradeTaskAgentRequest) -> ModuleGradeReport:
+@router.post("/v1/specs/task-agent/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["grading"])
+def grade_task_agent_spec(deliverable_id: str, payload: GradeTaskAgentRequest) -> DeliverableGradeReport:
     try:
-        return grade_task_agent_submission(payload.spec, module_id, payload.submission)
+        return grade_task_agent_submission(payload.spec, deliverable_id, payload.submission)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grade-live/{module_id}", response_model=LiveTaskAgentGradeReport, tags=["grading"])
+@router.post("/v1/specs/task-agent/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["grading"])
 def grade_task_agent_spec_live(
-    module_id: str,
+    deliverable_id: str,
     payload: LiveGradeTaskAgentSpecRequest,
     request: Request,
 ) -> LiveTaskAgentGradeReport:
     runner = _task_agent_blackbox_runner(request)
     try:
-        return runner.grade_live(payload.spec, module_id, payload.live)
+        return runner.grade_live(payload.spec, deliverable_id, payload.live)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskAgentRunnerError as exc:
@@ -300,7 +296,7 @@ def get_workflow_workspace(run_id: str, request: Request) -> MaterializedBundle:
 def get_workflow_workspace_file(
     run_id: str,
     request: Request,
-    path: str = Query(..., description="Relative path inside the prepared workspace, e.g. public/starter/module_1/app.py"),
+    path: str = Query(..., description="Relative path inside the prepared workspace, e.g. public/starter/deliverable_1/app.py"),
 ) -> BundleFileContent:
     service = _workflow_service(request)
     try:
@@ -339,11 +335,11 @@ def list_workflow_grader_plans(run_id: str, request: Request) -> TaskAgentGrader
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/grader-plans/{module_id}", response_model=ModuleGraderPlan, tags=["workflow"])
-def get_workflow_grader_plan(run_id: str, module_id: str, request: Request) -> ModuleGraderPlan:
+@router.get("/v1/workflow-runs/{run_id}/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["workflow"])
+def get_workflow_grader_plan(run_id: str, deliverable_id: str, request: Request) -> DeliverableGraderPlan:
     service = _workflow_service(request)
     try:
-        return service.get_task_agent_grader_plan(run_id, module_id)
+        return service.get_task_agent_grader_plan(run_id, deliverable_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
     except WorkflowConflictError as exc:
@@ -352,11 +348,11 @@ def get_workflow_grader_plan(run_id: str, module_id: str, request: Request) -> M
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/grade/{module_id}", response_model=ModuleGradeReport, tags=["workflow"])
-def grade_workflow_submission(run_id: str, module_id: str, submission: TaskAgentSubmission, request: Request) -> ModuleGradeReport:
+@router.post("/v1/workflow-runs/{run_id}/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["workflow"])
+def grade_workflow_submission(run_id: str, deliverable_id: str, submission: TaskAgentSubmission, request: Request) -> DeliverableGradeReport:
     service = _workflow_service(request)
     try:
-        return service.grade_task_agent_run(run_id, module_id, submission)
+        return service.grade_task_agent_run(run_id, deliverable_id, submission)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
     except WorkflowConflictError as exc:
@@ -365,16 +361,16 @@ def grade_workflow_submission(run_id: str, module_id: str, submission: TaskAgent
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/grade-live/{module_id}", response_model=LiveTaskAgentGradeReport, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["workflow"])
 def grade_workflow_submission_live(
     run_id: str,
-    module_id: str,
+    deliverable_id: str,
     payload: LiveGradeTaskAgentRequest,
     request: Request,
 ) -> LiveTaskAgentGradeReport:
     service = _workflow_service(request)
     try:
-        return service.grade_task_agent_run_live(run_id, module_id, payload)
+        return service.grade_task_agent_run_live(run_id, deliverable_id, payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
     except WorkflowConflictError as exc:
@@ -814,12 +810,12 @@ def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollmen
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerModuleExperience, tags=["lms"])
-def get_lms_module_experience(
+@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerDeliverableExperience, tags=["lms"])
+def get_lms_deliverable_experience(
     enrollment_id: str,
     request: Request,
     deliverable_id: str | None = Query(None, description="Optional project deliverable id, e.g. exercise/01-contract"),
-) -> LearnerModuleExperience:
+) -> LearnerDeliverableExperience:
     service = _lms_service(request)
     try:
         return service.get_deliverable_experience(enrollment_id, deliverable_id)
@@ -933,12 +929,12 @@ def write_lms_workspace_file(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerModuleExperience, tags=["lms"])
-def submit_lms_module(
+@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerDeliverableExperience, tags=["lms"])
+def submit_lms_deliverable(
     enrollment_id: str,
-    payload: SubmitModuleRequest,
+    payload: SubmitDeliverableRequest,
     request: Request,
-) -> LearnerModuleExperience:
+) -> LearnerDeliverableExperience:
     service = _lms_service(request)
     try:
         return service.submit_project(enrollment_id, payload)

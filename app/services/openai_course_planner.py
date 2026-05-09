@@ -8,7 +8,7 @@ from app.domain.ai import AIUsageSummary
 from app.domain.course import (
     CourseGenerationSource,
     CourseGenerationStatus,
-    CreateCourseModuleRequest,
+    CreateCourseDeliverableRequest,
     GenerateCourseFromBriefRequest,
     GeneratedCoursePlan,
     SuggestLearningOutcomesRequest,
@@ -117,8 +117,10 @@ class OpenAICoursePlanner:
                         "role": "system",
                         "content": (
                             "You design practical engineering courses for a hands-on backend learning platform. "
-                            "Return JSON only. Propose a clear course title, summary, package type, and module ladder. "
-                            "Keep module ladders concrete, realistic, and teachable."
+                            "Return JSON only. Propose a clear course title, summary, package type, and deliverable plan. "
+                            "Use the inferred project contract, runtime binding, and runtime plan as the source of truth. "
+                            "Each deliverable must represent a real engineering concern or subsystem, not a maturity stage. "
+                            "Avoid generic sequences like 'run contract', 'tooling', or 'approvals' unless the project contract explicitly requires them."
                         ),
                     },
                     {"role": "user", "content": json.dumps(prompt, indent=2)},
@@ -219,6 +221,8 @@ class OpenAICoursePlanner:
             problem_statement=request.goal,
             package_type_hint=request.package_type_hint,
             starter_type=request.creator_setup.starter_type,
+            implementation_language=request.creator_setup.implementation_language,
+            application_framework=request.creator_setup.application_framework,
             primary_database=request.creator_setup.primary_database,
             cache_backend=request.creator_setup.cache_backend,
             tech_stack=list(request.creator_setup.tech_stack),
@@ -227,57 +231,77 @@ class OpenAICoursePlanner:
         if shared_design_spec is None:
             raise ValueError("This brief is outside the current learner-ready generation scope.")
 
-        modules: list[CreateCourseModuleRequest] = []
-        for raw_module in raw_plan.get("modules", []):
-            if not isinstance(raw_module, dict):
+        deliverable_items = raw_plan.get("deliverables")
+        if not isinstance(deliverable_items, list):
+            deliverable_items = raw_plan.get("deliverables", [])
+
+        deliverables: list[CreateCourseDeliverableRequest] = []
+        for raw_deliverable in deliverable_items:
+            if not isinstance(raw_deliverable, dict):
                 continue
-            module_title = str(raw_module.get("title") or "").strip()
-            if not module_title:
+            deliverable_title = str(raw_deliverable.get("title") or "").strip()
+            if not deliverable_title:
                 continue
-            module_summary = str(raw_module.get("summary") or module_title).strip()
-            module_outcomes = [
+            deliverable_summary = str(raw_deliverable.get("summary") or deliverable_title).strip()
+            deliverable_outcomes = [
                 str(item).strip()
-                for item in raw_module.get("learning_outcomes", [])
+                for item in raw_deliverable.get("learning_outcomes", [])
                 if str(item).strip()
             ][:3]
-            module_design_spec = infer_assignment_design(
-                title=module_title,
-                problem_statement=module_summary,
+            deliverable_design_spec = infer_assignment_design(
+                title=deliverable_title,
+                problem_statement=deliverable_summary,
                 package_type_hint=request.package_type_hint,
                 starter_type=request.creator_setup.starter_type,
+                implementation_language=request.creator_setup.implementation_language,
+                application_framework=request.creator_setup.application_framework,
                 primary_database=request.creator_setup.primary_database,
                 cache_backend=request.creator_setup.cache_backend,
                 tech_stack=list(request.creator_setup.tech_stack),
                 data_sources=list(request.creator_setup.data_sources),
             ).design_spec or shared_design_spec
-            modules.append(
-                CreateCourseModuleRequest(
-                    module_slug=raw_module.get("module_slug"),
-                    title=module_title,
-                    summary=module_summary,
-                    learning_outcomes=module_outcomes,
-                    design_spec=module_design_spec,
-                    domain_pack_hint=module_design_spec.domain_pack,
-                    overlays_hint=list(module_design_spec.overlays),
+            deliverables.append(
+                CreateCourseDeliverableRequest(
+                    deliverable_slug=raw_deliverable.get("deliverable_slug") or raw_deliverable.get("deliverable_slug"),
+                    title=deliverable_title,
+                    summary=deliverable_summary,
+                    learning_outcomes=deliverable_outcomes,
+                    design_spec=deliverable_design_spec,
+                    domain_pack_hint=deliverable_design_spec.domain_pack,
+                    overlays_hint=list(deliverable_design_spec.overlays),
                 )
             )
 
-        if not modules:
-            raise ValueError("The OpenAI response did not include any valid course modules.")
+        if not deliverables:
+            raise ValueError("The OpenAI response did not include any valid course deliverables.")
 
         return GeneratedCoursePlan(
             title=title,
             summary=summary,
             package_type=package_type,
             shared_design_spec=shared_design_spec,
-            modules=modules,
+            deliverables=deliverables,
             notes=[str(item).strip() for item in raw_plan.get("notes", []) if str(item).strip()],
         )
 
     def _prompt_payload(self, request: GenerateCourseFromBriefRequest) -> dict[str, Any]:
         hint = request.package_type_hint.value if request.package_type_hint else "infer from the brief"
+        design_spec = infer_assignment_design(
+            title=request.title or request.goal,
+            problem_statement=request.goal,
+            package_type_hint=request.package_type_hint,
+            starter_type=request.creator_setup.starter_type,
+            implementation_language=request.creator_setup.implementation_language,
+            application_framework=request.creator_setup.application_framework,
+            primary_database=request.creator_setup.primary_database,
+            cache_backend=request.creator_setup.cache_backend,
+            tech_stack=list(request.creator_setup.tech_stack),
+            data_sources=list(request.creator_setup.data_sources),
+        ).design_spec
         creator_setup = {
             "starter_type": request.creator_setup.starter_type.value if request.creator_setup.starter_type else None,
+            "implementation_language": request.creator_setup.implementation_language,
+            "application_framework": request.creator_setup.application_framework,
             "primary_database": request.creator_setup.primary_database,
             "cache_backend": request.creator_setup.cache_backend,
             "tech_stack": list(request.creator_setup.tech_stack),
@@ -288,21 +312,34 @@ class OpenAICoursePlanner:
             "title_hint": request.title,
             "package_type_hint": hint,
             "creator_setup": creator_setup,
+            "design_signal": (
+                {
+                    "course_structure": design_spec.course_structure.model_dump(mode="json"),
+                    "runtime_dependencies": design_spec.runtime_dependencies.model_dump(mode="json"),
+                    "capabilities": design_spec.capabilities.model_dump(mode="json"),
+                    "project_contract": design_spec.project_contract.model_dump(mode="json"),
+                }
+                if design_spec is not None
+                else None
+            ),
             "constraints": [
-                "Produce 4 to 8 modules for progressive courses, or 3 to 6 modules for survey courses.",
-                "Use the creator setup as a real input to the module plan and runtime assumptions.",
-                "Every module needs a concrete title, summary, and one to three learning outcomes derived from the work learners will do.",
+                "Produce 4 to 8 deliverables for progressive courses, or 3 to 6 deliverables for survey courses.",
+                "Use the creator setup as a real input to the deliverable plan and runtime assumptions.",
+                "Return a deliverables array for one shared project, not a tutorial sequence.",
+                "Every deliverable needs a concrete title, summary, and one to three learning outcomes derived from the work learners will do.",
+                "Each deliverable should own a distinct engineering concern, subsystem, or operational capability.",
+                "Do not generate generic agentic deliverables unless the project contract explicitly mentions tool routing, approvals, or operator handoffs.",
                 "Prefer progressive codebase courses when one evolving system is the teaching shape.",
-                "Prefer survey courses when modules are independent systems.",
-                "Keep modules tightly tied to the work the learner will actually build.",
+                "Prefer survey courses when deliverables are independent systems.",
+                "Keep deliverables tightly tied to the work the learner will actually build.",
             ],
             "required_output_shape": {
                 "title": "string",
                 "summary": "string",
                 "package_type": "survey_course | progressive_codebase_course",
-                "modules": [
+                "deliverables": [
                     {
-                        "module_slug": "optional slug",
+                        "deliverable_slug": "optional slug",
                         "title": "string",
                         "summary": "string",
                         "learning_outcomes": ["1 to 3 concise outcomes"],

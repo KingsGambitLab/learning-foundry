@@ -287,7 +287,7 @@ class LangGraphAssignmentGraph:
                     category="runtime_review",
                     severity=ReviewerFindingSeverity.info,
                     title="Runtime verification passed",
-                    detail=f"Verified {len(sandbox_result.module_reports)} module starter(s) in Docker.",
+                    detail=f"Verified {len(sandbox_result.deliverable_reports)} deliverable starter(s) in Docker.",
                 )
             )
 
@@ -350,34 +350,34 @@ class LangGraphAssignmentGraph:
             ReviewerFinding(
                 category="code_review",
                 severity=ReviewerFindingSeverity.info,
-                title="FastAPI scaffold present",
+                title="FastAPI starter present",
                 detail="The generated starter surface includes the canonical FastAPI endpoints required by the agent contract.",
             )
         ]
         if state["run"].artifacts.workspace_snapshot is not None:
-            placeholder_modules = []
-            for module in spec.modules:
-                module_app = (
+            placeholder_deliverables = []
+            for deliverable in spec.deliverables:
+                deliverable_app = (
                     Path(state["run"].artifacts.workspace_snapshot.public_dir)
                     / "starter"
-                    / module.id
+                    / deliverable.id
                     / "app.py"
                 )
                 try:
-                    source = module_app.read_text(encoding="utf-8")
+                    source = deliverable_app.read_text(encoding="utf-8")
                 except OSError:
-                    placeholder_modules.append(module.id)
+                    placeholder_deliverables.append(deliverable.id)
                     continue
                 if "Implement /run" in source or "status_code=501" in source:
-                    placeholder_modules.append(module.id)
-            if placeholder_modules:
+                    placeholder_deliverables.append(deliverable.id)
+            if placeholder_deliverables:
                 findings.append(
                     ReviewerFinding(
                         category="code_review",
                         severity=ReviewerFindingSeverity.error,
                         title="Placeholder starter endpoints remain",
                         detail="The workspace still contains placeholder starter code for: "
-                        + ", ".join(placeholder_modules),
+                        + ", ".join(placeholder_deliverables),
                     )
                 )
             else:
@@ -419,7 +419,7 @@ class LangGraphAssignmentGraph:
             kind=WorkflowNodeKind.reviewer_code,
             attempt=state["reviewer_attempt"],
             status=status,
-            summary="Reviewer code node checked scaffold shape, safety rails, and Docker execution.",
+            summary="Reviewer code node checked starter project shape, safety rails, and Docker execution.",
             findings=findings,
             sandbox_result=sandbox_result,
         )
@@ -430,13 +430,13 @@ class LangGraphAssignmentGraph:
         assert spec is not None
 
         findings: list[ReviewerFinding] = []
-        module_count = len(spec.modules)
-        if spec.package_type.value == "progressive_codebase_course" and module_count < 3:
+        deliverable_count = len(spec.deliverables)
+        if spec.package_type.value == "progressive_codebase_course" and deliverable_count < 3:
             findings.append(
                 ReviewerFinding(
                     category="pedagogy_review",
                     severity=ReviewerFindingSeverity.warning,
-                    title="Short progressive ladder",
+                    title="Short progressive deliverable plan",
                     detail="Progressive courses are easier to teach when they have at least three meaningful review areas.",
                 )
             )
@@ -445,51 +445,51 @@ class LangGraphAssignmentGraph:
                 ReviewerFinding(
                     category="pedagogy_review",
                     severity=ReviewerFindingSeverity.info,
-                    title="Progression ladder present",
-                    detail=f"The assignment defines {module_count} learner review area(s).",
+                    title="Deliverable plan present",
+                    detail=f"The assignment defines {deliverable_count} learner review area(s).",
                 )
             )
 
-        for module in spec.modules:
-            gate = spec.gate_for(module.id)
+        for deliverable in spec.deliverables:
+            gate = spec.gate_for(deliverable.id)
             if not gate.active_test_ids:
                 findings.append(
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.warning,
-                        title=f"{module.id} has no active gate",
-                        detail="Each module should light up at least one behavior or quality bar.",
+                        title=f"{deliverable.id} has no active gate",
+                        detail="Each deliverable should light up at least one behavior or quality bar.",
                     )
                 )
-            if not module.learning_outcomes:
+            if not deliverable.learning_outcomes:
                 findings.append(
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.error,
-                        title=f"{module.id} is missing learning outcomes",
-                        detail="Derive concrete module outcomes from the learner task before sending this draft to human review.",
+                        title=f"{deliverable.id} is missing learning outcomes",
+                        detail="Derive concrete deliverable outcomes from the learner task before sending this draft to human review.",
                     )
                 )
             elif any(
                 phrase in outcome.lower()
-                for outcome in module.learning_outcomes
+                for outcome in deliverable.learning_outcomes
                 for phrase in ["understand", "learn about", "be familiar"]
             ):
                 findings.append(
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.warning,
-                        title=f"{module.id} outcomes are vague",
+                        title=f"{deliverable.id} outcomes are vague",
                         detail="Rewrite learning outcomes as observable capabilities, not general understanding goals.",
                     )
                 )
-            brief = module.learner_brief
+            brief = deliverable.learner_brief
             if brief is None:
                 findings.append(
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.error,
-                        title=f"{module.id} is missing a learner brief",
+                        title=f"{deliverable.id} is missing a learner brief",
                         detail="Learners need a concrete task statement, files-to-edit guidance, examples, and a definition of done.",
                     )
                 )
@@ -499,7 +499,7 @@ class LangGraphAssignmentGraph:
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.error,
-                        title=f"{module.id} brief is underspecified",
+                        title=f"{deliverable.id} brief is underspecified",
                         detail="Call out the files to edit and what done looks like before asking a learner to work in the starter.",
                     )
                 )
@@ -508,29 +508,29 @@ class LangGraphAssignmentGraph:
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.warning,
-                        title=f"{module.id} needs concrete examples",
+                        title=f"{deliverable.id} needs concrete examples",
                         detail="Add at least one learner-facing example so the expected behavior is easier to visualize.",
                     )
                 )
             brief_text = " ".join(
-                [brief.why_this_module_matters, brief.task_to_build, *brief.example_scenarios]
+                [brief.why_this_deliverable_matters, brief.task_to_build, *brief.example_scenarios]
             ).lower()
             if "hidden checkpoint" in brief_text or "active checks" in brief_text:
                 findings.append(
                     ReviewerFinding(
                         category="pedagogy_review",
                         severity=ReviewerFindingSeverity.error,
-                        title=f"{module.id} leaks internal grading language",
+                        title=f"{deliverable.id} leaks internal grading language",
                         detail="Rewrite the learner brief in task language instead of referencing hidden checkpoints or active checks.",
                     )
                 )
-            elif module.learning_outcomes:
+            elif deliverable.learning_outcomes:
                 alignment_text = " ".join(
                     [brief.task_to_build, *brief.definition_of_done, *brief.example_scenarios]
                 ).lower()
                 if not any(
                     token in alignment_text
-                    for outcome in module.learning_outcomes
+                    for outcome in deliverable.learning_outcomes
                     for token in outcome.lower().replace("`", "").replace("/", " ").split()
                     if len(token.strip(".,:;()[]{}")) >= 5
                 ):
@@ -538,7 +538,7 @@ class LangGraphAssignmentGraph:
                         ReviewerFinding(
                             category="pedagogy_review",
                             severity=ReviewerFindingSeverity.warning,
-                            title=f"{module.id} outcomes may not match the learner task",
+                            title=f"{deliverable.id} outcomes may not match the learner task",
                             detail="The stated outcomes do not obviously match the current learner brief. Review them before approval.",
                         )
                     )
@@ -554,7 +554,7 @@ class LangGraphAssignmentGraph:
             kind=WorkflowNodeKind.reviewer_pedagogy,
             attempt=state["reviewer_attempt"],
             status=status,
-            summary="Reviewer pedagogy node checked the module ladder after verifying the assignment in Docker.",
+            summary="Reviewer pedagogy node checked the deliverable plan after verifying the assignment in Docker.",
             findings=findings,
             sandbox_result=sandbox_result,
         )
@@ -567,7 +567,7 @@ class LangGraphAssignmentGraph:
         validation = validate_task_agent_spec(spec)
         grader_plans = build_all_task_agent_review_area_plans(spec)
         hidden_coverage = {
-            summary.module_id: summary
+            summary.deliverable_id: summary
             for summary in summarize_review_area_hidden_coverage(spec)
         }
         findings: list[ReviewerFinding] = []
@@ -593,14 +593,14 @@ class LangGraphAssignmentGraph:
                 )
             )
 
-        for plan in grader_plans.module_plans:
-            coverage = hidden_coverage.get(plan.module_id)
+        for plan in grader_plans.deliverable_plans:
+            coverage = hidden_coverage.get(plan.deliverable_id)
             hidden_case_count = len(coverage.hidden_case_ids) if coverage is not None else 0
             findings.append(
                 ReviewerFinding(
                     category="tests_review",
                     severity=ReviewerFindingSeverity.info,
-                    title=f"Hidden grader coverage ready for {plan.module_id}",
+                    title=f"Hidden grader coverage ready for {plan.deliverable_id}",
                     detail=(
                         f"This review area activates {plan.total_tests} hidden test(s) across "
                         f"{hidden_case_count} tagged eval case(s)."
@@ -621,11 +621,11 @@ class LangGraphAssignmentGraph:
             )
         else:
             public_dir = Path(workspace.public_dir)
-            for module in spec.modules:
-                module_dir = public_dir / "starter" / module.id
-                manifest_path = module_dir / "starter_manifest.json"
-                visible_check_path = module_dir / "checks" / "run_visible_checks.py"
-                tasks_path = module_dir / ".vscode" / "tasks.json"
+            for deliverable in spec.deliverables:
+                deliverable_dir = public_dir / "starter" / deliverable.id
+                manifest_path = deliverable_dir / "starter_manifest.json"
+                visible_check_path = deliverable_dir / "checks" / "run_visible_checks.py"
+                tasks_path = deliverable_dir / ".vscode" / "tasks.json"
                 missing_paths = [
                     path.relative_to(public_dir).as_posix()
                     for path in (manifest_path, visible_check_path, tasks_path)
@@ -637,7 +637,7 @@ class LangGraphAssignmentGraph:
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Learner checks missing for {module.id}",
+                            title=f"Learner checks missing for {deliverable.id}",
                             detail="Missing learner-visible assets: " + ", ".join(missing_paths),
                         )
                     )
@@ -658,7 +658,7 @@ class LangGraphAssignmentGraph:
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Visible learner checks incomplete for {module.id}",
+                            title=f"Visible learner checks incomplete for {deliverable.id}",
                             detail=(
                                 "Starter manifest must include reviewed public_checks, matching public_check_cases, "
                                 "and the standard visible_check_command."
@@ -683,10 +683,10 @@ class LangGraphAssignmentGraph:
                         ReviewerFinding(
                             category="tests_review",
                             severity=ReviewerFindingSeverity.error,
-                            title=f"Reviewed public checks are incomplete for {module.id}",
+                            title=f"Reviewed public checks are incomplete for {deliverable.id}",
                             detail=(
                                 "Each learner-visible public check must include a title, learner goal, and expected assertions "
-                                "before the module can pass review."
+                                "before the deliverable can pass review."
                             ),
                         )
                     )
@@ -696,7 +696,7 @@ class LangGraphAssignmentGraph:
                     ReviewerFinding(
                         category="tests_review",
                         severity=ReviewerFindingSeverity.info,
-                        title=f"Visible learner checks ready for {module.id}",
+                        title=f"Visible learner checks ready for {deliverable.id}",
                         detail=(
                             f"Learners can run `{visible_check_command}` with {len(public_checks)} reviewed public check(s) "
                             "before submitting to the deeper hidden grader."

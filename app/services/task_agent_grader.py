@@ -9,7 +9,7 @@ from app.domain.grading import (
     AssignmentGradeReport,
     EvalRunEvidence,
     GradeStatus,
-    ModuleGradeReport,
+    DeliverableGradeReport,
     ReviewAreaGradeReport,
     TaskAgentSubmission,
     TestGradeResult,
@@ -21,10 +21,10 @@ from app.services.grader_planner import build_all_task_agent_review_area_plans, 
 
 def grade_task_agent_submission(
     spec: TaskAgentServiceSpec,
-    module_id: str,
+    deliverable_id: str,
     submission: TaskAgentSubmission,
-) -> ModuleGradeReport:
-    plan = build_task_agent_grader_plan(spec, module_id)
+) -> DeliverableGradeReport:
+    plan = build_task_agent_grader_plan(spec, deliverable_id)
     grouped_runs = _group_runs_by_case(submission)
     primary_runs = _primary_runs(spec, grouped_runs)
     warnings = _submission_warnings(spec, submission, primary_runs)
@@ -39,8 +39,8 @@ def grade_task_agent_submission(
     pass_rate = passed_tests / total_tests if total_tests else 0.0
     status = GradeStatus.passed if failed_tests == 0 else GradeStatus.failed
 
-    return ModuleGradeReport(
-        module_id=module_id,
+    return DeliverableGradeReport(
+        deliverable_id=deliverable_id,
         total_tests=total_tests,
         passed_tests=passed_tests,
         failed_tests=failed_tests,
@@ -61,7 +61,7 @@ def grade_assignment_submission(
     warnings = _submission_warnings(spec, submission, primary_runs)
 
     review_areas: list[ReviewAreaGradeReport] = []
-    for plan in plan_collection.module_plans:
+    for plan in plan_collection.deliverable_plans:
         results: list[TestGradeResult] = []
         for entry in plan.entries:
             results.append(_grade_entry(spec, entry, grouped_runs, primary_runs))
@@ -73,12 +73,12 @@ def grade_assignment_submission(
         status = GradeStatus.passed if failed_tests == 0 else GradeStatus.failed
         review_areas.append(
             ReviewAreaGradeReport(
-                module_id=plan.module_id,
-                title=plan.module_title,
-                objective=plan.module_objective,
-                module_index=spec.module_order[plan.module_id] + 1,
-                grade_report=ModuleGradeReport(
-                    module_id=plan.module_id,
+                deliverable_id=plan.deliverable_id,
+                title=plan.deliverable_title,
+                objective=plan.deliverable_objective,
+                deliverable_index=spec.deliverable_order[plan.deliverable_id] + 1,
+                grade_report=DeliverableGradeReport(
+                    deliverable_id=plan.deliverable_id,
                     total_tests=total_tests,
                     passed_tests=passed_tests,
                     failed_tests=failed_tests,

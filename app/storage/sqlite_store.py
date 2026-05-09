@@ -16,7 +16,6 @@ from app.domain.learner import (
     LearnerWorkspaceSession,
 )
 from app.domain.publish import PublishSnapshot, PublishSnapshotSummary
-from app.domain.task_agent import LearnerModuleBrief
 from app.domain.registry import StarterType
 from app.domain.testing import (
     CreatorFeedbackRecord,
@@ -122,7 +121,7 @@ class SQLiteWorkflowStore:
                 CREATE TABLE IF NOT EXISTS learner_submissions (
                     submission_id TEXT PRIMARY KEY,
                     enrollment_id TEXT NOT NULL,
-                    module_id TEXT NOT NULL,
+                    deliverable_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 )
@@ -133,7 +132,7 @@ class SQLiteWorkflowStore:
                 CREATE TABLE IF NOT EXISTS learner_workspace_sessions (
                     session_id TEXT PRIMARY KEY,
                     enrollment_id TEXT NOT NULL,
-                    module_id TEXT NOT NULL,
+                    deliverable_id TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 )
@@ -578,11 +577,11 @@ class SQLiteWorkflowStore:
             connection.execute(
                 """
                 INSERT INTO learner_submissions (
-                    submission_id, enrollment_id, module_id, created_at, payload_json
+                    submission_id, enrollment_id, deliverable_id, created_at, payload_json
                 ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(submission_id) DO UPDATE SET
                     enrollment_id = excluded.enrollment_id,
-                    module_id = excluded.module_id,
+                    deliverable_id = excluded.deliverable_id,
                     created_at = excluded.created_at,
                     payload_json = excluded.payload_json
                 """,
@@ -597,16 +596,16 @@ class SQLiteWorkflowStore:
             connection.commit()
         return submission
 
-    def list_learner_submissions(self, enrollment_id: str, module_id: str | None = None) -> list[LearnerSubmissionRecord]:
+    def list_learner_submissions(self, enrollment_id: str, deliverable_id: str | None = None) -> list[LearnerSubmissionRecord]:
         query = """
             SELECT payload_json
             FROM learner_submissions
             WHERE enrollment_id = ?
         """
         params: tuple[object, ...]
-        if module_id is not None:
-            query += " AND module_id = ?"
-            params = (enrollment_id, module_id)
+        if deliverable_id is not None:
+            query += " AND deliverable_id = ?"
+            params = (enrollment_id, deliverable_id)
         else:
             params = (enrollment_id,)
         query += " ORDER BY datetime(created_at) DESC"
@@ -620,11 +619,11 @@ class SQLiteWorkflowStore:
             connection.execute(
                 """
                 INSERT INTO learner_workspace_sessions (
-                    session_id, enrollment_id, module_id, updated_at, payload_json
+                    session_id, enrollment_id, deliverable_id, updated_at, payload_json
                 ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     enrollment_id = excluded.enrollment_id,
-                    module_id = excluded.module_id,
+                    deliverable_id = excluded.deliverable_id,
                     updated_at = excluded.updated_at,
                     payload_json = excluded.payload_json
                 """,
@@ -877,34 +876,6 @@ class SQLiteWorkflowStore:
                 **payload,
                 "course_family_id": payload.get("course_run_id"),
             }
-        learner_package = payload.get("learner_package")
-        if isinstance(learner_package, dict):
-            modules = learner_package.get("modules")
-            if isinstance(modules, list):
-                normalized_modules = []
-                for module in modules:
-                    if not isinstance(module, dict) or "learner_brief" in module:
-                        normalized_modules.append(module)
-                        continue
-                    visible_files = module.get("visible_files") or []
-                    files_to_edit = ["app.py"] if "app.py" in visible_files else []
-                    brief = LearnerModuleBrief(
-                        why_this_module_matters=module.get("objective") or module.get("title") or "Continue the learner-visible module work.",
-                        task_to_build=module.get("objective") or f"Complete {module.get('title') or 'this module'}.",
-                        files_to_edit=files_to_edit,
-                        definition_of_done=[module.get("completion_rule") or f"Complete {module.get('title') or 'this module'}."],
-                        example_scenarios=[],
-                        implementation_hints=["Read `README.md` and `module_content.md` before editing the starter files."],
-                        non_goals=[],
-                    )
-                    normalized_modules.append({**module, "learner_brief": brief.model_dump(mode="json")})
-                payload = {
-                    **payload,
-                    "learner_package": {
-                        **learner_package,
-                        "modules": normalized_modules,
-                    },
-                }
         return payload
 
     def _normalize_workflow_run_payload(self, payload: dict) -> dict:
@@ -944,19 +915,23 @@ class SQLiteWorkflowStore:
             )
             visible_fixture_files = ["data/corpus.json"] if has_retrieval_fixture else []
 
+        deliverables = payload.get("deliverables")
+
         normalized = {
             **payload,
             "course_structure": course_structure
             or {
                 "package_type": package_type,
                 "workspace_scope": "shared_course_workspace",
-                "progression_mode": "cumulative_module_gates",
+                "progression_mode": "cumulative_deliverable_gates",
                 "shared_codebase": True,
             },
             "runtime_dependencies": (
                 {
                     "execution_surface": "http_service",
                     "starter_type": StarterType.partial_implementation.value,
+                    "implementation_language": "python",
+                    "application_framework": "fastapi",
                     "editable_files": editable_files,
                     "visible_fixture_files": visible_fixture_files,
                     "primary_database": None,
@@ -970,6 +945,8 @@ class SQLiteWorkflowStore:
                 else {
                     **runtime_dependencies,
                     "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial_implementation.value,
+                    "implementation_language": runtime_dependencies.get("implementation_language") or "python",
+                    "application_framework": runtime_dependencies.get("application_framework") or "fastapi",
                     "editable_files": runtime_dependencies.get("editable_files") or editable_files,
                     "visible_fixture_files": runtime_dependencies.get("visible_fixture_files") or visible_fixture_files,
                     "primary_database": runtime_dependencies.get("primary_database"),
@@ -995,20 +972,21 @@ class SQLiteWorkflowStore:
             or {
                 "public_checks_required": True,
                 "hidden_grader_required": True,
-                "cumulative_module_gates": True,
+                "cumulative_deliverable_gates": True,
                 "learner_submission_enabled": True,
             },
+            "deliverables": deliverables or [],
         }
         return normalized
 
     def _infer_editable_files(self, payload: dict) -> list[str]:
-        modules = payload.get("modules")
-        if not isinstance(modules, list):
+        deliverables = payload.get("deliverables")
+        if not isinstance(deliverables, list):
             return []
-        for module in modules:
-            if not isinstance(module, dict):
+        for deliverable in deliverables:
+            if not isinstance(deliverable, dict):
                 continue
-            brief = module.get("learner_brief")
+            brief = deliverable.get("learner_brief")
             if isinstance(brief, dict) and brief.get("files_to_edit"):
                 return list(brief["files_to_edit"])
         return []
@@ -1023,8 +1001,6 @@ class SQLiteWorkflowStore:
 
     def _normalize_learner_enrollment_payload(self, payload: dict) -> dict:
         deliverables = payload.get("deliverables")
-        if not isinstance(deliverables, list):
-            deliverables = payload.get("modules")
         if not isinstance(deliverables, list):
             return payload
 

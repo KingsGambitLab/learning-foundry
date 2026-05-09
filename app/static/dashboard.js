@@ -47,6 +47,9 @@
       const draftSearchInput = document.getElementById("draft-search");
       const goalField = document.getElementById("goal");
       const goalCount = document.getElementById("goal-count");
+      const creatorLanguageField = document.getElementById("creator-language");
+      const creatorFrameworkField = document.getElementById("creator-framework");
+      const creatorRuntimeRequirementsField = document.getElementById("creator-runtime-requirements");
       const outcomesCount = document.getElementById("outcomes-count");
       const generateButton = document.getElementById("generate-button");
       const suggestOutcomesButton = document.getElementById("suggest-outcomes-button");
@@ -69,7 +72,15 @@
         step: 1,
         goal: "",
         outcomes: [],
-        choices: { starter_type: "partial_implementation", primary_database: "postgres", cache_backend: "redis", tech_stack: [], data_sources: [] },
+        choices: {
+          starter_type: "partial_implementation",
+          implementation_language: null,
+          application_framework: null,
+          primary_database: "postgres",
+          cache_backend: "redis",
+          tech_stack: [],
+          data_sources: [],
+        },
         assets: [],
         plan: null,
       };
@@ -79,7 +90,7 @@
       const draftUnblockSummary = document.getElementById("draft-unblock-summary");
       const sourceBadge = document.getElementById("source-badge");
       const planSummary = document.getElementById("plan-summary");
-      const moduleList = document.getElementById("module-list");
+      const deliverableList = document.getElementById("deliverable-list");
       const courseSummary = document.getElementById("course-summary");
       const reviewMetrics = document.getElementById("review-metrics");
       const progressTimeline = document.getElementById("progress-timeline");
@@ -138,6 +149,13 @@
           .replaceAll(">", "&gt;")
           .replaceAll('"', "&quot;")
           .replaceAll("'", "&#39;");
+      }
+
+      function splitRuntimeRequirements(value) {
+        return String(value || "")
+          .split(/[\n,]/)
+          .map((item) => item.trim())
+          .filter(Boolean);
       }
 
       function readUrlState() {
@@ -319,6 +337,9 @@
       function clearSelectedDraft(options = {}) {
         resetDraftSelection();
         window.localStorage.removeItem(activeDraftStorageKey);
+        if ((options.tab || "drafts") === "create") {
+          resetCreatorFlow();
+        }
         setActiveTab(options.tab || "drafts", { updateUrl: false });
         writeUrlState({ draftId: null, tab: options.tab || "drafts" }, options.historyMode || "push");
         renderRecentDrafts(recentDraftRuns);
@@ -355,7 +376,6 @@
 
       function friendlyUseCase(domainPack) {
         const labels = {
-          support_triage: "Support triage",
           oncall_copilot: "On-call copilot",
           rfp_drafter: "RFP drafting",
           analyst_sql: "Analyst SQL",
@@ -387,7 +407,7 @@
 
       function friendlyStarterType(starterType) {
         const labels = {
-          bare_stub: "Bare scaffold",
+          bare_stub: "Bare starter",
           partial_implementation: "Partial implementation",
           working_buggy: "Working but buggy",
           working_suboptimal: "Working but suboptimal",
@@ -471,10 +491,10 @@
       function approvedWorkflowMilestones(workflow) {
         if (!workflow) return [];
         if (workflow.status === "published") {
-          return ["Assignment spec", "Module ladder", "Final assignment review"];
+          return ["Assignment spec", "Deliverables review", "Final assignment review"];
         }
         if (workflow.pending_gate === "gate_3_pre_publish") {
-          return ["Assignment spec", "Module ladder"];
+          return ["Assignment spec", "Deliverables review"];
         }
         if (workflow.pending_gate === "gate_2_progression_review") {
           return ["Assignment spec"];
@@ -496,10 +516,10 @@
             return `${milestones.join(", ")} approved so far.`;
           }
         }
-        const readyModules = review?.counts?.ready_deliverables ?? 0;
-        const totalModules = review?.counts?.total_deliverables ?? courseRun.deliverables.length;
+        const readyDeliverables = review?.counts?.ready_deliverables ?? 0;
+        const totalDeliverables = review?.counts?.total_deliverables ?? courseRun.deliverables.length;
         const publishedWorkflows = review?.counts?.published_workflow_runs ?? 0;
-        return `${readyModules} of ${totalModules} deliverables are publish-ready; ${publishedWorkflows} linked assignment workflow${publishedWorkflows === 1 ? "" : "s"} published.`;
+        return `${readyDeliverables} of ${totalDeliverables} deliverables are publish-ready; ${publishedWorkflows} linked assignment workflow${publishedWorkflows === 1 ? "" : "s"} published.`;
       }
 
       function findLastCompleted(events) {
@@ -840,10 +860,10 @@
         const irreversibleCount = tools.filter((t) => t.safety === "irreversible" || t.approval_required).length;
         const behaviors = spec.behaviors || [];
         const qualities = spec.qualities || [];
-        const modules = spec.modules || [];
+        const deliverables = spec.deliverables || [];
         const eyebrowByGate = {
           gate_1_spec_review: "First review",
-          gate_2_progression_review: "Module ladder check",
+          gate_2_progression_review: "Deliverables review",
           gate_3_pre_publish: "Last check before publish",
         };
         const headlineByGate = {
@@ -852,14 +872,14 @@
           gate_3_pre_publish: "Ready to ship this version?",
         };
 
-        const moduleList = modules.length
-          ? `<ul class="review-plain-modules">${modules.map((m, i) => `
+        const deliverableList = deliverables.length
+          ? `<ul class="review-plain-deliverables">${deliverables.map((m, i) => `
               <li><strong>${i + 1}. ${escapeHtml(m.title)}</strong>${m.objective ? ` — ${escapeHtml(m.objective)}` : ""}</li>
             `).join("")}</ul>`
           : "";
 
         const facts = [];
-        facts.push(`<li><strong>Deliverables:</strong> ${modules.length}</li>`);
+        facts.push(`<li><strong>Deliverables:</strong> ${deliverables.length}</li>`);
         facts.push(`<li><strong>Tools the system can use:</strong> ${tools.length}${writeCount || irreversibleCount ? ` (${[writeCount && `${writeCount} write data`, irreversibleCount && `${irreversibleCount} irreversible`].filter(Boolean).join(", ")})` : ""}</li>`);
         facts.push(`<li><strong>Checks:</strong> ${behaviors.length} learner-visible · ${qualities.length} quality bars</li>`);
 
@@ -869,7 +889,7 @@
             <h5>${escapeHtml(headlineByGate[pendingGate] || spec.title || "Review this step")}</h5>
             <p class="review-plain-spec-title"><strong>${escapeHtml(spec.title || "")}</strong>${spec.summary ? ` — ${escapeHtml(spec.summary)}` : ""}</p>
             <ul>${facts.join("")}</ul>
-            ${pendingGate !== "gate_1_spec_review" ? moduleList : ""}
+            ${pendingGate !== "gate_1_spec_review" ? deliverableList : ""}
           </div>
         `;
       }
@@ -983,13 +1003,13 @@
         const endpointSummary = (spec.production_contract?.canonical_endpoints || [])
           .map((endpoint) => `${endpoint.method} ${endpoint.path}`);
         const tools = spec.tool_registry?.tools || [];
-        const modules = spec.modules || [];
+        const deliverables = spec.deliverables || [];
         const behaviors = spec.behaviors || [];
         const qualities = spec.qualities || [];
         const modes = (spec.supported_modes || []).map(titleCase);
         const pendingGate = workflow.pending_gate || "gate_1_spec_review";
         const reviewKicker = pendingGate === "gate_2_progression_review"
-          ? "Module ladder snapshot"
+          ? "Deliverables snapshot"
           : pendingGate === "gate_3_pre_publish"
             ? "Final publish review"
             : "Assignment spec snapshot";
@@ -1047,16 +1067,16 @@
         ];
 
         if (pendingGate !== "gate_1_spec_review") {
-          expandedSections.push(renderSpecSection("Deliverables", modules.map((module, index) => `
+          expandedSections.push(renderSpecSection("Deliverables", deliverables.map((deliverable, index) => `
             <div class="review-item">
-              <p><strong>${escapeHtml(`${index + 1}. ${module.title}`)}</strong></p>
-              <p>${escapeHtml(module.objective)}</p>
+              <p><strong>${escapeHtml(`${index + 1}. ${deliverable.title}`)}</strong></p>
+              <p>${escapeHtml(deliverable.objective)}</p>
               <div class="pill-row">
-                ${pill(friendlyStarterType(module.starter_type))}
-                ${(module.overlay_ids || []).map((overlay) => pill(friendlyFocusArea(overlay))).join("")}
+                ${pill(friendlyStarterType(deliverable.starter_type))}
+                ${(deliverable.overlay_ids || []).map((overlay) => pill(friendlyFocusArea(overlay))).join("")}
               </div>
             </div>
-          `).concat(!modules.length ? [`<div class="review-item"><p>No deliverable plan is attached yet.</p></div>`] : [])));
+          `).concat(!deliverables.length ? [`<div class="review-item"><p>No deliverable plan is attached yet.</p></div>`] : [])));
           expandedSections.push(renderSpecSection("Progression gates", [
             ...behaviors
               .filter((behavior) => behavior.first_required_in)
@@ -1148,7 +1168,7 @@
         draftStatusSummary.innerHTML = "";
         draftUnblockSummary.innerHTML = "";
         planSummary.innerHTML = "";
-        moduleList.innerHTML = "";
+        deliverableList.innerHTML = "";
         courseSummary.innerHTML = "";
         reviewMetrics.innerHTML = "";
         progressTimeline.innerHTML = "";
@@ -1234,9 +1254,11 @@
         const cacheSelect = document.getElementById("creator-cache");
         return {
           starter_type: starter?.value || "partial_implementation",
+          implementation_language: creatorLanguageField?.value?.trim() || null,
+          application_framework: creatorFrameworkField?.value?.trim() || null,
           primary_database: dbSelect?.value || null,
           cache_backend: cacheSelect?.value || null,
-          tech_stack: [],
+          tech_stack: splitRuntimeRequirements(creatorRuntimeRequirementsField?.value),
           data_sources: Array.isArray(creatorState.choices.data_sources)
             ? creatorState.choices.data_sources.map((source) => ({ ...source }))
             : [],
@@ -1247,6 +1269,8 @@
         if (!choices) return;
         creatorState.choices = {
           starter_type: choices.starter_type || "partial_implementation",
+          implementation_language: choices.implementation_language || null,
+          application_framework: choices.application_framework || null,
           primary_database: choices.primary_database || null,
           cache_backend: choices.cache_backend || null,
           tech_stack: Array.isArray(choices.tech_stack) ? [...choices.tech_stack] : [],
@@ -1254,6 +1278,15 @@
         };
         const starter = document.querySelector(`input[name="starter_type"][value="${choices.starter_type}"]`);
         if (starter) starter.checked = true;
+        if (creatorLanguageField) {
+          creatorLanguageField.value = choices.implementation_language || "";
+        }
+        if (creatorFrameworkField) {
+          creatorFrameworkField.value = choices.application_framework || "";
+        }
+        if (creatorRuntimeRequirementsField) {
+          creatorRuntimeRequirementsField.value = (choices.tech_stack || []).join(", ");
+        }
         const dbSelect = document.getElementById("creator-database");
         if (dbSelect && choices.primary_database !== undefined) {
           dbSelect.value = choices.primary_database || "";
@@ -1269,6 +1302,91 @@
         const labels = { postgres: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", mongodb: "MongoDB" };
         if (!value) return "No database";
         return labels[value] || titleCase(value);
+      }
+
+      function defaultFrameworkForLanguage(language) {
+        const defaults = {
+          python: "fastapi",
+          typescript: "express",
+          javascript: "express",
+          go: "gin",
+          rust: "actix-web",
+        };
+        return defaults[language] || "";
+      }
+
+      function defaultRuntimeRequirementsForStack(language, framework) {
+        const normalizedLanguage = (language || "").trim().toLowerCase();
+        const normalizedFramework = (framework || "").trim().toLowerCase();
+        const effectiveFramework = normalizedFramework || defaultFrameworkForLanguage(normalizedLanguage);
+        const defaults = {
+          python: [`Python 3.12`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `uv`],
+          typescript: [`Node 22`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `pnpm`],
+          javascript: [`Node 22`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `pnpm`],
+          go: [`Go 1.23`, effectiveFramework ? friendlyFramework(effectiveFramework) : null],
+          rust: [`Rust stable`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `cargo`],
+        };
+        return (defaults[normalizedLanguage] || []).filter(Boolean).join(", ");
+      }
+
+      function matchesAutoSuggestion(currentValue, candidates = []) {
+        const normalizedCurrent = String(currentValue || "").trim().toLowerCase();
+        if (!normalizedCurrent) return true;
+        return candidates
+          .filter(Boolean)
+          .map((candidate) => String(candidate).trim().toLowerCase())
+          .includes(normalizedCurrent);
+      }
+
+      function syncStackFieldsFromLanguage(nextLanguage) {
+        if (!creatorFrameworkField || !creatorRuntimeRequirementsField) return;
+        const previousLanguage = creatorState.choices.implementation_language || "";
+        const currentFramework = creatorFrameworkField.value.trim();
+        const previousDefaultFramework = defaultFrameworkForLanguage(previousLanguage);
+        const nextDefaultFramework = defaultFrameworkForLanguage(nextLanguage);
+        const shouldUpdateFramework = matchesAutoSuggestion(currentFramework, [
+          "",
+          previousDefaultFramework,
+        ]);
+
+        let nextFramework = currentFramework;
+        if (shouldUpdateFramework) {
+          nextFramework = nextLanguage ? nextDefaultFramework : "";
+          creatorFrameworkField.value = nextFramework;
+        }
+
+        const currentRuntimeRequirements = creatorRuntimeRequirementsField.value.trim();
+        const previousDefaultRuntime = defaultRuntimeRequirementsForStack(previousLanguage, currentFramework || previousDefaultFramework);
+        const nextDefaultRuntime = defaultRuntimeRequirementsForStack(nextLanguage, nextFramework);
+        const shouldUpdateRuntimeRequirements = matchesAutoSuggestion(currentRuntimeRequirements, [
+          "",
+          previousDefaultRuntime,
+        ]);
+
+        if (shouldUpdateRuntimeRequirements) {
+          creatorRuntimeRequirementsField.value = nextLanguage ? nextDefaultRuntime : "";
+        }
+
+        creatorState.choices.implementation_language = nextLanguage || null;
+        creatorState.choices.application_framework = creatorFrameworkField.value.trim() || null;
+        creatorState.choices.tech_stack = splitRuntimeRequirements(creatorRuntimeRequirementsField.value);
+      }
+
+      function friendlyLanguage(value) {
+        const labels = {
+          python: "Python",
+          typescript: "TypeScript",
+          javascript: "JavaScript",
+          go: "Go",
+          rust: "Rust",
+        };
+        if (!value) return "Default language";
+        return labels[value] || titleCase(value);
+      }
+
+      function friendlyFramework(value) {
+        if (!value) return "Default framework";
+        return titleCase(String(value).replaceAll("-", " "));
       }
 
       function friendlyCache(value) {
@@ -1373,10 +1491,23 @@
         const choices = plan.creator_choices || creatorState.choices;
         const choicePills = [
           pill(`Starter: ${friendlyStarterType(choices.starter_type)}`),
+          ...(choices.implementation_language ? [pill(`Language: ${friendlyLanguage(choices.implementation_language)}`)] : []),
+          ...(choices.application_framework ? [pill(`Framework: ${friendlyFramework(choices.application_framework)}`)] : []),
           pill(`Database: ${friendlyDatabase(choices.primary_database)}`),
           pill(`Cache: ${friendlyCache(choices.cache_backend)}`),
+          ...(choices.tech_stack && choices.tech_stack.length ? [pill(`Runtime requirements: ${choices.tech_stack.length}`)] : []),
           ...(choices.data_sources && choices.data_sources.length ? [pill(`Data sources: ${choices.data_sources.length}`)] : []),
         ].join("");
+        const runtimeRequirementsList = choices.tech_stack && choices.tech_stack.length
+          ? `
+            <div class="creator-plan-data-sources">
+              <h4>Runtime requirements</h4>
+              <ul>
+                ${choices.tech_stack.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+              </ul>
+            </div>
+          `
+          : "";
         const dataSourceList = choices.data_sources && choices.data_sources.length
           ? `
             <div class="creator-plan-data-sources">
@@ -1388,18 +1519,18 @@
           `
           : "";
         const deliverableCards = (plan.deliverables || []).map((m, i) => `
-          <article class="creator-plan-module">
+          <article class="creator-plan-deliverable">
             <header>
-              <span class="creator-plan-module-index">${i + 1}</span>
+              <span class="creator-plan-deliverable-index">${i + 1}</span>
               <h4>${escapeHtml(m.title)}</h4>
             </header>
             <p>${escapeHtml(m.summary || "")}</p>
             ${m.learning_outcomes && m.learning_outcomes.length ? `
-              <p class="creator-plan-module-section-title">What this deliverable covers</p>
+              <p class="creator-plan-deliverable-section-title">What this deliverable covers</p>
               <ul>${m.learning_outcomes.map((o) => `<li>${escapeHtml(o)}</li>`).join("")}</ul>
             ` : ""}
             ${m.creator_notes && m.creator_notes.length ? `
-              <p class="creator-plan-module-section-title">Notes for you</p>
+              <p class="creator-plan-deliverable-section-title">Notes for you</p>
               <ul class="creator-plan-notes">${m.creator_notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>
             ` : ""}
           </article>
@@ -1410,9 +1541,10 @@
             ${plan.summary ? `<p class="creator-plan-summary-line">${escapeHtml(plan.summary)}</p>` : ""}
             ${plan.creator_summary ? `<p class="creator-plan-narrative">${escapeHtml(plan.creator_summary)}</p>` : ""}
             <div class="pill-row">${choicePills}</div>
+            ${runtimeRequirementsList}
             ${dataSourceList}
           </div>
-          <div class="creator-plan-modules">${deliverableCards}</div>
+          <div class="creator-plan-deliverables">${deliverableCards}</div>
           ${plan.notes && plan.notes.length ? `
             <aside class="creator-plan-footnotes">
               <h4>Notes about this plan</h4>
@@ -1462,6 +1594,51 @@
           return "retrieval";
         }
         return "reference_data";
+      }
+
+      async function fetchCreatorSetupSuggestions(opts = {}) {
+        const goal = goalField.value.trim();
+        if (goal.length < 10) {
+          return false;
+        }
+        const currentChoices = readCreatorChoices();
+        try {
+          const response = await fetch("/v1/designs/infer", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: goal.slice(0, 80),
+              problem_statement: goal,
+              learning_outcomes: creatorState.outcomes,
+              starter_type: currentChoices.starter_type,
+              implementation_language: currentChoices.implementation_language,
+              application_framework: currentChoices.application_framework,
+              primary_database: currentChoices.primary_database,
+              cache_backend: currentChoices.cache_backend,
+              tech_stack: currentChoices.tech_stack,
+              data_sources: currentChoices.data_sources,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(await extractDetail(response));
+          }
+          const payload = await response.json();
+          const runtime = payload.design_spec?.runtime_dependencies || {};
+          const nextChoices = {
+            ...currentChoices,
+            implementation_language: currentChoices.implementation_language || runtime.implementation_language || null,
+            application_framework: currentChoices.application_framework || runtime.application_framework || null,
+            primary_database: currentChoices.primary_database || runtime.primary_database || null,
+            cache_backend: currentChoices.cache_backend || runtime.cache_backend || null,
+          };
+          applyCreatorChoicesToInputs(nextChoices);
+          return true;
+        } catch (error) {
+          if (!opts.silentMessage) {
+            setMessage(formMessage, "error", error instanceof Error ? error.message : "Could not suggest a runtime stack.");
+          }
+          return false;
+        }
       }
 
       async function uploadCreatorAssets() {
@@ -1540,13 +1717,17 @@
                 "Implement the core feature with sensible defaults.",
                 "Add tests that match the contract.",
               ];
+          await fetchCreatorSetupSuggestions({ silentMessage: true });
           if (!opts.silentMessage) {
+            const stackSuggestion = creatorState.choices.implementation_language
+              ? ` Suggested stack: ${friendlyLanguage(creatorState.choices.implementation_language)}${creatorState.choices.application_framework ? ` + ${friendlyFramework(creatorState.choices.application_framework)}` : ""}.`
+              : "";
             setMessage(
               formMessage,
               payload.source === "openai_live" ? "success" : "info",
               payload.source === "openai_live"
-                ? "Suggested outcomes added. Edit them however you want."
-                : "Suggested outcomes added from the fallback planner. Edit them however you want.",
+                ? `Suggested outcomes added. Edit them however you want.${stackSuggestion}`
+                : `Suggested outcomes added from the fallback planner. Edit them however you want.${stackSuggestion}`,
             );
           }
           return true;
@@ -1653,6 +1834,8 @@
         creatorState.outcomes = [];
         creatorState.choices = {
           starter_type: "partial_implementation",
+          implementation_language: null,
+          application_framework: null,
           primary_database: "postgres",
           cache_backend: "redis",
           tech_stack: [],
@@ -1660,6 +1843,9 @@
         };
         creatorState.plan = null;
         if (goalField) goalField.value = "";
+        if (creatorLanguageField) creatorLanguageField.value = "";
+        if (creatorFrameworkField) creatorFrameworkField.value = "";
+        if (creatorRuntimeRequirementsField) creatorRuntimeRequirementsField.value = "";
         if (creatorDataSourceFileInput) creatorDataSourceFileInput.value = "";
         if (creatorDataSourcePurpose) creatorDataSourcePurpose.value = defaultDataSourcePurpose();
         renderCreatorOutcomes();
@@ -1674,9 +1860,9 @@
       function renderWorkflowProgress(courseRun = currentCourseRun, review = currentReview, events = currentEvents) {
         const showingDraftContext = currentTab === "drafts" && Boolean(courseRun);
         const loadingDraftContext = currentTab === "drafts" && !courseRun && (draftLoadInProgress || Boolean(pendingDraftId));
-        const readyModules = review?.counts?.ready_deliverables ?? 0;
-        const totalModules = review?.counts?.total_deliverables ?? courseRun?.deliverables?.length ?? 0;
-        const progressPercent = totalModules ? Math.min(100, Math.round((readyModules / totalModules) * 100)) : 0;
+        const readyDeliverables = review?.counts?.ready_deliverables ?? 0;
+        const totalDeliverables = review?.counts?.total_deliverables ?? courseRun?.deliverables?.length ?? 0;
+        const progressPercent = totalDeliverables ? Math.min(100, Math.round((readyDeliverables / totalDeliverables) * 100)) : 0;
         const progressState = {
           brief: "current",
           plan: "up-next",
@@ -1707,7 +1893,7 @@
           const nextTask = humanizeAuthorCopy(statusModel.nextTask);
           workflowProgressTitle.textContent = statusModel.currentTask;
           workflowProgressCopy.textContent = humanizeAuthorCopy(statusModel.latestMessage);
-          workflowProgressCount.textContent = `${readyModules} of ${totalModules} deliverables ready`;
+          workflowProgressCount.textContent = `${readyDeliverables} of ${totalDeliverables} deliverables ready`;
           workflowReviewProgress.classList.remove("hidden");
           workflowReviewProgress.dataset.tone = courseRun.status === "published"
             ? "live"
@@ -1811,7 +1997,7 @@
               <p>${escapeHtml(courseRun?.summary || "We are generating the course plan and linked workflows.")}</p>
             </div>
           `;
-          moduleList.innerHTML = `<div class="review-item"><p>${escapeHtml(courseRun?.stage === "drafting" ? "We will fill in the deliverable plan here as soon as the draft is ready." : "No generated deliverable plan is stored on this draft yet.")}</p></div>`;
+          deliverableList.innerHTML = `<div class="review-item"><p>${escapeHtml(courseRun?.stage === "drafting" ? "We will fill in the deliverable plan here as soon as the draft is ready." : "No generated deliverable plan is stored on this draft yet.")}</p></div>`;
           return;
         }
         renderPlan(plan, source, status);
@@ -1840,8 +2026,8 @@
           ${noteItems ? `<div class="summary-item"><h4>Why this plan</h4><div class="review-list">${noteItems}</div></div>` : ""}
         `;
 
-        moduleList.innerHTML = (plan.deliverables || []).map((deliverable, index) => `
-          <div class="module-item">
+        deliverableList.innerHTML = (plan.deliverables || []).map((deliverable, index) => `
+          <div class="deliverable-item">
             <h4>${index + 1}. ${escapeHtml(deliverable.title)}</h4>
             <p>${escapeHtml(deliverable.summary || "")}</p>
             <div class="pill-row">
@@ -2117,13 +2303,13 @@
         const workflows = review.linked_workflows || [];
         const pendingWorkflows = workflows.filter((workflow) => workflow.pending_gate);
         const statusModel = buildStatusModel(courseRun, review, events);
-        const readyModules = counts.ready_deliverables ?? 0;
-        const totalModules = counts.total_deliverables ?? courseRun.deliverables.length;
+        const readyDeliverables = counts.ready_deliverables ?? 0;
+        const totalDeliverables = counts.total_deliverables ?? courseRun.deliverables.length;
         const bundleCount = counts.deliverables_with_bundle ?? 0;
         const publishedAssignments = counts.published_workflow_runs ?? 0;
 
         reviewMetrics.innerHTML = `
-          <div class="metric-item"><p><strong>Deliverables ready</strong><br />${readyModules} of ${totalModules}</p></div>
+          <div class="metric-item"><p><strong>Deliverables ready</strong><br />${readyDeliverables} of ${totalDeliverables}</p></div>
           <div class="metric-item"><p><strong>Review bundles</strong><br />${bundleCount} ready</p></div>
           <div class="metric-item"><p><strong>Assignment versions ready</strong><br />${publishedAssignments} published</p></div>
           <div class="metric-item"><p><strong>Pending on</strong><br />${escapeHtml(statusModel.owner)}</p></div>
@@ -2216,7 +2402,7 @@
                 ? "Approve if the blueprint chooses the right archetype, inputs, starter shape, and evaluation surface for the course you want to build next."
                 : (reviewPromptByGate[pendingGate] || "Approve if this review step matches your intent, or request changes with the exact fix.");
               return `
-                <div class="module-item review-workbench">
+                <div class="deliverable-item review-workbench">
                   ${renderPlainReviewSummary(workflow, detail)}
                   <details class="review-technical-details">
                     <summary>Technical details</summary>
@@ -2323,7 +2509,7 @@
         }
 
         publishedVersions.innerHTML = versions.map((version) => `
-          <div class="module-item">
+          <div class="deliverable-item">
             <h4>v${escapeHtml(version.version)}</h4>
             <p>${escapeHtml(new Date(version.created_at).toLocaleString())}</p>
             <div class="pill-row">
@@ -2510,11 +2696,33 @@
           setMessage(formMessage, "error", "Add at least one outcome before continuing.");
           return;
         }
+        creatorState.choices = readCreatorChoices();
         applyCreatorChoicesToInputs(creatorState.choices);
         if (creatorDataSourcePurpose && !(creatorState.choices.data_sources || []).length) {
           creatorDataSourcePurpose.value = defaultDataSourcePurpose();
         }
         showCreatorStep(3);
+      });
+
+      creatorLanguageField?.addEventListener("change", (event) => {
+        const value = event.target?.value || "";
+        syncStackFieldsFromLanguage(value);
+      });
+
+      creatorFrameworkField?.addEventListener("change", () => {
+        if (!creatorLanguageField || !creatorRuntimeRequirementsField) return;
+        const language = creatorLanguageField.value || "";
+        const currentFramework = creatorFrameworkField.value.trim();
+        const previousFramework = creatorState.choices.application_framework || defaultFrameworkForLanguage(language);
+        const previousRuntime = defaultRuntimeRequirementsForStack(language, previousFramework);
+        const currentRuntime = creatorRuntimeRequirementsField.value.trim();
+        if (matchesAutoSuggestion(currentRuntime, ["", previousRuntime])) {
+          creatorRuntimeRequirementsField.value = language
+            ? defaultRuntimeRequirementsForStack(language, currentFramework)
+            : "";
+        }
+        creatorState.choices.application_framework = currentFramework || null;
+        creatorState.choices.tech_stack = splitRuntimeRequirements(creatorRuntimeRequirementsField.value);
       });
 
       creatorStep3Next?.addEventListener("click", async () => {
@@ -2715,7 +2923,7 @@
         const runId = trigger.dataset.runId;
         const gate = trigger.dataset.gate;
         if (!runId || !gate) return;
-        const card = trigger.closest(".module-item");
+        const card = trigger.closest(".deliverable-item");
         const noteField = card ? card.querySelector("[data-workflow-comment]") : null;
         const note = noteField instanceof HTMLTextAreaElement ? noteField.value.trim() : "";
 
@@ -2897,6 +3105,7 @@
       });
 
       renderCreatorOutcomes();
+      applyCreatorChoicesToInputs(creatorState.choices);
       if (creatorDataSourcePurpose && !creatorDataSourcePurpose.value) {
         creatorDataSourcePurpose.value = defaultDataSourcePurpose();
       }

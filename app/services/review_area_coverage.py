@@ -12,7 +12,7 @@ RESERVED_REVIEW_AREA_TAGS = {"overall_system"}
 
 
 class ReviewAreaHiddenCoverageSummary(BaseModel):
-    module_id: str
+    deliverable_id: str
     hidden_test_ids: list[str] = Field(default_factory=list)
     hidden_case_ids: list[str] = Field(default_factory=list)
 
@@ -37,11 +37,11 @@ def infer_review_area_case_tags(spec: TaskAgentServiceSpec) -> dict[str, list[st
     behaviors_by_id = {behavior.id: behavior for behavior in spec.behaviors}
     qualities_by_id = {quality.id: quality for quality in spec.qualities}
 
-    for module in spec.modules:
-        gate = spec.gate_for(module.id)
+    for deliverable in spec.deliverables:
+        gate = spec.gate_for(deliverable.id)
         case_ids: set[str] = {
             check.case_id
-            for check in module.public_checks
+            for check in deliverable.public_checks
             if check.case_id in spec.eval_case_ids
         }
         for behavior_id in gate.active_behavior_ids:
@@ -63,14 +63,14 @@ def infer_review_area_case_tags(spec: TaskAgentServiceSpec) -> dict[str, list[st
                 if case_id in spec.eval_case_ids
             )
         for case_id in case_ids:
-            inferred[case_id].add(module.id)
+            inferred[case_id].add(deliverable.id)
 
     return {case_id: sorted(tags) for case_id, tags in inferred.items()}
 
 
 def apply_inferred_review_area_case_tags(spec: TaskAgentServiceSpec) -> TaskAgentServiceSpec:
     inferred_tags = infer_review_area_case_tags(spec)
-    allowed_tags = set(spec.module_order.keys()) | RESERVED_REVIEW_AREA_TAGS
+    allowed_tags = set(spec.deliverable_order.keys()) | RESERVED_REVIEW_AREA_TAGS
     for case in spec.eval_dataset.cases:
         merged_tags = {tag for tag in case.tags if tag in allowed_tags}
         merged_tags.update(inferred_tags.get(case.id, []))
@@ -81,16 +81,16 @@ def apply_inferred_review_area_case_tags(spec: TaskAgentServiceSpec) -> TaskAgen
 def summarize_review_area_hidden_coverage(spec: TaskAgentServiceSpec) -> list[ReviewAreaHiddenCoverageSummary]:
     inferred_tags = infer_review_area_case_tags(spec)
     summaries: list[ReviewAreaHiddenCoverageSummary] = []
-    for module in spec.modules:
-        gate = spec.gate_for(module.id)
+    for deliverable in spec.deliverables:
+        gate = spec.gate_for(deliverable.id)
         hidden_case_ids = sorted(
             case_id
             for case_id, tags in inferred_tags.items()
-            if module.id in tags
+            if deliverable.id in tags
         )
         summaries.append(
             ReviewAreaHiddenCoverageSummary(
-                module_id=module.id,
+                deliverable_id=deliverable.id,
                 hidden_test_ids=list(gate.active_test_ids),
                 hidden_case_ids=hidden_case_ids,
             )

@@ -187,19 +187,19 @@ def _request_json(client: httpx.Client, method: str, path: str, **kwargs) -> dic
     return payload
 
 
-def _module_record(enrollment: dict[str, Any], module_id: str) -> dict[str, Any]:
-    for module in enrollment.get("modules", []):
-        if module.get("module_id") == module_id:
-            return module
-    raise SmokeError(f"Could not find learner module '{module_id}'.")
+def _deliverable_record(enrollment: dict[str, Any], deliverable_id: str) -> dict[str, Any]:
+    for deliverable in enrollment.get("deliverables", []):
+        if deliverable.get("deliverable_id") == deliverable_id:
+            return deliverable
+    raise SmokeError(f"Could not find learner deliverable '{deliverable_id}'.")
 
 
 def _submission_summary(experience: dict[str, Any]) -> dict[str, Any]:
     submissions = experience.get("submissions", [])
     latest = max(submissions, key=lambda item: item.get("created_at", "")) if submissions else None
-    active_module = experience.get("active_module", {})
+    active_deliverable = experience.get("active_deliverable", {})
     return {
-        "module_id": active_module.get("module_id"),
+        "deliverable_id": active_deliverable.get("deliverable_id"),
         "status": latest.get("status") if latest else None,
         "passed_tests": latest.get("passed_tests") if latest else None,
         "total_tests": latest.get("total_tests") if latest else None,
@@ -257,9 +257,9 @@ def _create_and_publish_grounded_rag_course(client: httpx.Client) -> dict[str, A
             "summary": "Build a grounded retrieval and answer system over a visible corpus, with citations and abstention.",
             "package_type": "progressive_codebase_course",
             "shared_design_spec": shared_design_spec,
-            "modules": [
+            "deliverables": [
                 {
-                    "module_slug": "exercise/01-contract",
+                    "deliverable_slug": "exercise/01-contract",
                     "title": "Grounded answer contract",
                     "summary": "Return grounded answers with citations through a stable run contract.",
                     "learning_outcomes": ["grounded answers", "citation schema"],
@@ -270,7 +270,7 @@ def _create_and_publish_grounded_rag_course(client: httpx.Client) -> dict[str, A
                     ),
                 },
                 {
-                    "module_slug": "exercise/02-retrieval",
+                    "deliverable_slug": "exercise/02-retrieval",
                     "title": "Retrieval quality",
                     "summary": "Retrieve and rank the strongest supporting evidence before answering.",
                     "learning_outcomes": ["retrieval selection", "evidence ranking"],
@@ -281,7 +281,7 @@ def _create_and_publish_grounded_rag_course(client: httpx.Client) -> dict[str, A
                     ),
                 },
                 {
-                    "module_slug": "exercise/03-abstention",
+                    "deliverable_slug": "exercise/03-abstention",
                     "title": "Abstention and traceability",
                     "summary": "Abstain when support is weak and expose the retrieval path.",
                     "learning_outcomes": ["abstention", "traceability"],
@@ -292,7 +292,7 @@ def _create_and_publish_grounded_rag_course(client: httpx.Client) -> dict[str, A
                     ),
                 },
                 {
-                    "module_slug": "final/integrated",
+                    "deliverable_slug": "final/integrated",
                     "title": "Production final",
                     "summary": "Meet groundedness, latency, and cost goals together.",
                     "learning_outcomes": ["latency", "operating cost"],
@@ -338,7 +338,7 @@ def _create_and_publish_grounded_rag_course(client: httpx.Client) -> dict[str, A
 def _require_learner_content(
     client: httpx.Client,
     enrollment_id: str,
-    module_id: str,
+    deliverable_id: str,
     *,
     require_corpus: bool,
 ) -> dict[str, Any]:
@@ -346,13 +346,13 @@ def _require_learner_content(
         client,
         "GET",
         f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-        params={"module_id": module_id, "path": "README.md"},
+        params={"deliverable_id": deliverable_id, "path": "README.md"},
     )
-    module_content = _request_json(
+    deliverable_content = _request_json(
         client,
         "GET",
         f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-        params={"module_id": module_id, "path": "module_content.md"},
+        params={"deliverable_id": deliverable_id, "path": "deliverable_content.md"},
     )
 
     corpus_content: str | None = None
@@ -361,7 +361,7 @@ def _require_learner_content(
             client,
             "GET",
             f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-            params={"module_id": module_id, "path": "data/corpus.json"},
+            params={"deliverable_id": deliverable_id, "path": "data/corpus.json"},
         )
         corpus_content = corpus.get("content", "")
         if "doc:ada_lovelace" not in corpus_content:
@@ -373,20 +373,20 @@ def _require_learner_content(
         and "answer questions from the learner-visible corpus" not in readme_content.lower()
     ):
         raise SmokeError("Learner README does not describe the grounded-RAG task clearly enough for the smoke.")
-    if "## Files to edit" not in module_content.get("content", ""):
-        raise SmokeError("Module content is missing the learner brief structure.")
+    if "## Files to edit" not in deliverable_content.get("content", ""):
+        raise SmokeError("Deliverable content is missing the learner brief structure.")
 
     return {
         "readme_excerpt": readme_content.splitlines()[:6],
-        "module_content_excerpt": module_content.get("content", "").splitlines()[:10],
+        "deliverable_content_excerpt": deliverable_content.get("content", "").splitlines()[:10],
         "corpus_present": bool(corpus_content),
     }
 
 
-def _run_module_attempt(
+def _run_deliverable_attempt(
     client: httpx.Client,
     enrollment_id: str,
-    module_id: str,
+    deliverable_id: str,
     *,
     require_corpus: bool,
 ) -> dict[str, Any]:
@@ -394,19 +394,19 @@ def _run_module_attempt(
         client,
         "POST",
         f"/v1/lms/enrollments/{enrollment_id}/workspace",
-        json={"module_id": module_id},
+        json={"deliverable_id": deliverable_id},
     )
-    current_module = _module_record(workspace, module_id)
-    visible_files = set(current_module.get("visible_files", []))
-    if "README.md" not in visible_files or "module_content.md" not in visible_files:
-        raise SmokeError(f"Learner workspace for '{module_id}' is missing the expected visible brief files.")
+    current_deliverable = _deliverable_record(workspace, deliverable_id)
+    visible_files = set(current_deliverable.get("visible_files", []))
+    if "README.md" not in visible_files or "deliverable_content.md" not in visible_files:
+        raise SmokeError(f"Learner workspace for '{deliverable_id}' is missing the expected visible brief files.")
     if require_corpus and "data/corpus.json" not in visible_files:
         raise SmokeError("Learner workspace is missing the visible RAG corpus fixture.")
 
     learner_content = _require_learner_content(
         client,
         enrollment_id,
-        module_id,
+        deliverable_id,
         require_corpus=require_corpus,
     )
 
@@ -414,53 +414,53 @@ def _run_module_attempt(
         client,
         "PUT",
         f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-        json={"module_id": module_id, "relative_path": "app.py", "content": BAD_APP},
+        json={"deliverable_id": deliverable_id, "relative_path": "app.py", "content": BAD_APP},
     )
     bad_experience = _request_json(
         client,
         "POST",
         f"/v1/lms/enrollments/{enrollment_id}/submit",
-        json={"module_id": module_id},
+        json={"deliverable_id": deliverable_id},
     )
     bad_summary = _submission_summary(bad_experience)
     if bad_summary["status"] != "failed":
         raise SmokeError(
-            f"Expected bad submission for '{module_id}' to fail, got: {json.dumps(bad_summary, indent=2)}"
+            f"Expected bad submission for '{deliverable_id}' to fail, got: {json.dumps(bad_summary, indent=2)}"
         )
 
     _request_json(
         client,
         "PUT",
         f"/v1/lms/enrollments/{enrollment_id}/workspace/file",
-        json={"module_id": module_id, "relative_path": "app.py", "content": GOOD_APP},
+        json={"deliverable_id": deliverable_id, "relative_path": "app.py", "content": GOOD_APP},
     )
     good_experience = _request_json(
         client,
         "POST",
         f"/v1/lms/enrollments/{enrollment_id}/submit",
-        json={"module_id": module_id},
+        json={"deliverable_id": deliverable_id},
     )
     good_summary = _submission_summary(good_experience)
     if good_summary["status"] != "passed":
         raise SmokeError(
-            f"Expected good submission for '{module_id}' to pass, got: {json.dumps(good_summary, indent=2)}"
+            f"Expected good submission for '{deliverable_id}' to pass, got: {json.dumps(good_summary, indent=2)}"
         )
 
     refreshed = _request_json(client, "GET", f"/v1/lms/enrollments/{enrollment_id}")
     progression_observed = (
         refreshed.get("status") == "completed"
-        if good_summary["module_id"] == module_id and refreshed.get("current_module_id") is None
-        else refreshed.get("current_module_id") != module_id
+        if good_summary["deliverable_id"] == deliverable_id and refreshed.get("current_deliverable_id") is None
+        else refreshed.get("current_deliverable_id") != deliverable_id
     )
     return {
-        "module_id": module_id,
-        "title": current_module.get("title"),
-        "module_index": int(current_module.get("module_index", 0) or 0),
+        "deliverable_id": deliverable_id,
+        "title": current_deliverable.get("title"),
+        "deliverable_index": int(current_deliverable.get("deliverable_index", 0) or 0),
         "visible_files": sorted(visible_files),
         "learner_content": learner_content,
         "bad_submission": bad_summary,
         "good_submission": good_summary,
-        "next_module_id": refreshed.get("current_module_id"),
+        "next_deliverable_id": refreshed.get("current_deliverable_id"),
         "progression_observed": progression_observed,
         "course_completed": refreshed.get("status") == "completed",
     }
@@ -504,21 +504,21 @@ def run_smoke(
             json={"course_run_id": target_course_run_id, "learner_id": learner_id},
         )
         enrollment_id = str(enrollment["id"])
-        current_module_id = enrollment.get("current_module_id")
-        if not current_module_id:
-            raise SmokeError("Learner enrollment did not activate a starting module.")
+        current_deliverable_id = enrollment.get("current_deliverable_id")
+        if not current_deliverable_id:
+            raise SmokeError("Learner enrollment did not activate a starting deliverable.")
 
-        module_results: list[dict[str, Any]] = []
-        while current_module_id:
-            module_results.append(
-                _run_module_attempt(
+        deliverable_results: list[dict[str, Any]] = []
+        while current_deliverable_id:
+            deliverable_results.append(
+                _run_deliverable_attempt(
                     client,
                     enrollment_id,
-                    str(current_module_id),
+                    str(current_deliverable_id),
                     require_corpus=True,
                 )
             )
-            current_module_id = module_results[-1]["next_module_id"]
+            current_deliverable_id = deliverable_results[-1]["next_deliverable_id"]
 
         refreshed = _request_json(client, "GET", f"/v1/lms/enrollments/{enrollment_id}")
         if refreshed.get("status") != "completed":
@@ -538,22 +538,22 @@ def run_smoke(
                         "Generated by the grounded RAG learner smoke.",
                         "Uses learner-visible workspace files and the real grader path.",
                     ],
-                    "module_results": [
+                    "deliverable_results": [
                         {
-                            "module_id": result["module_id"],
+                            "deliverable_id": result["deliverable_id"],
                             "title": result["title"],
-                            "module_index": result["module_index"],
+                            "deliverable_index": result["deliverable_index"],
                             "learner_visible_files": result["visible_files"],
                             "bad_attempt": result["bad_submission"],
                             "good_attempt": result["good_submission"],
-                            "next_module_id": result["next_module_id"],
+                            "next_deliverable_id": result["next_deliverable_id"],
                             "progression_observed": result["progression_observed"],
                             "course_completed": result["course_completed"],
                             "notes": [
                                 "Read only learner-visible brief and workspace files before writing code."
                             ],
                         }
-                        for result in module_results
+                        for result in deliverable_results
                     ],
                 },
             )
@@ -565,16 +565,16 @@ def run_smoke(
             "setup_mode": setup["setup_mode"],
             "learner_id": learner_id,
             "enrollment_id": enrollment_id,
-            "submitted_modules": module_results,
+            "submitted_deliverables": deliverable_results,
             "final_enrollment_status": refreshed.get("status"),
-            "next_module_id": refreshed.get("current_module_id"),
+            "next_deliverable_id": refreshed.get("current_deliverable_id"),
             "stored_report": stored_report,
         }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run a learner-only grounded-RAG LMS smoke across every module.",
+        description="Run a learner-only grounded-RAG LMS smoke across every deliverable.",
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8010", help="Base URL for the local app.")
     parser.add_argument(

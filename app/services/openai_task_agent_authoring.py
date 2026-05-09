@@ -30,7 +30,7 @@ from app.domain.task_agent import (
 )
 from app.domain.workflow import FailureContext
 from app.services.spec_validation import validate_task_agent_spec
-from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.openai_runtime_support import (
     extract_openai_usage,
     load_openai_env_file,
@@ -56,7 +56,7 @@ class TaskAgentAuthoringStatus(BaseModel):
     env_file: str | None = None
 
 
-class ModuleCustomization(BaseModel):
+class DeliverableCustomization(BaseModel):
     id: str
     title: str | None = None
     objective: str | None = None
@@ -90,7 +90,7 @@ class QualityTargetCustomization(BaseModel):
 
 class TaskAgentCustomization(BaseModel):
     summary: str | None = None
-    modules: list[ModuleCustomization] = Field(default_factory=list)
+    deliverables: list[DeliverableCustomization] = Field(default_factory=list)
     tools: list[ToolCustomization] = Field(default_factory=list)
     eval_cases: list[EvalCaseCustomization] = Field(default_factory=list)
     quality_targets: QualityTargetCustomization | None = None
@@ -159,7 +159,7 @@ class OpenAITaskAgentAuthoringService:
             return TaskAgentAuthoringStatus(
                 available=False,
                 source=TaskAgentAuthoringSource.deterministic_fallback,
-                message="The OpenAI Python SDK is not installed, so task-agent authoring will use the deterministic scaffold.",
+                message="The OpenAI Python SDK is not installed, so task-agent authoring will use the deterministic starter template.",
                 sdk_installed=False,
                 api_key_present=api_key_present,
                 model_id=model_id,
@@ -169,7 +169,7 @@ class OpenAITaskAgentAuthoringService:
             return TaskAgentAuthoringStatus(
                 available=False,
                 source=TaskAgentAuthoringSource.deterministic_fallback,
-                message="OPENAI_API_KEY is not configured, so task-agent authoring will use the deterministic scaffold.",
+                message="OPENAI_API_KEY is not configured, so task-agent authoring will use the deterministic starter template.",
                 sdk_installed=True,
                 api_key_present=False,
                 model_id=model_id,
@@ -197,7 +197,7 @@ class OpenAITaskAgentAuthoringService:
             summary=summary,
             design_spec=design_spec,
         )
-        base_spec = ensure_task_agent_module_briefs(base_spec, overwrite=True)
+        base_spec = ensure_task_agent_deliverable_briefs(base_spec, overwrite=True)
         status = self.status()
         if not status.available:
             return TaskAgentAuthoringResult(
@@ -222,7 +222,7 @@ class OpenAITaskAgentAuthoringService:
                 model_id=status.model_id or "gpt-5.4",
             )
             customized_spec = self._apply_customization(base_spec, customization)
-            customized_spec = ensure_task_agent_module_briefs(customized_spec, overwrite=True)
+            customized_spec = ensure_task_agent_deliverable_briefs(customized_spec, overwrite=True)
             validation = validate_task_agent_spec(customized_spec)
             if not validation.valid:
                 raise ValueError(
@@ -244,7 +244,7 @@ class OpenAITaskAgentAuthoringService:
             fallback_status = TaskAgentAuthoringStatus(
                 available=False,
                 source=TaskAgentAuthoringSource.deterministic_fallback,
-                message=f"OpenAI task-agent authoring failed and fell back to deterministic scaffolding: {exc}",
+                message=f"OpenAI task-agent authoring failed and fell back to the deterministic starter template: {exc}",
                 sdk_installed=status.sdk_installed,
                 api_key_present=status.api_key_present,
                 model_id=status.model_id,
@@ -300,7 +300,7 @@ class OpenAITaskAgentAuthoringService:
                 failure_context=failure_context,
             )
             revised_spec = self._apply_customization(spec, customization)
-            revised_spec = ensure_task_agent_module_briefs(revised_spec, overwrite=True)
+            revised_spec = ensure_task_agent_deliverable_briefs(revised_spec, overwrite=True)
             validation = validate_task_agent_spec(revised_spec)
             if not validation.valid:
                 raise ValueError(
@@ -376,7 +376,7 @@ class OpenAITaskAgentAuthoringService:
                     "role": "system",
                     "content": (
                         "You customize learner-ready backend assignments for software engineering courses. "
-                            "Return JSON only. Do not rename module ids, tool ids, or eval case ids. "
+                            "Return JSON only. Do not rename deliverable ids, tool ids, or eval case ids. "
                             "Keep the assignment production-minded, teachable, and safety-aware. "
                             "Preserve grounded contracts, citations, abstention behavior, and approval gates whenever they apply. "
                             "If human review feedback or failure context is provided, revise the current assignment to address it directly."
@@ -403,17 +403,17 @@ class OpenAITaskAgentAuthoringService:
         if customization.summary:
             updated.summary = customization.summary.strip()
 
-        modules_by_id = {module.id: module for module in updated.modules}
-        for patch in customization.modules:
-            module = modules_by_id.get(patch.id)
-            if module is None:
+        deliverables_by_id = {deliverable.id: deliverable for deliverable in updated.deliverables}
+        for patch in customization.deliverables:
+            deliverable = deliverables_by_id.get(patch.id)
+            if deliverable is None:
                 continue
             if patch.title:
-                module.title = patch.title.strip()
+                deliverable.title = patch.title.strip()
             if patch.objective:
-                module.objective = patch.objective.strip()
+                deliverable.objective = patch.objective.strip()
             if patch.overlay_ids:
-                module.overlay_ids = list(dict.fromkeys(patch.overlay_ids))
+                deliverable.overlay_ids = list(dict.fromkeys(patch.overlay_ids))
 
         tools_by_id = {tool.id: tool for tool in updated.tool_registry.tools}
         for patch in customization.tools:
@@ -596,18 +596,19 @@ class OpenAITaskAgentAuthoringService:
                 "overlays": overlays,
                 "course_structure": base_spec.course_structure.model_dump(mode="json"),
                 "runtime_dependencies": base_spec.runtime_dependencies.model_dump(mode="json"),
+                "project_contract": base_spec.project_contract.model_dump(mode="json"),
                 "capabilities": base_spec.capabilities.model_dump(mode="json"),
                 "assessment_strategy": base_spec.assessment_strategy.model_dump(mode="json"),
             },
             "base_template": origin_template,
             "requirements": {
-                "keep_module_ids": [module.id for module in base_spec.modules],
+                "keep_deliverable_ids": [deliverable.id for deliverable in base_spec.deliverables],
                 "keep_tool_ids": [tool.id for tool in base_spec.tool_registry.tools],
                 "keep_eval_case_ids": [case.id for case in base_spec.eval_dataset.cases],
                 "return_shape": {
                     "summary": "string or null",
-                    "modules": [
-                        {"id": "module id", "title": "new title", "objective": "new objective", "overlay_ids": ["optional overlays"]}
+                    "deliverables": [
+                        {"id": "deliverable id", "title": "new title", "objective": "new objective", "overlay_ids": ["optional overlays"]}
                     ],
                     "tools": [{"id": "tool id", "description": "updated description"}],
                     "eval_cases": [
@@ -619,7 +620,7 @@ class OpenAITaskAgentAuthoringService:
                             "requires_approval": False,
                             "must_use_any_of_tools": ["existing_tool_id"],
                             "must_not_use_tools": ["existing_tool_id"],
-                            "tags": ["module_1"]
+                            "tags": ["deliverable_1"]
                         }
                     ],
                     "quality_targets": {
@@ -632,19 +633,19 @@ class OpenAITaskAgentAuthoringService:
                     },
                     "notes": ["short notes"]
                 },
-                "eval_case_tag_rule": "Every eval case should carry one or more review-area module ids so hidden grader feedback can map back to a learner-visible deliverable.",
+                "eval_case_tag_rule": "Every eval case should carry one or more review-area deliverable ids so hidden grader feedback can map back to a learner-visible deliverable.",
             },
             "base_spec": {
                 "summary": base_spec.summary,
-                "modules": [
+                "deliverables": [
                     {
-                        "id": module.id,
-                        "title": module.title,
-                        "objective": module.objective,
-                        "starter_type": module.starter_type.value,
-                        "overlay_ids": module.overlay_ids,
+                        "id": deliverable.id,
+                        "title": deliverable.title,
+                        "objective": deliverable.objective,
+                        "starter_type": deliverable.starter_type.value,
+                        "overlay_ids": deliverable.overlay_ids,
                     }
-                    for module in base_spec.modules
+                    for deliverable in base_spec.deliverables
                 ],
                 "tools": [
                     {

@@ -23,7 +23,7 @@ from app.domain.task_agent import (
     EscalationPrecisionTestParams,
 )
 from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowRun
-from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 
 
 class TaskAgentRepairService:
@@ -47,8 +47,8 @@ class TaskAgentRepairService:
         needs_learner_artifact_rebuild = bool(
             issue_codes
             & {
-                "missing_module_learning_outcomes",
-                "blank_module_learning_outcome",
+                "missing_deliverable_learning_outcomes",
+                "blank_deliverable_learning_outcome",
                 "missing_learner_brief",
                 "missing_files_to_edit",
                 "missing_definition_of_done",
@@ -65,9 +65,9 @@ class TaskAgentRepairService:
             )
         )
         if needs_learner_artifact_rebuild:
-            ensure_task_agent_module_briefs(spec, overwrite=True)
+            ensure_task_agent_deliverable_briefs(spec, overwrite=True)
             changed = True
-            notes.append("Rebuilt learner briefs, public checks, and derived module outcomes from the current spec.")
+            notes.append("Rebuilt learner briefs, public checks, and derived deliverable outcomes from the current spec.")
 
         if "missing_editable_files" in issue_codes and not spec.runtime_dependencies.editable_files:
             spec.runtime_dependencies.editable_files = ["app.py"]
@@ -87,9 +87,9 @@ class TaskAgentRepairService:
         tool_ids = [tool.id for tool in spec.tool_registry.tools]
         fallback_tool = tool_ids[0] if tool_ids else None
         fallback_mutating_tool = next((tool.id for tool in spec.tool_registry.tools if tool.safety != ToolSafety.read), fallback_tool)
-        module_ids = [module.id for module in spec.modules]
-        first_module = module_ids[0] if module_ids else None
-        last_module = module_ids[-1] if module_ids else None
+        deliverable_ids = [deliverable.id for deliverable in spec.deliverables]
+        first_deliverable = deliverable_ids[0] if deliverable_ids else None
+        last_deliverable = deliverable_ids[-1] if deliverable_ids else None
         escalation_reasons = [rule.reason for rule in spec.production_contract.escalation_policy]
         fallback_reason = escalation_reasons[0] if escalation_reasons else None
 
@@ -112,8 +112,8 @@ class TaskAgentRepairService:
             notes.append("Added the missing approval endpoint required by the tool policy.")
 
         for behavior in spec.behaviors:
-            if behavior.first_required_in not in module_ids and first_module is not None:
-                behavior.first_required_in = first_module
+            if behavior.first_required_in not in deliverable_ids and first_deliverable is not None:
+                behavior.first_required_in = first_deliverable
                 changed = True
                 notes.append(f"Moved behavior `{behavior.id}` onto a valid review area.")
 
@@ -203,10 +203,10 @@ class TaskAgentRepairService:
                     changed = True
 
         for quality in spec.qualities:
-            if quality.first_required_in not in module_ids and last_module is not None:
-                quality.first_required_in = last_module
+            if quality.first_required_in not in deliverable_ids and last_deliverable is not None:
+                quality.first_required_in = last_deliverable
                 changed = True
-                notes.append(f"Moved quality `{quality.id}` onto the final valid module.")
+                notes.append(f"Moved quality `{quality.id}` onto the final valid deliverable.")
 
             test = quality.test
             if isinstance(

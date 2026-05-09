@@ -102,7 +102,7 @@ class LiveGradeTaskAgentSpecRequest(BaseModel):
 class LiveTaskAgentGradeReport(BaseModel):
     base_url: str
     submission: TaskAgentSubmission
-    grade_report: "ModuleGradeReport"
+    grade_report: "DeliverableGradeReport"
 
 
 class GradeStatus(str, Enum):
@@ -120,8 +120,17 @@ class TestGradeResult(BaseModel):
     diagnostics: list[str] = Field(default_factory=list)
 
 
-class ModuleGradeReport(BaseModel):
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+class LearnerReviewGuidance(BaseModel):
+    strengths: list[str] = Field(default_factory=list)
+    fundamental_gap: str = ""
+    why_it_matters: list[str] = Field(default_factory=list)
+    likely_root_cause: list[str] = Field(default_factory=list)
+    investigation_steps: list[str] = Field(default_factory=list)
+    learner_feedback: str = ""
+
+
+class DeliverableGradeReport(BaseModel):
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     total_tests: int
     passed_tests: int
     failed_tests: int
@@ -132,14 +141,15 @@ class ModuleGradeReport(BaseModel):
 
 
 class ReviewAreaGradeReport(BaseModel):
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     title: str
     objective: str
     deliverable_index: int = Field(
         ge=1,
-        validation_alias=AliasChoices("deliverable_index", "module_index"),
+        validation_alias="deliverable_index",
     )
-    grade_report: ModuleGradeReport
+    grade_report: DeliverableGradeReport
+    feedback: LearnerReviewGuidance | None = None
 
 
 class AssignmentGradeReport(BaseModel):

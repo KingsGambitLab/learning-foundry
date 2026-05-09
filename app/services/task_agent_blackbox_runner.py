@@ -42,10 +42,10 @@ class TaskAgentBlackBoxRunner:
     def collect_submission(
         self,
         spec: TaskAgentServiceSpec,
-        module_id: str,
+        deliverable_id: str,
         request: LiveGradeTaskAgentRequest,
     ) -> TaskAgentSubmission:
-        plan = build_task_agent_grader_plan(spec, module_id)
+        plan = build_task_agent_grader_plan(spec, deliverable_id)
         ordered_cases = OrderedDict((case.id, case) for case in spec.eval_dataset.cases)
         case_ids: set[str] = set()
         dry_run_case_ids: set[str] = set()
@@ -58,7 +58,7 @@ class TaskAgentBlackBoxRunner:
                 dry_run_case_ids.update(entry.dependencies.eval_case_ids)
 
         if not case_ids:
-            raise TaskAgentRunnerError(f"No eval cases were activated for module '{module_id}'.")
+            raise TaskAgentRunnerError(f"No eval cases were activated for deliverable '{deliverable_id}'.")
 
         client = self.client_factory(request.base_url, request.timeout_ms / 1000)
         try:
@@ -76,9 +76,9 @@ class TaskAgentBlackBoxRunner:
             client.close()
 
         return TaskAgentSubmission(
-            submission_id=f"blackbox::{module_id}::{request.base_url}",
+            submission_id=f"blackbox::{deliverable_id}::{request.base_url}",
             runs=runs,
-            metadata={"collected_from": request.base_url, "module_id": module_id},
+            metadata={"collected_from": request.base_url, "deliverable_id": deliverable_id},
         )
 
     def collect_assignment_submission(
@@ -91,7 +91,7 @@ class TaskAgentBlackBoxRunner:
         case_ids: set[str] = set()
         dry_run_case_ids: set[str] = set()
 
-        for plan in plans.module_plans:
+        for plan in plans.deliverable_plans:
             for entry in plan.entries:
                 if entry.dependencies.dataset_id == spec.eval_dataset.id:
                     case_ids.update(ordered_cases.keys())
@@ -126,11 +126,11 @@ class TaskAgentBlackBoxRunner:
     def grade_live(
         self,
         spec: TaskAgentServiceSpec,
-        module_id: str,
+        deliverable_id: str,
         request: LiveGradeTaskAgentRequest,
     ) -> LiveTaskAgentGradeReport:
-        submission = self.collect_submission(spec, module_id, request)
-        grade_report = grade_task_agent_submission(spec, module_id, submission)
+        submission = self.collect_submission(spec, deliverable_id, request)
+        grade_report = grade_task_agent_submission(spec, deliverable_id, submission)
         return LiveTaskAgentGradeReport(
             base_url=request.base_url,
             submission=submission,

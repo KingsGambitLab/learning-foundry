@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from app.domain.grading import GradeStatus
 from app.domain.learner import LearnerWorkspaceScope
 from app.domain.registry import PackageType
-from app.domain.task_agent import LearnerModuleBrief, PublicCheckSpec, TaskAgentServiceSpec
+from app.domain.task_agent import LearnerDeliverableBrief, PublicCheckSpec, TaskAgentServiceSpec
 
 
 class LearnerPackageFile(BaseModel):
@@ -15,16 +17,16 @@ class LearnerPackageFile(BaseModel):
     content: str
 
 
-class LearnerModulePackage(BaseModel):
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+class LearnerDeliverablePackage(BaseModel):
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     course_deliverable_slug: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("course_deliverable_slug", "course_module_slug"),
+        validation_alias="course_deliverable_slug",
     )
     title: str
     objective: str
-    deliverable_index: int = Field(validation_alias=AliasChoices("deliverable_index", "module_index"))
-    learner_brief: LearnerModuleBrief
+    deliverable_index: int = Field(validation_alias="deliverable_index")
+    learner_brief: LearnerDeliverableBrief
     public_checks: list[PublicCheckSpec] = Field(default_factory=list)
     content_markdown: str
     starter_readme: str
@@ -43,9 +45,9 @@ class LearnerCoursePackage(BaseModel):
     published_at: datetime
     workspace_scope: LearnerWorkspaceScope
     project_brief_markdown: str = ""
-    deliverables: list[LearnerModulePackage] = Field(
+    deliverables: list[LearnerDeliverablePackage] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("deliverables", "modules"),
+        validation_alias="deliverables",
     )
     notes: list[str] = Field(default_factory=list)
 
@@ -58,6 +60,46 @@ class PublishSnapshotProvenance(BaseModel):
     course_bundle_id: str | None = None
 
 
+class PublishCertificationCheckStatus(str, Enum):
+    passed = "passed"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class PublishCertificationFailureOrigin(str, Enum):
+    repairable_generation = "repairable_generation"
+    platform_runtime = "platform_runtime"
+    ambiguous = "ambiguous"
+
+
+class PublishCertificationCheck(BaseModel):
+    key: str
+    status: PublishCertificationCheckStatus
+    summary: str
+    detail: str | None = None
+    blocking: bool = True
+
+
+class PublishLearnerCertificationReport(BaseModel):
+    version: str = "learner-cert-v1"
+    certified_at: datetime
+    passed: bool
+    failure_origin: PublishCertificationFailureOrigin | None = None
+    checks: list[PublishCertificationCheck] = Field(default_factory=list)
+    assignment_status: GradeStatus | None = None
+    passed_tests: int = 0
+    total_tests: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+    @property
+    def blocking_failures(self) -> list[PublishCertificationCheck]:
+        return [
+            check
+            for check in self.checks
+            if check.blocking and check.status == PublishCertificationCheckStatus.failed
+        ]
+
+
 class PublishSnapshot(BaseModel):
     id: str
     course_run_id: str
@@ -68,6 +110,7 @@ class PublishSnapshot(BaseModel):
     shared_workflow_run_id: str | None = None
     learner_package: LearnerCoursePackage | None = None
     task_agent_spec: TaskAgentServiceSpec | None = None
+    learner_certification: PublishLearnerCertificationReport | None = None
     provenance: PublishSnapshotProvenance
     notes: list[str] = Field(default_factory=list)
 
@@ -100,7 +143,7 @@ class PublishedVersionSummary(BaseModel):
     is_latest: bool = False
     default_for_new_enrollments: bool = False
     learner_count: int = 0
-    deliverable_count: int = Field(default=0, validation_alias=AliasChoices("deliverable_count", "module_count"))
+    deliverable_count: int = Field(default=0, validation_alias="deliverable_count")
     compatibility: str = "new_enrollments_only"
     changes: list[str] = Field(default_factory=list)
 

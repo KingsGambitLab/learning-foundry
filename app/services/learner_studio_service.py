@@ -105,7 +105,11 @@ class LearnerStudioService:
             )
 
         editor_url = f"http://{self.host}:{host_port}/"
-        self._wait_for_http(editor_url)
+        try:
+            self._wait_for_http(editor_url, container_name=container_name)
+        except Exception:
+            self._remove_container(container_name)
+            raise
         return LearnerWorkspaceSession(
             id=session_id,
             enrollment_id=enrollment_id,
@@ -121,6 +125,11 @@ class LearnerStudioService:
             image_name=self.image_name,
             notes=["VS Code (code-server) session running in Docker."],
         )
+
+    def stop_editor(self, session: LearnerWorkspaceSession | None) -> None:
+        if session is None or not session.container_name:
+            return
+        self._remove_container(session.container_name)
 
     def _can_reuse_session(
         self,
@@ -186,7 +195,7 @@ class LearnerStudioService:
 
         base_url = f"http://{self.host}:{host_port}"
         try:
-            self._wait_for_http(f"{base_url}/health")
+            self._wait_for_http(f"{base_url}/health", container_name=container_name)
             return self.runner.grade_assignment_live(
                 spec,
                 LiveGradeTaskAgentRequest(base_url=base_url),
@@ -251,7 +260,18 @@ class LearnerStudioService:
             timeout=30,
         )
 
-    def _wait_for_http(self, url: str) -> None:
+    def _container_logs(self, container_name: str) -> str | None:
+        result = subprocess.run(
+            [self.docker_binary, "logs", "--tail", "80", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        return logs or None
+
+    def _wait_for_http(self, url: str, *, container_name: str | None = None) -> None:
         deadline = time.time() + self.start_timeout_s
         last_error: Exception | None = None
         while time.time() < deadline:
@@ -262,7 +282,12 @@ class LearnerStudioService:
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
             time.sleep(1.0)
-        raise LearnerStudioError(f"Timed out waiting for '{url}' to respond. Last error: {last_error}")
+        details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
+        if container_name:
+            logs = self._container_logs(container_name)
+            if logs:
+                details = f"{details}\n\nContainer logs:\n{logs}"
+        raise LearnerStudioError(details)
 
     def _allocate_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

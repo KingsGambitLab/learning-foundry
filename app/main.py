@@ -21,7 +21,9 @@ from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
 from app.services.lms_page import build_lms_state, render_lms_courses_page, render_lms_home
 from app.services.lms_service import LMSService
+from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.learner_studio_service import LearnerStudioService
+from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
 from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
@@ -37,6 +39,10 @@ def _ensure_lms_service(app: FastAPI) -> LMSService:
         app.state.learner_studio_service = LearnerStudioService(
             runner=getattr(app.state, "task_agent_blackbox_runner", TaskAgentBlackBoxRunner()),
         )
+    if not hasattr(app.state, "learner_feedback_service"):
+        app.state.learner_feedback_service = OpenAILearnerFeedbackService(
+            env_file=os.environ.get("COURSE_GEN_OPENAI_ENV_FILE"),
+        )
     if not hasattr(app.state, "workflow_service"):
         app.state.workflow_service = WorkflowService(
             store,
@@ -51,6 +57,7 @@ def _ensure_lms_service(app: FastAPI) -> LMSService:
             app.state.workflow_service.store,
             app.state.workflow_service,
             learner_studio_service=app.state.learner_studio_service,
+            learner_feedback_service=app.state.learner_feedback_service,
         )
     return app.state.lms_service
 
@@ -81,6 +88,10 @@ async def lifespan(app: FastAPI):
         app.state.learner_studio_service = LearnerStudioService(
             runner=app.state.task_agent_blackbox_runner,
         )
+    if not hasattr(app.state, "learner_feedback_service"):
+        app.state.learner_feedback_service = OpenAILearnerFeedbackService(
+            env_file=os.environ.get("COURSE_GEN_OPENAI_ENV_FILE"),
+        )
     if not hasattr(app.state, "task_agent_authoring_service"):
         app.state.task_agent_authoring_service = OpenAITaskAgentAuthoringService(
             env_file=os.environ.get("COURSE_GEN_OPENAI_ENV_FILE"),
@@ -99,6 +110,10 @@ async def lifespan(app: FastAPI):
             app.state.workflow_service.store,
             app.state.workflow_service,
             CourseArtifactMaterializer(),
+            publish_certification_service=PublishLearnerCertificationService(
+                learner_studio_service=app.state.learner_studio_service,
+                enabled=True,
+            ),
             creator_asset_service=app.state.creator_asset_service,
         )
     if not hasattr(app.state, "course_generation_service"):
@@ -110,6 +125,7 @@ async def lifespan(app: FastAPI):
             app.state.workflow_service.store,
             app.state.workflow_service,
             learner_studio_service=app.state.learner_studio_service,
+            learner_feedback_service=app.state.learner_feedback_service,
         )
     yield
 

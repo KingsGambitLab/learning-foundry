@@ -16,8 +16,8 @@ from app.domain.course import (
     CourseGenerationStatus,
     CreatorCourseSetupChoices,
     LocalDraftResetResult,
-    CourseModuleDraft,
-    CourseModuleReview,
+    CourseDeliverableDraft,
+    CourseDeliverableReview,
     CourseReviewCounts,
     CourseReviewReport,
     CourseRun,
@@ -25,15 +25,16 @@ from app.domain.course import (
     CourseRunSummary,
     CourseRunStage,
     CourseRunStatus,
-    CreateCourseModuleRequest,
+    CreateCourseDeliverableRequest,
     CreateCourseRunRequest,
     GeneratedCoursePlan,
     QueueCourseOperationResponse,
     QueueCourseRevisionResponse,
 )
 from app.domain.registry import PackageType, RiskClass
-from app.domain.task_agent import AssignmentDesignSpec, ModuleSpec, RetrievalMode, TaskAgentServiceSpec
+from app.domain.task_agent import AssignmentDesignSpec, DeliverableSpec, RetrievalMode, TaskAgentServiceSpec
 from app.domain.publish import PublishSnapshot, PublishedVersionList, PublishedVersionSummary
+from app.domain.publish import PublishCertificationCheckStatus, PublishCertificationFailureOrigin, PublishLearnerCertificationReport
 from app.domain.testing import (
     CreateCreatorFeedbackRequest,
     CreateLearnerEvaluationReportRequest,
@@ -47,8 +48,16 @@ from app.domain.testing import (
 from app.domain.workflow import (
     ArtifactVisibility,
     BundleFileContent,
+    DecisionOutcome,
     DraftKind,
+    GateDecisionRequest,
+    HILGate,
     MaterializeBundleRequest,
+    ReviewerFinding,
+    ReviewerFindingSeverity,
+    WorkflowNodeExecution,
+    WorkflowNodeKind,
+    WorkflowNodeStatus,
     WorkflowRun,
     WorkflowStatus,
 )
@@ -56,8 +65,9 @@ from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_patterns import CoursePattern, course_pattern_by_slug
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design, infer_risk_class
-from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.lms_service import default_learner_workspace_dir
+from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.publish_snapshot_service import PublishSnapshotService
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
@@ -77,6 +87,7 @@ class CourseWorkflowService:
         workflow_service: WorkflowService,
         materializer: CourseArtifactMaterializer | None = None,
         publish_snapshot_service: PublishSnapshotService | None = None,
+        publish_certification_service: PublishLearnerCertificationService | None = None,
         creator_asset_service: CreatorAssetService | None = None,
         job_runner: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
@@ -84,6 +95,7 @@ class CourseWorkflowService:
         self.workflow_service = workflow_service
         self.materializer = materializer or CourseArtifactMaterializer()
         self.publish_snapshot_service = publish_snapshot_service or PublishSnapshotService(store, workflow_service)
+        self.publish_certification_service = publish_certification_service or PublishLearnerCertificationService()
         self.creator_asset_service = creator_asset_service
         self.job_runner = job_runner or self._run_job_in_background
 
@@ -115,7 +127,7 @@ class CourseWorkflowService:
             summary=course_run.summary,
             package_type=course_run.package_type,
             shared_design_spec=course_run.shared_design_spec,
-            modules=[self._request_from_module_draft(module) for module in course_run.modules],
+            deliverables=[self._request_from_deliverable_draft(deliverable) for deliverable in course_run.deliverables],
             notes=list(notes or []),
         )
 
@@ -168,7 +180,7 @@ class CourseWorkflowService:
             "course_run_created",
             {
                 "package_type": course_run.package_type.value,
-                "module_count": len(course_run.modules),
+                "deliverable_count": len(course_run.deliverables),
                 "shared_workflow_run_id": course_run.shared_workflow_run_id,
             },
         )
@@ -190,6 +202,8 @@ class CourseWorkflowService:
             learning_outcomes=learning_outcomes,
             package_type_hint=package_type_hint,
             starter_type=(creator_choices.starter_type if creator_choices is not None else None),
+            implementation_language=(creator_choices.implementation_language if creator_choices is not None else None),
+            application_framework=(creator_choices.application_framework if creator_choices is not None else None),
             primary_database=(creator_choices.primary_database if creator_choices is not None else None),
             cache_backend=(creator_choices.cache_backend if creator_choices is not None else None),
             tech_stack=(list(creator_choices.tech_stack) if creator_choices is not None else []),
@@ -201,6 +215,8 @@ class CourseWorkflowService:
             learning_outcomes=learning_outcomes,
             package_type_hint=package_type_hint,
             starter_type=intake.starter_type,
+            implementation_language=intake.implementation_language,
+            application_framework=intake.application_framework,
             primary_database=intake.primary_database,
             cache_backend=intake.cache_backend,
             tech_stack=intake.tech_stack,
@@ -220,7 +236,7 @@ class CourseWorkflowService:
             updated_at=now,
             stage=CourseRunStage.drafting,
             status=CourseRunStatus.active,
-            modules=[],
+            deliverables=[],
             notes=[
                 "Draft created from the brief.",
                 "Generation is in progress and the draft will update in place.",
@@ -268,7 +284,7 @@ class CourseWorkflowService:
                 package_type=plan.package_type,
                 shared_design_spec=plan.shared_design_spec,
                 course_family_id=existing.course_family_id,
-                modules=plan.modules,
+                deliverables=plan.deliverables,
             ),
         )
         notes = [note for note in existing.notes if "Generation is in progress" not in note]
@@ -302,7 +318,7 @@ class CourseWorkflowService:
                 "provider": generation_status.provider,
                 "model_id": generation_status.model_id,
                 "message": generation_status.message,
-                "module_count": len(course_run.modules),
+                "deliverable_count": len(course_run.deliverables),
                 "ai_usage": (usage.model_dump(mode="json") if usage is not None else None),
             },
         )
@@ -356,8 +372,8 @@ class CourseWorkflowService:
         if request.pattern_slug and pattern is None:
             raise ValueError(f"Unknown course pattern '{request.pattern_slug}'.")
 
-        if pattern is None and not request.modules:
-            raise ValueError("Custom course creation requires at least one module.")
+        if pattern is None and not request.deliverables:
+            raise ValueError("Custom course creation requires at least one deliverable.")
 
         title = request.title or (pattern.course_title if pattern else None)
         if not title:
@@ -366,44 +382,44 @@ class CourseWorkflowService:
         package_type = request.package_type or (pattern.package_type if pattern else PackageType.survey_course)
         shared_design_spec = request.shared_design_spec or (pattern.shared_design_spec if pattern else None)
 
-        modules = self._module_requests_from_pattern(pattern, summary) if pattern else request.modules
-        if not modules:
-            raise ValueError("Course must contain at least one module.")
+        deliverables = self._deliverable_requests_from_pattern(pattern, summary) if pattern else request.deliverables
+        if not deliverables:
+            raise ValueError("Course must contain at least one deliverable.")
 
         if package_type == PackageType.survey_course:
-            module_drafts = [self._create_survey_module(module, title, summary) for module in modules]
+            deliverable_drafts = [self._create_survey_deliverable(deliverable, title, summary) for deliverable in deliverables]
             shared_workflow_run_id = None
         else:
             shared_run = self._create_progressive_workflow(
                 title,
                 summary,
-                modules,
+                deliverables,
                 shared_design_spec,
                 execute_nodes=execute_shared_workflow_nodes,
             )
-            shared_run = self._ensure_progressive_workflow_matches_modules(
+            shared_run = self._ensure_progressive_workflow_matches_deliverables(
                 shared_run,
-                modules,
+                deliverables,
                 execute_nodes=execute_shared_workflow_nodes,
             )
-            aligned_modules = self._align_progressive_modules(modules, shared_run)
-            module_drafts = [
-                self._module_draft_from_workflow(
-                    module,
+            aligned_deliverables = self._align_progressive_deliverables(deliverables, shared_run)
+            deliverable_drafts = [
+                self._deliverable_draft_from_workflow(
+                    deliverable,
                     shared_run.id,
                     shared_run.stage.value,
                     shared_run.status.value,
                     shared_run.artifacts.draft_kind.value,
-                    self._design_spec_from_workflow(shared_run, module.design_spec or shared_design_spec),
+                    self._design_spec_from_workflow(shared_run, deliverable.design_spec or shared_design_spec),
                     self._workflow_design_status(shared_run),
                     extra_notes=["Shared progressive workflow run for the whole course."],
                 )
-                for module in aligned_modules
+                for deliverable in aligned_deliverables
             ]
             shared_workflow_run_id = shared_run.id
             shared_design_spec = self._design_spec_from_workflow(shared_run, shared_design_spec)
 
-        stage, status = self._course_stage_from_modules(module_drafts)
+        stage, status = self._course_stage_from_deliverables(deliverable_drafts)
         course_run = CourseRun(
             id=course_run_id,
             title=title,
@@ -417,10 +433,10 @@ class CourseWorkflowService:
             updated_at=updated_at,
             stage=stage,
             status=status,
-            modules=module_drafts,
+            deliverables=deliverable_drafts,
             notes=[
                 "Course draft created from the course workflow layer.",
-                "Each survey module maps to its own assignment workflow run; progressive courses share one assignment workflow run.",
+                "Each survey deliverable maps to its own assignment workflow run; progressive courses share one assignment workflow run.",
             ],
         )
         return course_run
@@ -428,11 +444,11 @@ class CourseWorkflowService:
     def create_revision(self, course_run_id: str) -> CourseRun:
         source = self._require_published_run(course_run_id)
         revision = self._build_revision_placeholder(source, queued=False)
-        module_drafts, shared_workflow_run_id = self._prepare_revision_drafts(source)
+        deliverable_drafts, shared_workflow_run_id = self._prepare_revision_drafts(source)
         return self._finalize_revision(
             revision=revision,
             source=source,
-            module_drafts=module_drafts,
+            deliverable_drafts=deliverable_drafts,
             shared_workflow_run_id=shared_workflow_run_id,
             event_type="course_revision_created",
         )
@@ -506,11 +522,11 @@ class CourseWorkflowService:
         request: CreateCreatorFeedbackRequest,
     ) -> CreatorFeedbackRecord:
         course_run = self._compute_refreshed_run(self._require_run(course_run_id))
-        if request.module_slug is not None and all(module.module_slug != request.module_slug for module in course_run.modules):
-            raise ValueError(f"Unknown module '{request.module_slug}' for course '{course_run_id}'.")
+        if request.deliverable_slug is not None and all(deliverable.deliverable_slug != request.deliverable_slug for deliverable in course_run.deliverables):
+            raise ValueError(f"Unknown deliverable '{request.deliverable_slug}' for course '{course_run_id}'.")
         valid_workflow_ids = {
             workflow_id
-            for workflow_id in [course_run.shared_workflow_run_id, *[module.workflow_run_id for module in course_run.modules]]
+            for workflow_id in [course_run.shared_workflow_run_id, *[deliverable.workflow_run_id for deliverable in course_run.deliverables]]
             if workflow_id is not None
         }
         if request.workflow_run_id is not None and request.workflow_run_id not in valid_workflow_ids:
@@ -524,7 +540,7 @@ class CourseWorkflowService:
             summary=request.summary.strip(),
             details=request.details.strip() if request.details else None,
             rating=request.rating,
-            module_slug=request.module_slug,
+            deliverable_slug=request.deliverable_slug,
             workflow_run_id=request.workflow_run_id,
             stage=course_run.stage.value,
             status=course_run.status.value,
@@ -537,7 +553,7 @@ class CourseWorkflowService:
             {
                 "feedback_id": feedback.id,
                 "category": feedback.category,
-                "module_slug": feedback.module_slug,
+                "deliverable_slug": feedback.deliverable_slug,
                 "workflow_run_id": feedback.workflow_run_id,
                 "rating": feedback.rating,
             },
@@ -763,11 +779,11 @@ class CourseWorkflowService:
         return self.materializer.read_bundle_file(course_run.materialized_bundle, relative_path)
 
     def _compute_refreshed_run(self, course_run: CourseRun) -> CourseRun:
-        if course_run.stage == CourseRunStage.drafting and not course_run.modules:
+        if course_run.stage == CourseRunStage.drafting and not course_run.deliverables:
             course_run.ai_usage = course_run.own_ai_usage
             return course_run
         refreshed_run = course_run.model_copy(deep=True)
-        module_drafts: list[CourseModuleDraft] = []
+        deliverable_drafts: list[CourseDeliverableDraft] = []
         shared_run = None
         linked_runs: list[WorkflowRun] = []
         if refreshed_run.shared_workflow_run_id is not None:
@@ -775,53 +791,53 @@ class CourseWorkflowService:
 
         if shared_run is not None:
             linked_runs.append(shared_run)
-            aligned_modules = self._align_progressive_modules(
-                [self._request_from_module_draft(module) for module in refreshed_run.modules],
+            aligned_deliverables = self._align_progressive_deliverables(
+                [self._request_from_deliverable_draft(deliverable) for deliverable in refreshed_run.deliverables],
                 shared_run,
             )
-            module_drafts = [
-                self._module_draft_from_workflow(
-                    module,
+            deliverable_drafts = [
+                self._deliverable_draft_from_workflow(
+                    deliverable,
                     shared_run.id,
                     shared_run.stage.value,
                     shared_run.status.value,
                     shared_run.artifacts.draft_kind.value,
-                    self._design_spec_from_workflow(shared_run, module.design_spec or refreshed_run.shared_design_spec),
+                    self._design_spec_from_workflow(shared_run, deliverable.design_spec or refreshed_run.shared_design_spec),
                     self._workflow_design_status(shared_run),
                     extra_notes=["Shared progressive workflow run for the whole course."],
                 )
-                for module in aligned_modules
+                for deliverable in aligned_deliverables
             ]
             refreshed_run.shared_design_spec = self._design_spec_from_workflow(shared_run, refreshed_run.shared_design_spec)
         else:
-            for module in refreshed_run.modules:
-                if not module.workflow_run_id:
-                    module_drafts.append(module)
+            for deliverable in refreshed_run.deliverables:
+                if not deliverable.workflow_run_id:
+                    deliverable_drafts.append(deliverable)
                     continue
-                child_run = self.workflow_service.get_run(module.workflow_run_id)
+                child_run = self.workflow_service.get_run(deliverable.workflow_run_id)
                 if child_run is None:
-                    refreshed = module.model_copy(deep=True)
+                    refreshed = deliverable.model_copy(deep=True)
                     refreshed.workflow_stage = "missing"
                     refreshed.workflow_status = "blocked"
                     refreshed.notes.append("Linked assignment workflow run is missing.")
-                    module_drafts.append(refreshed)
+                    deliverable_drafts.append(refreshed)
                     continue
                 linked_runs.append(child_run)
-                module_drafts.append(
-                    self._module_draft_from_workflow(
-                        self._request_from_module_draft(module),
+                deliverable_drafts.append(
+                    self._deliverable_draft_from_workflow(
+                        self._request_from_deliverable_draft(deliverable),
                         child_run.id,
                         child_run.stage.value,
                         child_run.status.value,
                         child_run.artifacts.draft_kind.value,
-                        self._design_spec_from_workflow(child_run, module.design_spec),
+                        self._design_spec_from_workflow(child_run, deliverable.design_spec),
                         self._workflow_design_status(child_run),
-                        extra_notes=[note for note in module.notes if "Shared progressive workflow run" in note],
+                        extra_notes=[note for note in deliverable.notes if "Shared progressive workflow run" in note],
                     )
                 )
 
-        stage, status = self._course_stage_from_modules(module_drafts)
-        refreshed_run.modules = module_drafts
+        stage, status = self._course_stage_from_deliverables(deliverable_drafts)
+        refreshed_run.deliverables = deliverable_drafts
         refreshed_run.stage = stage if refreshed_run.status != CourseRunStatus.published else CourseRunStage.published
         refreshed_run.status = status if refreshed_run.status != CourseRunStatus.published else CourseRunStatus.published
         refreshed_run.updated_at = datetime.now(UTC)
@@ -842,11 +858,16 @@ class CourseWorkflowService:
             raise CourseWorkflowConflictError(self._publish_readiness_error(course_run))
 
         linked_runs = self._linked_runs(course_run)
-        snapshot = self.publish_snapshot_service.create_snapshot(course_run, linked_runs)
+        snapshot = self.publish_snapshot_service.create_snapshot(course_run, linked_runs, persist=False)
         if snapshot is None:
             raise CourseWorkflowConflictError(
                 "This course cannot publish yet because a linked assignment workflow does not have a learner-ready spec."
             )
+        certification = self.publish_certification_service.certify_snapshot(snapshot)
+        snapshot.learner_certification = certification
+        if not certification.passed:
+            self._handle_publish_certification_failure(course_run, linked_runs, certification)
+        self.store.save_publish_snapshot(snapshot)
         course_run.stage = CourseRunStage.published
         course_run.status = CourseRunStatus.published
         course_run.updated_at = datetime.now(UTC)
@@ -858,11 +879,202 @@ class CourseWorkflowService:
             course_run.id,
             "course_run_published",
             {
-                "module_count": len(course_run.modules),
+                "deliverable_count": len(course_run.deliverables),
                 "publish_snapshot_id": course_run.latest_publish_snapshot_id,
             },
         )
         return course_run
+
+    def _handle_publish_certification_failure(
+        self,
+        course_run: CourseRun,
+        linked_runs: dict[str, WorkflowRun],
+        certification: PublishLearnerCertificationReport,
+    ) -> None:
+        blocking_failures = certification.blocking_failures
+        primary_failure = blocking_failures[0] if blocking_failures else None
+        detail = primary_failure.detail if primary_failure is not None else None
+        summary = primary_failure.summary if primary_failure is not None else "Learner-path certification failed."
+        message = summary if detail is None else f"{summary} {detail}"
+
+        if (
+            certification.failure_origin == PublishCertificationFailureOrigin.repairable_generation
+            and course_run.shared_workflow_run_id is not None
+        ):
+            self._route_publish_failure_to_shared_workflow_revision(
+                course_run,
+                linked_runs,
+                certification,
+            )
+            self.store.append_course_event(
+                course_run.id,
+                "course_publish_certification_failed",
+                {
+                    "message": "Learner-path certification failed and the shared assignment workflow was sent back for revision.",
+                    "failure_origin": certification.failure_origin.value,
+                    "summary": summary,
+                    "detail": detail,
+                },
+            )
+            raise CourseWorkflowConflictError(
+                "Learner-path certification failed on the exact publish snapshot. We routed the shared assignment workflow back into revision with the certification findings."
+            )
+
+        course_run.updated_at = datetime.now(UTC)
+        course_run.active_operation = None
+        course_run.last_error = message
+        course_run.notes = list(
+            dict.fromkeys(
+                [
+                    *course_run.notes,
+                    "Publish was blocked because the exact learner path failed certification.",
+                ]
+            )
+        )
+        self.store.save_course_run(course_run)
+        self.store.append_course_event(
+            course_run.id,
+            "course_publish_certification_failed",
+            {
+                "message": "Learner-path certification failed and publish was blocked.",
+                "failure_origin": (
+                    certification.failure_origin.value
+                    if certification.failure_origin is not None
+                    else None
+                ),
+                "summary": summary,
+                "detail": detail,
+            },
+        )
+        raise CourseWorkflowConflictError(message)
+
+    def _route_publish_failure_to_shared_workflow_revision(
+        self,
+        course_run: CourseRun,
+        linked_runs: dict[str, WorkflowRun],
+        certification: PublishLearnerCertificationReport,
+    ) -> None:
+        shared_workflow_run_id = course_run.shared_workflow_run_id
+        if shared_workflow_run_id is None:
+            raise CourseWorkflowConflictError("This course is missing the shared workflow needed for repair routing.")
+
+        shared_run = linked_runs.get(shared_workflow_run_id) or self.workflow_service.get_run(shared_workflow_run_id)
+        if shared_run is None:
+            raise CourseWorkflowConflictError(
+                f"Shared workflow '{shared_workflow_run_id}' is missing, so certification findings cannot be routed back into revision."
+            )
+
+        revision = self.workflow_service.create_revision_from_run(shared_run.id)
+        revision = self._append_publish_certification_failure_node(revision, certification)
+        self.store.save_run(revision)
+
+        pending_gate = revision.pending_gate or HILGate.gate_1_spec_review
+        revision = self.workflow_service.apply_gate_decision(
+            revision.id,
+            GateDecisionRequest(
+                gate=pending_gate,
+                decision=DecisionOutcome.reject,
+                comment=self._publish_certification_feedback_comment(certification),
+            ),
+        )
+        revision = self._append_publish_certification_failure_node(revision, certification)
+        self.store.save_run(revision)
+
+        aligned_deliverables = self._align_progressive_deliverables(
+            [self._request_from_deliverable_draft(deliverable) for deliverable in course_run.deliverables],
+            revision,
+        )
+        deliverable_drafts = [
+            self._deliverable_draft_from_workflow(
+                deliverable,
+                revision.id,
+                revision.stage.value,
+                revision.status.value,
+                revision.artifacts.draft_kind.value,
+                self._design_spec_from_workflow(revision, deliverable.design_spec or course_run.shared_design_spec),
+                self._workflow_design_status(revision),
+                extra_notes=[
+                    "Shared workflow revision created after learner-path certification failed before publish.",
+                ],
+            )
+            for deliverable in aligned_deliverables
+        ]
+        stage, status = self._course_stage_from_deliverables(deliverable_drafts)
+        course_run.shared_workflow_run_id = revision.id
+        course_run.shared_design_spec = self._design_spec_from_workflow(revision, course_run.shared_design_spec)
+        course_run.deliverables = deliverable_drafts
+        course_run.stage = stage
+        course_run.status = status
+        course_run.updated_at = datetime.now(UTC)
+        course_run.active_operation = None
+        course_run.last_error = "Learner-path certification failed before publish; the linked workflow was reopened for revision."
+        course_run.notes = list(
+            dict.fromkeys(
+                [
+                    *course_run.notes,
+                    "Publish certification found a repairable learner-path problem and reopened the shared workflow for revision.",
+                ]
+            )
+        )
+        self.store.save_course_run(course_run)
+
+    def _append_publish_certification_failure_node(
+        self,
+        run: WorkflowRun,
+        certification: PublishLearnerCertificationReport,
+    ) -> WorkflowRun:
+        findings = [
+            ReviewerFinding(
+                category="learner_runtime_review",
+                severity=(
+                    ReviewerFindingSeverity.error
+                    if check.status == PublishCertificationCheckStatus.failed
+                    else ReviewerFindingSeverity.info
+                ),
+                title=check.summary,
+                detail=check.detail or check.summary,
+            )
+            for check in certification.checks
+            if check.status != PublishCertificationCheckStatus.skipped
+        ]
+        node_executions = list(run.artifacts.node_executions)
+        node_executions.append(
+            WorkflowNodeExecution(
+                node_id=f"{WorkflowNodeKind.reviewer_learner_runtime.value}_{len(node_executions) + 1}",
+                kind=WorkflowNodeKind.reviewer_learner_runtime,
+                attempt=max((node.attempt for node in node_executions), default=1),
+                status=WorkflowNodeStatus.failed,
+                summary="Final learner-path certification failed before publish.",
+                created_at=datetime.now(UTC),
+                sandbox_result=None,
+                findings=findings,
+            )
+        )
+        run.artifacts.node_executions = node_executions
+        run.artifacts.notes = list(
+            dict.fromkeys(
+                [
+                    *run.artifacts.notes,
+                    "Final learner-path certification failed before publish and was attached as reviewer context.",
+                ]
+            )
+        )
+        return run
+
+    def _publish_certification_feedback_comment(
+        self,
+        certification: PublishLearnerCertificationReport,
+    ) -> str:
+        failed_checks = [check for check in certification.checks if check.status == PublishCertificationCheckStatus.failed]
+        lines = [
+            "Final learner-path certification failed before publish.",
+            "Fix the generated learner package and runtime path so the exact published learner experience works cleanly.",
+        ]
+        for check in failed_checks[:5]:
+            lines.append(f"- {check.summary}")
+            if check.detail:
+                lines.append(f"  Detail: {check.detail}")
+        return "\n".join(lines)
 
     def _execute_materialize_run(self, course_run_id: str, request: MaterializeBundleRequest) -> CourseRun:
         course_run = self.sync_run(course_run_id)
@@ -967,18 +1179,18 @@ class CourseWorkflowService:
         course_run: CourseRun,
         linked_runs: dict[str, WorkflowRun],
     ) -> CourseReviewReport:
-        module_reports: list[CourseModuleReview] = []
+        deliverable_reports: list[CourseDeliverableReview] = []
         linked_workflows: list[CourseLinkedWorkflowSummary] = []
         linked_workflow_ids: set[str] = set()
-        ready_modules = 0
-        blocked_modules = 0
-        modules_with_bundle = 0
+        ready_deliverables = 0
+        blocked_deliverables = 0
+        deliverables_with_bundle = 0
         blockers: list[str] = [course_run.last_error] if course_run.last_error else []
 
-        for position, module in enumerate(course_run.modules, start=1):
-            linked_run = linked_runs.get(module.workflow_run_id) if module.workflow_run_id else None
+        for position, deliverable in enumerate(course_run.deliverables, start=1):
+            linked_run = linked_runs.get(deliverable.workflow_run_id) if deliverable.workflow_run_id else None
             linked_summary = self._linked_workflow_summary(linked_run)
-            module_blockers = self._module_blockers(module, linked_run)
+            deliverable_blockers = self._deliverable_blockers(deliverable, linked_run)
             bundle_available = bool(
                 linked_run and linked_run.artifacts.materialized_bundle is not None
             )
@@ -989,46 +1201,46 @@ class CourseWorkflowService:
             )
 
             if bundle_available:
-                modules_with_bundle += 1
+                deliverables_with_bundle += 1
             if ready_for_publish:
-                ready_modules += 1
-            if module_blockers:
-                blocked_modules += 1
+                ready_deliverables += 1
+            if deliverable_blockers:
+                blocked_deliverables += 1
                 blockers.extend(
-                    f"Module {position} ({module.title}): {reason}"
-                    for reason in module_blockers
+                    f"Deliverable {position} ({deliverable.title}): {reason}"
+                    for reason in deliverable_blockers
                 )
             if linked_summary is not None and linked_summary.run_id not in linked_workflow_ids:
                 linked_workflows.append(linked_summary)
                 linked_workflow_ids.add(linked_summary.run_id)
 
-            module_reports.append(
-                CourseModuleReview(
+            deliverable_reports.append(
+                CourseDeliverableReview(
                     position=position,
-                    module_slug=module.module_slug,
-                    title=module.title,
-                    summary=module.summary,
-                    design_spec=module.design_spec,
-                    domain_pack=module.domain_pack,
-                    overlays=module.overlays,
-                    learning_outcomes=module.learning_outcomes,
-                    workflow_run_id=module.workflow_run_id,
-                    workflow_stage=module.workflow_stage,
-                    workflow_status=module.workflow_status,
-                    recommendation_status=module.recommendation_status,
+                    deliverable_slug=deliverable.deliverable_slug,
+                    title=deliverable.title,
+                    summary=deliverable.summary,
+                    design_spec=deliverable.design_spec,
+                    domain_pack=deliverable.domain_pack,
+                    overlays=deliverable.overlays,
+                    learning_outcomes=deliverable.learning_outcomes,
+                    workflow_run_id=deliverable.workflow_run_id,
+                    workflow_stage=deliverable.workflow_stage,
+                    workflow_status=deliverable.workflow_status,
+                    recommendation_status=deliverable.recommendation_status,
                     ready_for_publish=ready_for_publish,
                     bundle_available=bundle_available,
-                    blockers=module_blockers,
+                    blockers=deliverable_blockers,
                     linked_workflow=linked_summary,
-                    notes=module.notes,
+                    notes=deliverable.notes,
                 )
             )
 
         counts = CourseReviewCounts(
-            total_modules=len(course_run.modules),
-            ready_modules=ready_modules,
-            modules_with_blockers=blocked_modules,
-            modules_with_bundle=modules_with_bundle,
+            total_deliverables=len(course_run.deliverables),
+            ready_deliverables=ready_deliverables,
+            deliverables_with_blockers=blocked_deliverables,
+            deliverables_with_bundle=deliverables_with_bundle,
             linked_workflow_runs=len(linked_workflows),
             published_workflow_runs=sum(1 for item in linked_workflows if item.status == WorkflowStatus.published),
             workflow_runs_with_bundle=sum(1 for item in linked_workflows if item.bundle is not None),
@@ -1047,33 +1259,33 @@ class CourseWorkflowService:
             blockers=blockers,
             next_actions=self._next_actions(course_run, linked_workflows),
             linked_workflows=linked_workflows,
-            modules=module_reports,
+            deliverables=deliverable_reports,
         )
 
-    def _create_survey_module(self, module: CreateCourseModuleRequest, course_title: str, course_summary: str) -> CourseModuleDraft:
+    def _create_survey_deliverable(self, deliverable: CreateCourseDeliverableRequest, course_title: str, course_summary: str) -> CourseDeliverableDraft:
         intake = GenerationIntake(
-            title=module.title,
-            problem_statement=module.summary or f"Build the '{module.title}' assignment for the '{course_title}' course. {course_summary}",
-            learning_outcomes=module.learning_outcomes,
+            title=deliverable.title,
+            problem_statement=deliverable.summary or f"Build the '{deliverable.title}' assignment for the '{course_title}' course. {course_summary}",
+            learning_outcomes=deliverable.learning_outcomes,
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
         )
-        if module.design_spec is not None:
+        if deliverable.design_spec is not None:
             child_run = self.workflow_service.create_run_from_explicit_plan(
                 intake=intake,
-                design_spec=module.design_spec,
-                reasons=[f"Seeded from course module '{module.title}'."],
-                notes=["Created from the survey-course module planner."],
+                design_spec=deliverable.design_spec,
+                reasons=[f"Seeded from course deliverable '{deliverable.title}'."],
+                notes=["Created from the survey-course deliverable planner."],
             )
         else:
             child_run = self.workflow_service.create_run(intake)
 
-        return self._module_draft_from_workflow(
-            module,
+        return self._deliverable_draft_from_workflow(
+            deliverable,
             child_run.id,
             child_run.stage.value,
             child_run.status.value,
             child_run.artifacts.draft_kind.value,
-            self._design_spec_from_workflow(child_run, module.design_spec),
+            self._design_spec_from_workflow(child_run, deliverable.design_spec),
             self._workflow_design_status(child_run),
         )
 
@@ -1081,7 +1293,7 @@ class CourseWorkflowService:
         self,
         title: str,
         summary: str,
-        modules: list[CreateCourseModuleRequest],
+        deliverables: list[CreateCourseDeliverableRequest],
         shared_design_spec: AssignmentDesignSpec | None,
         *,
         execute_nodes: bool = True,
@@ -1089,7 +1301,7 @@ class CourseWorkflowService:
         course_intake = GenerationIntake(
             title=title,
             problem_statement=summary,
-            learning_outcomes=self._combined_learning_outcomes(modules),
+            learning_outcomes=self._combined_learning_outcomes(deliverables),
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
         )
         if shared_design_spec is not None:
@@ -1097,15 +1309,15 @@ class CourseWorkflowService:
                 intake=course_intake,
                 design_spec=shared_design_spec,
                 reasons=["Created from the progressive course planner."],
-                notes=["This workflow run is shared across all course modules."],
+                notes=["This workflow run is shared across all course deliverables."],
                 execute_nodes=execute_nodes,
             )
 
         return self.workflow_service.create_run(course_intake, execute_nodes=execute_nodes)
 
-    def _module_draft_from_workflow(
+    def _deliverable_draft_from_workflow(
         self,
-        module: CreateCourseModuleRequest,
+        deliverable: CreateCourseDeliverableRequest,
         workflow_run_id: str,
         workflow_stage: str,
         workflow_status: str,
@@ -1113,15 +1325,15 @@ class CourseWorkflowService:
         design_spec: AssignmentDesignSpec | None,
         recommendation_status: str | None,
         extra_notes: list[str] | None = None,
-    ) -> CourseModuleDraft:
-        return CourseModuleDraft(
-            module_slug=module.module_slug or self._slugify(module.title),
-            title=module.title,
-            summary=module.summary or module.title,
-            learning_outcomes=module.learning_outcomes,
+    ) -> CourseDeliverableDraft:
+        return CourseDeliverableDraft(
+            deliverable_slug=deliverable.deliverable_slug or self._slugify(deliverable.title),
+            title=deliverable.title,
+            summary=deliverable.summary or deliverable.title,
+            learning_outcomes=deliverable.learning_outcomes,
             design_spec=design_spec,
-            domain_pack=(design_spec.domain_pack if design_spec is not None else module.domain_pack_hint),
-            overlays=list(design_spec.overlays if design_spec is not None else module.overlays_hint),
+            domain_pack=(design_spec.domain_pack if design_spec is not None else deliverable.domain_pack_hint),
+            overlays=list(design_spec.overlays if design_spec is not None else deliverable.overlays_hint),
             workflow_run_id=workflow_run_id,
             workflow_stage=workflow_stage,
             workflow_status=workflow_status,
@@ -1130,93 +1342,93 @@ class CourseWorkflowService:
             notes=(extra_notes or []),
         )
 
-    def _module_requests_from_pattern(self, pattern: CoursePattern | None, course_summary: str) -> list[CreateCourseModuleRequest]:
+    def _deliverable_requests_from_pattern(self, pattern: CoursePattern | None, course_summary: str) -> list[CreateCourseDeliverableRequest]:
         if pattern is None:
             return []
-        modules: list[CreateCourseModuleRequest] = []
-        for module in pattern.modules:
-            modules.append(
-                CreateCourseModuleRequest(
-                    module_slug=module.module_slug,
-                    title=module.title,
-                    summary=f"Build the '{module.title}' module for the '{pattern.course_title}' course. {course_summary}",
-                    learning_outcomes=self._default_learning_outcomes(module.design_spec),
-                    design_spec=module.design_spec,
-                    domain_pack_hint=module.domain_pack,
-                    overlays_hint=module.overlays,
+        deliverables: list[CreateCourseDeliverableRequest] = []
+        for deliverable in pattern.deliverables:
+            deliverables.append(
+                CreateCourseDeliverableRequest(
+                    deliverable_slug=deliverable.deliverable_slug,
+                    title=deliverable.title,
+                    summary=f"Build the '{deliverable.title}' deliverable for the '{pattern.course_title}' course. {course_summary}",
+                    learning_outcomes=self._default_learning_outcomes(deliverable.design_spec),
+                    design_spec=deliverable.design_spec,
+                    domain_pack_hint=deliverable.domain_pack,
+                    overlays_hint=deliverable.overlays,
                 )
             )
-        return modules
+        return deliverables
 
-    def _combined_learning_outcomes(self, modules: list[CreateCourseModuleRequest]) -> list[str]:
+    def _combined_learning_outcomes(self, deliverables: list[CreateCourseDeliverableRequest]) -> list[str]:
         seen: list[str] = []
-        for module in modules:
-            for outcome in module.learning_outcomes or self._default_learning_outcomes(module.design_spec):
+        for deliverable in deliverables:
+            for outcome in deliverable.learning_outcomes or self._default_learning_outcomes(deliverable.design_spec):
                 if outcome not in seen:
                     seen.append(outcome)
         return seen[:8]
 
-    def _request_from_module_draft(self, module: CourseModuleDraft) -> CreateCourseModuleRequest:
-        return CreateCourseModuleRequest(
-            module_slug=module.module_slug,
-            title=module.title,
-            summary=module.summary,
-            learning_outcomes=module.learning_outcomes,
-            design_spec=module.design_spec,
-            domain_pack_hint=module.domain_pack,
-            overlays_hint=module.overlays,
+    def _request_from_deliverable_draft(self, deliverable: CourseDeliverableDraft) -> CreateCourseDeliverableRequest:
+        return CreateCourseDeliverableRequest(
+            deliverable_slug=deliverable.deliverable_slug,
+            title=deliverable.title,
+            summary=deliverable.summary,
+            learning_outcomes=deliverable.learning_outcomes,
+            design_spec=deliverable.design_spec,
+            domain_pack_hint=deliverable.domain_pack,
+            overlays_hint=deliverable.overlays,
         )
 
-    def _align_progressive_modules(
+    def _align_progressive_deliverables(
         self,
-        modules: list[CreateCourseModuleRequest],
+        deliverables: list[CreateCourseDeliverableRequest],
         shared_run: WorkflowRun,
-    ) -> list[CreateCourseModuleRequest]:
-        if shared_run.artifacts.task_agent_spec is None or not modules:
-            return modules
+    ) -> list[CreateCourseDeliverableRequest]:
+        if shared_run.artifacts.task_agent_spec is None or not deliverables:
+            return deliverables
         return [
-            module.model_copy(
+            deliverable.model_copy(
                 update={
-                    "title": module.title.strip(),
-                    "summary": (module.summary or module.title).strip(),
-                    "learning_outcomes": list(module.learning_outcomes),
+                    "title": deliverable.title.strip(),
+                    "summary": (deliverable.summary or deliverable.title).strip(),
+                    "learning_outcomes": list(deliverable.learning_outcomes),
                 }
             )
-            for module in modules
+            for deliverable in deliverables
         ]
 
-    def _ensure_progressive_workflow_matches_modules(
+    def _ensure_progressive_workflow_matches_deliverables(
         self,
         shared_run: WorkflowRun,
-        modules: list[CreateCourseModuleRequest],
+        deliverables: list[CreateCourseDeliverableRequest],
         *,
         execute_nodes: bool = True,
     ) -> WorkflowRun:
         spec = shared_run.artifacts.task_agent_spec
         if (
             spec is None
-            or not modules
+            or not deliverables
             or shared_run.status == WorkflowStatus.published
         ):
             return shared_run
-        updated_spec = self._reshape_progressive_spec_to_modules(spec, modules)
+        updated_spec = self._reshape_progressive_spec_to_deliverables(spec, deliverables)
         if updated_spec.model_dump(mode="json") == spec.model_dump(mode="json"):
             return shared_run
-        updated_spec = ensure_task_agent_module_briefs(updated_spec, overwrite=True)
+        updated_spec = ensure_task_agent_deliverable_briefs(updated_spec, overwrite=True)
         return self.workflow_service.update_task_agent_spec(
             shared_run.id,
             updated_spec,
             execute_nodes=execute_nodes,
         )
 
-    def _reshape_progressive_spec_to_modules(
+    def _reshape_progressive_spec_to_deliverables(
         self,
         spec: TaskAgentServiceSpec,
-        modules: list[CreateCourseModuleRequest],
+        deliverables: list[CreateCourseDeliverableRequest],
     ) -> TaskAgentServiceSpec:
-        current_modules = list(spec.modules)
-        current_count = len(current_modules)
-        desired_count = len(modules)
+        current_deliverables = list(spec.deliverables)
+        current_count = len(current_deliverables)
+        desired_count = len(deliverables)
         if current_count == 0 or desired_count == 0:
             return spec
 
@@ -1246,33 +1458,33 @@ class CourseWorkflowService:
                 desired_count - 1,
             )
 
-        new_module_ids = [f"module_{index + 1}" for index in range(desired_count)]
-        rebuilt_modules: list[ModuleSpec] = []
-        for index, planned_module in enumerate(modules):
-            source_module = current_modules[source_index_for_new(index)]
-            rebuilt_modules.append(
-                ModuleSpec(
-                    id=new_module_ids[index],
-                    title=planned_module.title.strip(),
-                    objective=(planned_module.summary or planned_module.title).strip(),
-                    starter_type=source_module.starter_type,
-                    overlay_ids=list(source_module.overlay_ids),
-                    learning_outcomes=list(planned_module.learning_outcomes or source_module.learning_outcomes),
-                    learner_brief=source_module.learner_brief,
-                    public_checks=list(source_module.public_checks),
+        new_deliverable_ids = [f"deliverable_{index + 1}" for index in range(desired_count)]
+        rebuilt_deliverables: list[DeliverableSpec] = []
+        for index, planned_deliverable in enumerate(deliverables):
+            source_deliverable = current_deliverables[source_index_for_new(index)]
+            rebuilt_deliverables.append(
+                DeliverableSpec(
+                    id=new_deliverable_ids[index],
+                    title=planned_deliverable.title.strip(),
+                    objective=(planned_deliverable.summary or planned_deliverable.title).strip(),
+                    starter_type=source_deliverable.starter_type,
+                    overlay_ids=list(source_deliverable.overlay_ids),
+                    learning_outcomes=list(planned_deliverable.learning_outcomes or source_deliverable.learning_outcomes),
+                    learner_brief=source_deliverable.learner_brief,
+                    public_checks=list(source_deliverable.public_checks),
                 )
             )
 
         old_to_new = {
-            module.id: new_module_ids[new_index_for_old(index)]
-            for index, module in enumerate(current_modules)
+            deliverable.id: new_deliverable_ids[new_index_for_old(index)]
+            for index, deliverable in enumerate(current_deliverables)
         }
         rebuilt_behaviors = [
             behavior.model_copy(
                 update={
                     "first_required_in": old_to_new.get(
                         behavior.first_required_in,
-                        new_module_ids[-1],
+                        new_deliverable_ids[-1],
                     )
                 }
             )
@@ -1283,7 +1495,7 @@ class CourseWorkflowService:
                 update={
                     "first_required_in": old_to_new.get(
                         quality.first_required_in,
-                        new_module_ids[-1],
+                        new_deliverable_ids[-1],
                     )
                 }
             )
@@ -1293,26 +1505,26 @@ class CourseWorkflowService:
         return spec.model_copy(
             deep=True,
             update={
-                "modules": rebuilt_modules,
+                "deliverables": rebuilt_deliverables,
                 "behaviors": rebuilt_behaviors,
                 "qualities": rebuilt_qualities,
             },
         )
 
-    def _course_stage_from_modules(self, modules: list[CourseModuleDraft]) -> tuple[CourseRunStage, CourseRunStatus]:
-        statuses = {module.workflow_status for module in modules}
-        if not modules or None in statuses:
+    def _course_stage_from_deliverables(self, deliverables: list[CourseDeliverableDraft]) -> tuple[CourseRunStage, CourseRunStatus]:
+        statuses = {deliverable.workflow_status for deliverable in deliverables}
+        if not deliverables or None in statuses:
             return CourseRunStage.blocked, CourseRunStatus.blocked
         if "blocked" in statuses:
             return CourseRunStage.blocked, CourseRunStatus.blocked
         if statuses == {"published"}:
-            if any(module.draft_kind != DraftKind.task_agent_spec.value for module in modules):
+            if any(deliverable.draft_kind != DraftKind.task_agent_spec.value for deliverable in deliverables):
                 return CourseRunStage.awaiting_course_review, CourseRunStatus.awaiting_human
             return CourseRunStage.ready_to_publish, CourseRunStatus.awaiting_human
         return CourseRunStage.awaiting_course_review, CourseRunStatus.awaiting_human
 
     def _publish_readiness_error(self, course_run: CourseRun) -> str:
-        if any(module.draft_kind != DraftKind.task_agent_spec.value for module in course_run.modules):
+        if any(deliverable.draft_kind != DraftKind.task_agent_spec.value for deliverable in course_run.deliverables):
             return "This course cannot publish yet because a linked assignment workflow does not have a learner-ready spec."
         return "All linked assignment workflow runs must be published before the course can be published."
 
@@ -1373,7 +1585,7 @@ class CourseWorkflowService:
                     severity=TestingDiagnosticSeverity.error,
                     summary="This draft still has blocking issues.",
                     detail=review.blockers[0],
-                    recommended_action=review.next_actions[0] if review.next_actions else "Inspect the blocking module or linked workflow before continuing.",
+                    recommended_action=review.next_actions[0] if review.next_actions else "Inspect the blocking deliverable or linked workflow before continuing.",
                     blocking=True,
                     context={"blocker_count": len(review.blockers)},
                 )
@@ -1442,7 +1654,7 @@ class CourseWorkflowService:
                     code="creator_view_healthy",
                     severity=TestingDiagnosticSeverity.info,
                     summary="No blocking backend issues are currently recorded for this draft.",
-                    detail="You can focus on reviewing the module plan, linked workflow details, and learner experience.",
+                    detail="You can focus on reviewing the deliverable plan, linked workflow details, and learner experience.",
                     blocking=False,
                 )
             )
@@ -1454,7 +1666,7 @@ class CourseWorkflowService:
             return f"Course draft for '{title}' generated from the explicit assignment-design planner."
         if pattern.package_type == PackageType.survey_course:
             return f"Survey course covering multiple assignment designs under '{title}'."
-        return f"Progressive codebase course for '{title}', with one inherited system evolving across modules."
+        return f"Progressive codebase course for '{title}', with one inherited system evolving across deliverables."
 
     def _default_learning_outcomes(
         self,
@@ -1543,7 +1755,7 @@ class CourseWorkflowService:
         revision.shared_workflow_run_id = None
         revision.materialized_bundle = None
         revision.latest_publish_snapshot_id = None
-        revision.modules = []
+        revision.deliverables = []
         revision.active_operation = CourseAsyncOperation.revision if queued else None
         revision.last_error = None
         revision.notes = [*source.notes]
@@ -1559,49 +1771,49 @@ class CourseWorkflowService:
         revision.notes.append("Existing learners stay pinned to the previously published snapshot until this revision is published.")
         return revision
 
-    def _prepare_revision_drafts(self, source: CourseRun) -> tuple[list[CourseModuleDraft], str | None]:
+    def _prepare_revision_drafts(self, source: CourseRun) -> tuple[list[CourseDeliverableDraft], str | None]:
         workflow_revision_map: dict[str, WorkflowRun] = {}
         for linked_run_id in self._linked_runs(source):
             workflow_revision_map[linked_run_id] = self.workflow_service.create_revision_from_run(linked_run_id)
 
-        module_drafts: list[CourseModuleDraft] = []
+        deliverable_drafts: list[CourseDeliverableDraft] = []
         if source.shared_workflow_run_id and source.shared_workflow_run_id in workflow_revision_map:
             cloned_run = workflow_revision_map[source.shared_workflow_run_id]
-            cloned_run = self._ensure_progressive_workflow_matches_modules(
+            cloned_run = self._ensure_progressive_workflow_matches_deliverables(
                 cloned_run,
-                [self._request_from_module_draft(module) for module in source.modules],
+                [self._request_from_deliverable_draft(deliverable) for deliverable in source.deliverables],
             )
-            aligned_modules = self._align_progressive_modules(
-                [self._request_from_module_draft(module) for module in source.modules],
+            aligned_deliverables = self._align_progressive_deliverables(
+                [self._request_from_deliverable_draft(deliverable) for deliverable in source.deliverables],
                 cloned_run,
             )
-            module_drafts = [
-                self._module_draft_from_workflow(
-                    module,
+            deliverable_drafts = [
+                self._deliverable_draft_from_workflow(
+                    deliverable,
                     cloned_run.id,
                     cloned_run.stage.value,
                     cloned_run.status.value,
                     cloned_run.artifacts.draft_kind.value,
-                    self._design_spec_from_workflow(cloned_run, module.design_spec or source.shared_design_spec),
+                    self._design_spec_from_workflow(cloned_run, deliverable.design_spec or source.shared_design_spec),
                     self._workflow_design_status(cloned_run),
                     extra_notes=[f"Revision draft created from published course `{source.id}`."],
                 )
-                for module in aligned_modules
+                for deliverable in aligned_deliverables
             ]
         else:
-            for module in source.modules:
-                cloned_run = workflow_revision_map.get(module.workflow_run_id) if module.workflow_run_id else None
+            for deliverable in source.deliverables:
+                cloned_run = workflow_revision_map.get(deliverable.workflow_run_id) if deliverable.workflow_run_id else None
                 if cloned_run is None:
-                    module_drafts.append(module.model_copy(deep=True))
+                    deliverable_drafts.append(deliverable.model_copy(deep=True))
                     continue
-                module_drafts.append(
-                    self._module_draft_from_workflow(
-                        self._request_from_module_draft(module),
+                deliverable_drafts.append(
+                    self._deliverable_draft_from_workflow(
+                        self._request_from_deliverable_draft(deliverable),
                         cloned_run.id,
                         cloned_run.stage.value,
                         cloned_run.status.value,
                         cloned_run.artifacts.draft_kind.value,
-                        self._design_spec_from_workflow(cloned_run, module.design_spec),
+                        self._design_spec_from_workflow(cloned_run, deliverable.design_spec),
                         self._workflow_design_status(cloned_run),
                         extra_notes=[f"Revision draft created from published course `{source.id}`."],
                     )
@@ -1612,25 +1824,25 @@ class CourseWorkflowService:
             if source.shared_workflow_run_id and source.shared_workflow_run_id in workflow_revision_map
             else None
         )
-        return module_drafts, shared_workflow_run_id
+        return deliverable_drafts, shared_workflow_run_id
 
     def _finalize_revision(
         self,
         *,
         revision: CourseRun,
         source: CourseRun,
-        module_drafts: list[CourseModuleDraft],
+        deliverable_drafts: list[CourseDeliverableDraft],
         shared_workflow_run_id: str | None,
         event_type: str,
     ) -> CourseRun:
-        stage, status = self._course_stage_from_modules(module_drafts)
+        stage, status = self._course_stage_from_deliverables(deliverable_drafts)
         revision.updated_at = datetime.now(UTC)
         revision.stage = stage
         revision.status = status
         revision.shared_workflow_run_id = shared_workflow_run_id
         revision.materialized_bundle = None
         revision.latest_publish_snapshot_id = None
-        revision.modules = module_drafts
+        revision.deliverables = deliverable_drafts
         revision.active_operation = None
         revision.last_error = None
         if source.generated_plan is not None:
@@ -1661,11 +1873,11 @@ class CourseWorkflowService:
         try:
             source = self._require_published_run(source_course_run_id)
             revision = self._require_run(revision_id)
-            module_drafts, shared_workflow_run_id = self._prepare_revision_drafts(source)
+            deliverable_drafts, shared_workflow_run_id = self._prepare_revision_drafts(source)
             self._finalize_revision(
                 revision=revision,
                 source=source,
-                module_drafts=module_drafts,
+                deliverable_drafts=deliverable_drafts,
                 shared_workflow_run_id=shared_workflow_run_id,
                 event_type="course_revision_completed",
             )
@@ -1698,13 +1910,13 @@ class CourseWorkflowService:
             },
         )
 
-    def _module_blockers(
+    def _deliverable_blockers(
         self,
-        module: CourseModuleDraft,
+        deliverable: CourseDeliverableDraft,
         linked_run: WorkflowRun | None,
     ) -> list[str]:
         blockers: list[str] = []
-        if not module.workflow_run_id:
+        if not deliverable.workflow_run_id:
             blockers.append("No linked assignment workflow run.")
             return blockers
         if linked_run is None:
@@ -1788,24 +2000,24 @@ class CourseWorkflowService:
         if any(workflow.bundle is None for workflow in linked_workflows):
             actions.append("Materialize linked assignment workflow bundles so authors can review generated artifacts.")
         if course_run.materialized_bundle is None:
-            actions.append("Materialize the course bundle to review syllabus, module sequencing, and aggregate status.")
+            actions.append("Materialize the course bundle to review syllabus, deliverable sequencing, and aggregate status.")
         if course_run.stage == CourseRunStage.ready_to_publish and course_run.status != CourseRunStatus.published:
             actions.append("Publish the course run once the authoring review is complete.")
         if course_run.shared_workflow_run_id is not None and any(
             workflow.run_id == course_run.shared_workflow_run_id and workflow.status != WorkflowStatus.published
             for workflow in linked_workflows
         ):
-            actions.append("The shared progressive assignment workflow gates the whole course; publishing it will unblock every module.")
+            actions.append("The shared progressive assignment workflow gates the whole course; publishing it will unblock every deliverable.")
         return actions
 
     def _linked_runs(self, course_run: CourseRun) -> dict[str, WorkflowRun]:
         linked_runs: dict[str, WorkflowRun] = {}
-        for module in course_run.modules:
-            if not module.workflow_run_id:
+        for deliverable in course_run.deliverables:
+            if not deliverable.workflow_run_id:
                 continue
-            child_run = self.workflow_service.get_run(module.workflow_run_id)
+            child_run = self.workflow_service.get_run(deliverable.workflow_run_id)
             if child_run is not None:
-                linked_runs[module.workflow_run_id] = child_run
+                linked_runs[deliverable.workflow_run_id] = child_run
         return linked_runs
 
     def _published_version_changes(

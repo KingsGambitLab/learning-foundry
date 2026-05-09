@@ -63,11 +63,6 @@ DESIGN_CATALOG = DesignCatalog(
     ],
     domain_packs=[
         DomainPackDefinition(
-            id="support_triage",
-            risk_class=RiskClass.standard,
-            summary="Ticket triage, reply drafting, and escalation over support tooling.",
-        ),
-        DomainPackDefinition(
             id="oncall_copilot",
             risk_class=RiskClass.standard,
             summary="Incident guidance over runbooks, logs, and operational tools.",

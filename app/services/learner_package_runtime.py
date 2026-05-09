@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from app.domain.grading import AssignmentGradeReport, GradeStatus, DeliverableGradeReport, ReviewAreaGradeReport
+from app.domain.learner import LearnerDeliverableProgress
+from app.domain.publish import LearnerDeliverablePackage, PublishSnapshot
+from app.services.task_agent_starter_templates import (
+    render_legacy_task_agent_root_app,
+    render_task_agent_root_app,
+)
+
+
+def project_brief_markdown(snapshot: PublishSnapshot) -> str:
+    learner_package = snapshot.learner_package
+    if learner_package is None:
+        return ""
+    brief = (learner_package.project_brief_markdown or "").strip()
+    if brief:
+        return brief
+    lines = [
+        f"# {learner_package.title}",
+        "",
+        learner_package.summary or "Build the shared project in the workspace.",
+        "",
+        "## What review will look at",
+        "",
+    ]
+    for index, deliverable in enumerate(learner_package.deliverables, start=1):
+        objective = (deliverable.objective or deliverable.title).strip()
+        lines.append(f"{index}. **{deliverable.title}** - {objective}")
+    lines.extend(
+        [
+            "",
+            "## How to work",
+            "",
+            "- Open the shared VS Code workspace.",
+            "- Run the visible checks while you iterate.",
+            "- Submit the full project for review.",
+            "- Use the deliverable scorecard to see which areas still need work.",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
+def review_area_index_json(deliverables: list[LearnerDeliverablePackage]) -> str:
+    rows = [
+        {
+            "deliverable_id": deliverable.deliverable_id,
+            "title": deliverable.title,
+            "objective": deliverable.objective,
+            "deliverable_index": deliverable.deliverable_index,
+        }
+        for deliverable in deliverables
+    ]
+    return json.dumps({"review_areas": rows, "deliverables": rows}, indent=2, ensure_ascii=True) + "\n"
+
+
+def deliverables_markdown(deliverables: list[LearnerDeliverablePackage]) -> str:
+    lines = [
+        "# Project deliverables",
+        "",
+        "Use this as the checklist for what review will look at on submission.",
+        "",
+    ]
+    for deliverable in deliverables:
+        lines.extend(
+            [
+                f"## {deliverable.deliverable_index}. {deliverable.title}",
+                "",
+                deliverable.objective,
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSnapshot) -> Path:
+    root = Path(workspace_root)
+    root.mkdir(parents=True, exist_ok=True)
+    learner_package = snapshot.learner_package
+    if learner_package is None or not learner_package.deliverables:
+        raise ValueError("This publish snapshot is missing learner workspace seed files.")
+
+    files_to_write: dict[str, str] = {}
+    for deliverable in learner_package.deliverables:
+        for file in deliverable.workspace_seed_files:
+            files_to_write.setdefault(file.relative_path, file.content)
+    legacy_app = render_legacy_task_agent_root_app()
+    current_app = render_task_agent_root_app()
+    if files_to_write.get("app.py") == legacy_app:
+        files_to_write["app.py"] = current_app
+    brief = project_brief_markdown(snapshot)
+    files_to_write["README.md"] = brief
+    files_to_write["project_brief.md"] = brief
+    files_to_write["deliverables.md"] = deliverables_markdown(learner_package.deliverables)
+    files_to_write[".coursegen/workspace_seeded.txt"] = snapshot.id + "\n"
+    files_to_write[".coursegen/review_areas/index.json"] = review_area_index_json(learner_package.deliverables)
+    files_to_write[".coursegen/deliverables/index.json"] = review_area_index_json(learner_package.deliverables)
+    for deliverable in learner_package.deliverables:
+        files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
+        files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/deliverable_content.md"] = deliverable.content_markdown
+        files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
+        files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/deliverable.md"] = deliverable.content_markdown
+
+    for relative_path, content in files_to_write.items():
+        target = root / relative_path
+        if target.exists():
+            if relative_path == "app.py" and target.read_text(encoding="utf-8") == legacy_app:
+                target.write_text(current_app, encoding="utf-8")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return root
+
+
+def remap_assignment_report_to_deliverables(
+    snapshot: PublishSnapshot,
+    assignment_report: AssignmentGradeReport,
+) -> AssignmentGradeReport:
+    learner_package = snapshot.learner_package
+    if learner_package is None:
+        return assignment_report
+
+    spec_deliverable_order = (
+        {
+            deliverable.id: index
+            for index, deliverable in enumerate(snapshot.task_agent_spec.deliverables)
+        }
+        if snapshot.task_agent_spec is not None
+        else {}
+    )
+    deliverable_positions = {
+        deliverable.deliverable_id: position
+        for position, deliverable in enumerate(learner_package.deliverables)
+    }
+    aggregated: dict[str, ReviewAreaGradeReport] = {}
+    for review_area in assignment_report.review_areas:
+        learner_deliverable = resolve_review_area_deliverable(
+            learner_package.deliverables,
+            review_area.deliverable_id,
+            spec_deliverable_order,
+        )
+        learner_deliverable_id = (
+            learner_deliverable.deliverable_id if learner_deliverable is not None else review_area.deliverable_id
+        )
+        learner_title = learner_deliverable.title if learner_deliverable is not None else review_area.title
+        learner_objective = learner_deliverable.objective if learner_deliverable is not None else review_area.objective
+        learner_index = (
+            learner_deliverable.deliverable_index
+            if learner_deliverable is not None
+            else review_area.deliverable_index
+        )
+
+        existing = aggregated.get(learner_deliverable_id)
+        if existing is None:
+            aggregated[learner_deliverable_id] = ReviewAreaGradeReport(
+                deliverable_id=learner_deliverable_id,
+                title=learner_title,
+                objective=learner_objective,
+                deliverable_index=learner_index,
+                grade_report=review_area.grade_report.model_copy(update={"deliverable_id": learner_deliverable_id}),
+            )
+            continue
+
+        merged_results = [*existing.grade_report.results, *review_area.grade_report.results]
+        merged_warnings = list(dict.fromkeys([
+            *existing.grade_report.submission_warnings,
+            *review_area.grade_report.submission_warnings,
+        ]))
+        passed_tests = existing.grade_report.passed_tests + review_area.grade_report.passed_tests
+        total_tests = existing.grade_report.total_tests + review_area.grade_report.total_tests
+        failed_tests = total_tests - passed_tests
+        pass_rate = passed_tests / total_tests if total_tests else 0.0
+        aggregated[learner_deliverable_id] = ReviewAreaGradeReport(
+            deliverable_id=learner_deliverable_id,
+            title=learner_title,
+            objective=learner_objective,
+            deliverable_index=learner_index,
+            grade_report=DeliverableGradeReport(
+                deliverable_id=learner_deliverable_id,
+                total_tests=total_tests,
+                passed_tests=passed_tests,
+                failed_tests=failed_tests,
+                pass_rate=pass_rate,
+                status=GradeStatus.passed if failed_tests == 0 else GradeStatus.failed,
+                results=merged_results,
+                submission_warnings=merged_warnings,
+            ),
+        )
+
+    ordered_review_areas = sorted(
+        aggregated.values(),
+        key=lambda item: (
+            deliverable_positions.get(item.deliverable_id, item.deliverable_index - 1),
+            item.deliverable_index,
+            item.deliverable_id,
+        ),
+    )
+    passed_tests = sum(item.grade_report.passed_tests for item in ordered_review_areas)
+    total_tests = sum(item.grade_report.total_tests for item in ordered_review_areas)
+    failed_tests = total_tests - passed_tests
+    pass_rate = passed_tests / total_tests if total_tests else 0.0
+    return AssignmentGradeReport(
+        total_tests=total_tests,
+        passed_tests=passed_tests,
+        failed_tests=failed_tests,
+        pass_rate=pass_rate,
+        status=GradeStatus.passed if failed_tests == 0 else GradeStatus.failed,
+        review_areas=ordered_review_areas,
+        submission_warnings=assignment_report.submission_warnings,
+    )
+
+
+def resolve_review_area_deliverable(
+    deliverables: list[LearnerDeliverablePackage] | list[LearnerDeliverableProgress],
+    spec_deliverable_id: str,
+    spec_deliverable_order: dict[str, int] | None = None,
+) -> LearnerDeliverablePackage | LearnerDeliverableProgress | None:
+    for deliverable in deliverables:
+        if deliverable.deliverable_id == spec_deliverable_id:
+            return deliverable
+    if spec_deliverable_order is not None:
+        deliverable_position = spec_deliverable_order.get(spec_deliverable_id)
+        if deliverable_position is not None and 0 <= deliverable_position < len(deliverables):
+            return deliverables[deliverable_position]
+    return None

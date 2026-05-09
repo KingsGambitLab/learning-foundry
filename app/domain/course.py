@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
 
 from app.domain.ai import AIUsageSummary
 from app.domain.registry import PackageType, StarterType
@@ -26,8 +26,8 @@ class CourseRunStatus(str, Enum):
     blocked = "blocked"
 
 
-class CourseModuleDraft(BaseModel):
-    deliverable_slug: str = Field(validation_alias=AliasChoices("deliverable_slug", "module_slug"))
+class CourseDeliverableDraft(BaseModel):
+    deliverable_slug: str = Field(validation_alias="deliverable_slug")
     title: str
     summary: str
     learning_outcomes: list[str] = Field(default_factory=list)
@@ -40,15 +40,6 @@ class CourseModuleDraft(BaseModel):
     draft_kind: str | None = None
     recommendation_status: str | None = None
     notes: list[str] = Field(default_factory=list)
-
-    @property
-    def module_slug(self) -> str:
-        return self.deliverable_slug
-
-    @module_slug.setter
-    def module_slug(self, value: str) -> None:
-        self.deliverable_slug = value
-
 
 class CourseRun(BaseModel):
     id: str
@@ -66,7 +57,7 @@ class CourseRun(BaseModel):
     stage: CourseRunStage
     status: CourseRunStatus
     materialized_bundle: MaterializedBundle | None = None
-    deliverables: list[CourseModuleDraft] = Field(default_factory=list, validation_alias=AliasChoices("deliverables", "modules"))
+    deliverables: list[CourseDeliverableDraft] = Field(default_factory=list, validation_alias="deliverables")
     notes: list[str] = Field(default_factory=list)
     goal: str | None = None
     requested_learning_outcomes: list[str] = Field(default_factory=list)
@@ -76,14 +67,6 @@ class CourseRun(BaseModel):
     own_ai_usage: AIUsageSummary = Field(default_factory=AIUsageSummary)
     ai_usage: AIUsageSummary = Field(default_factory=AIUsageSummary)
     last_error: str | None = None
-
-    @property
-    def modules(self) -> list[CourseModuleDraft]:
-        return self.deliverables
-
-    @modules.setter
-    def modules(self, value: list[CourseModuleDraft]) -> None:
-        self.deliverables = value
 
 
 class CourseRunSummary(BaseModel):
@@ -95,7 +78,7 @@ class CourseRunSummary(BaseModel):
     package_type: PackageType
     stage: CourseRunStage
     status: CourseRunStatus
-    deliverable_count: int = Field(validation_alias=AliasChoices("deliverable_count", "module_count"))
+    deliverable_count: int = Field(validation_alias="deliverable_count")
     shared_workflow_run_id: str | None = None
     latest_publish_snapshot_id: str | None = None
     active_operation: CourseAsyncOperation | None = None
@@ -124,11 +107,6 @@ class CourseRunSummary(BaseModel):
             created_at=run.created_at,
             updated_at=run.updated_at,
         )
-
-    @property
-    def module_count(self) -> int:
-        return self.deliverable_count
-
 
 class CourseEvent(BaseModel):
     course_run_id: str
@@ -202,9 +180,9 @@ class CourseLinkedWorkflowSummary(BaseModel):
     review_summary: WorkflowReviewSummary | None = None
 
 
-class CourseModuleReview(BaseModel):
+class CourseDeliverableReview(BaseModel):
     position: int
-    deliverable_slug: str = Field(validation_alias=AliasChoices("deliverable_slug", "module_slug"))
+    deliverable_slug: str = Field(validation_alias="deliverable_slug")
     title: str
     summary: str
     design_spec: AssignmentDesignSpec | None = None
@@ -221,40 +199,14 @@ class CourseModuleReview(BaseModel):
     linked_workflow: CourseLinkedWorkflowSummary | None = None
     notes: list[str] = Field(default_factory=list)
 
-    @property
-    def module_slug(self) -> str:
-        return self.deliverable_slug
-
-    @module_slug.setter
-    def module_slug(self, value: str) -> None:
-        self.deliverable_slug = value
-
-
 class CourseReviewCounts(BaseModel):
-    total_deliverables: int = Field(validation_alias=AliasChoices("total_deliverables", "total_modules"))
-    ready_deliverables: int = Field(validation_alias=AliasChoices("ready_deliverables", "ready_modules"))
-    deliverables_with_blockers: int = Field(validation_alias=AliasChoices("deliverables_with_blockers", "modules_with_blockers"))
-    deliverables_with_bundle: int = Field(validation_alias=AliasChoices("deliverables_with_bundle", "modules_with_bundle"))
+    total_deliverables: int = Field(validation_alias="total_deliverables")
+    ready_deliverables: int = Field(validation_alias="ready_deliverables")
+    deliverables_with_blockers: int = Field(validation_alias="deliverables_with_blockers")
+    deliverables_with_bundle: int = Field(validation_alias="deliverables_with_bundle")
     linked_workflow_runs: int
     published_workflow_runs: int
     workflow_runs_with_bundle: int
-
-    @property
-    def total_modules(self) -> int:
-        return self.total_deliverables
-
-    @property
-    def ready_modules(self) -> int:
-        return self.ready_deliverables
-
-    @property
-    def modules_with_blockers(self) -> int:
-        return self.deliverables_with_blockers
-
-    @property
-    def modules_with_bundle(self) -> int:
-        return self.deliverables_with_bundle
-
 
 class CourseReviewReport(BaseModel):
     course_run_id: str
@@ -269,19 +221,11 @@ class CourseReviewReport(BaseModel):
     blockers: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
     linked_workflows: list[CourseLinkedWorkflowSummary] = Field(default_factory=list)
-    deliverables: list[CourseModuleReview] = Field(default_factory=list, validation_alias=AliasChoices("deliverables", "modules"))
-
-    @property
-    def modules(self) -> list[CourseModuleReview]:
-        return self.deliverables
-
-    @modules.setter
-    def modules(self, value: list[CourseModuleReview]) -> None:
-        self.deliverables = value
+    deliverables: list[CourseDeliverableReview] = Field(default_factory=list, validation_alias="deliverables")
 
 
-class CreateCourseModuleRequest(BaseModel):
-    deliverable_slug: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_slug", "module_slug"))
+class CreateCourseDeliverableRequest(BaseModel):
+    deliverable_slug: str | None = Field(default=None, validation_alias="deliverable_slug")
     title: str
     summary: str | None = None
     learning_outcomes: list[str] = Field(default_factory=list)
@@ -289,30 +233,13 @@ class CreateCourseModuleRequest(BaseModel):
     domain_pack_hint: str | None = None
     overlays_hint: list[str] = Field(default_factory=list)
 
-    @property
-    def module_slug(self) -> str | None:
-        return self.deliverable_slug
-
-    @module_slug.setter
-    def module_slug(self, value: str | None) -> None:
-        self.deliverable_slug = value
-
-
 class GeneratedCoursePlan(BaseModel):
     title: str
     summary: str
     package_type: PackageType
     shared_design_spec: AssignmentDesignSpec | None = None
-    deliverables: list[CreateCourseModuleRequest] = Field(default_factory=list, min_length=1, validation_alias=AliasChoices("deliverables", "modules"))
+    deliverables: list[CreateCourseDeliverableRequest] = Field(default_factory=list, min_length=1, validation_alias="deliverables")
     notes: list[str] = Field(default_factory=list)
-
-    @property
-    def modules(self) -> list[CreateCourseModuleRequest]:
-        return self.deliverables
-
-    @modules.setter
-    def modules(self, value: list[CreateCourseModuleRequest]) -> None:
-        self.deliverables = value
 
 
 class CreateCourseRunRequest(BaseModel):
@@ -322,19 +249,13 @@ class CreateCourseRunRequest(BaseModel):
     package_type: PackageType | None = None
     shared_design_spec: AssignmentDesignSpec | None = None
     course_family_id: str | None = None
-    deliverables: list[CreateCourseModuleRequest] = Field(default_factory=list, validation_alias=AliasChoices("deliverables", "modules"))
-
-    @property
-    def modules(self) -> list[CreateCourseModuleRequest]:
-        return self.deliverables
-
-    @modules.setter
-    def modules(self, value: list[CreateCourseModuleRequest]) -> None:
-        self.deliverables = value
+    deliverables: list[CreateCourseDeliverableRequest] = Field(default_factory=list, validation_alias="deliverables")
 
 
 class CreatorCourseSetupInput(BaseModel):
     starter_type: StarterType | None = None
+    implementation_language: str | None = None
+    application_framework: str | None = None
     primary_database: str | None = None
     cache_backend: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
@@ -343,6 +264,8 @@ class CreatorCourseSetupInput(BaseModel):
 
 class CreatorCourseSetupChoices(BaseModel):
     starter_type: StarterType = StarterType.partial_implementation
+    implementation_language: str | None = None
+    application_framework: str | None = None
     primary_database: str | None = None
     cache_backend: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
@@ -393,22 +316,13 @@ class SuggestLearningOutcomesResponse(BaseModel):
     learning_outcomes: list[str] = Field(default_factory=list)
 
 
-class CreatorCourseModulePlan(BaseModel):
-    deliverable_slug: str = Field(validation_alias=AliasChoices("deliverable_slug", "module_slug"))
+class CreatorCourseDeliverablePlan(BaseModel):
+    deliverable_slug: str = Field(validation_alias="deliverable_slug")
     title: str
     summary: str
     learning_outcomes: list[str] = Field(default_factory=list)
     creator_notes: list[str] = Field(default_factory=list)
     design_spec: AssignmentDesignSpec | None = None
-
-    @property
-    def module_slug(self) -> str:
-        return self.deliverable_slug
-
-    @module_slug.setter
-    def module_slug(self, value: str) -> None:
-        self.deliverable_slug = value
-
 
 class CreatorCoursePlan(BaseModel):
     goal: str | None = None
@@ -418,17 +332,9 @@ class CreatorCoursePlan(BaseModel):
     package_type: PackageType
     creator_choices: CreatorCourseSetupChoices
     shared_design_spec: AssignmentDesignSpec | None = None
-    deliverables: list[CreatorCourseModulePlan] = Field(default_factory=list, min_length=1, validation_alias=AliasChoices("deliverables", "modules"))
+    deliverables: list[CreatorCourseDeliverablePlan] = Field(default_factory=list, min_length=1, validation_alias="deliverables")
     creator_summary: str | None = None
     notes: list[str] = Field(default_factory=list)
-
-    @property
-    def modules(self) -> list[CreatorCourseModulePlan]:
-        return self.deliverables
-
-    @modules.setter
-    def modules(self, value: list[CreatorCourseModulePlan]) -> None:
-        self.deliverables = value
 
 
 class GenerateCreatorCoursePlanRequest(BaseModel):

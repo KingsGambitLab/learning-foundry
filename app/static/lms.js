@@ -587,6 +587,50 @@
     `;
   }
 
+  function renderLearnerGuidance(feedback) {
+    if (!feedback) return "";
+    const strengths = Array.isArray(feedback.strengths) ? feedback.strengths.filter(Boolean) : [];
+    const whyItMatters = Array.isArray(feedback.why_it_matters) ? feedback.why_it_matters.filter(Boolean) : [];
+    const likelyRootCause = Array.isArray(feedback.likely_root_cause) ? feedback.likely_root_cause.filter(Boolean) : [];
+    const investigationSteps = Array.isArray(feedback.investigation_steps) ? feedback.investigation_steps.filter(Boolean) : [];
+    return `
+      <details class="review-guidance" open>
+        <summary>Tech lead feedback</summary>
+        ${feedback.learner_feedback ? `<p class="review-guidance-summary">${escapeHtml(feedback.learner_feedback)}</p>` : ""}
+        ${feedback.fundamental_gap ? `
+          <div class="review-guidance-section">
+            <h5>Fundamental gap</h5>
+            <p>${escapeHtml(feedback.fundamental_gap)}</p>
+          </div>
+        ` : ""}
+        ${strengths.length ? `
+          <div class="review-guidance-section">
+            <h5>What already looks strong</h5>
+            <ul>${strengths.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+          </div>
+        ` : ""}
+        ${whyItMatters.length ? `
+          <div class="review-guidance-section">
+            <h5>Why it matters</h5>
+            <ul>${whyItMatters.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+          </div>
+        ` : ""}
+        ${likelyRootCause.length ? `
+          <div class="review-guidance-section">
+            <h5>Likely root cause</h5>
+            <ul>${likelyRootCause.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+          </div>
+        ` : ""}
+        ${investigationSteps.length ? `
+          <div class="review-guidance-section">
+            <h5>Where to investigate next</h5>
+            <ol>${investigationSteps.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>
+          </div>
+        ` : ""}
+      </details>
+    `;
+  }
+
   function renderWorkspaceStatusInline(experience) {
     const session = experience?.workspace_session;
     if (!experience) {
@@ -705,7 +749,7 @@
           <h1>${escapeHtml(enrollment.course_title)}</h1>
           <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.")}</p>
 
-          <dl class="module-quickref" aria-label="Project at a glance">
+          <dl class="deliverable-quickref" aria-label="Project at a glance">
             <div class="quickref-row">
               <dt>Files to edit</dt>
               <dd>${visibleFilesText}</dd>
@@ -823,12 +867,12 @@
         ? (latestGrade.status === "passed" ? "Ready" : "Needs work")
         : "Not reviewed";
       return `
-        <div class="module-row">
-          <span class="module-row-index">${escapeHtml(String(deliverable.deliverable_index))}</span>
-          <div class="module-row-copy">
+        <div class="deliverable-row">
+          <span class="deliverable-row-index">${escapeHtml(String(deliverable.deliverable_index))}</span>
+          <div class="deliverable-row-copy">
             <h4>${escapeHtml(deliverable.title)}</h4>
             <p>${escapeHtml(deliverable.objective || "")}</p>
-            <div class="module-row-meta">
+            <div class="deliverable-row-meta">
               ${renderStatusPill(latestGrade ? (latestGrade.status === "passed" ? "passed" : "blocked") : "neutral", statusLabel)}
               ${latestGrade ? renderInfoPill("Last review", `${latestGrade.passed_tests}/${latestGrade.total_tests}`) : ""}
             </div>
@@ -887,6 +931,7 @@
                   ${renderStatusPill(reviewArea.grade_report.status === "passed" ? "passed" : "blocked", reviewArea.grade_report.status === "passed" ? "Ready" : "Needs work")}
                   ${renderInfoPill("Checks", `${reviewArea.grade_report.passed_tests}/${reviewArea.grade_report.total_tests}`)}
                 </div>
+                ${reviewArea.feedback && reviewArea.grade_report.status !== "passed" ? renderLearnerGuidance(reviewArea.feedback) : ""}
               </div>
             `).join("")}
           </div>
@@ -1147,7 +1192,7 @@
     }
   }
 
-  async function handleSubmitModule() {
+  async function handleSubmitDeliverable() {
     const experience = uiState.currentExperience;
     if (!experience?.enrollment?.id) {
       return;
@@ -1244,7 +1289,7 @@
     }
 
     if (action === "submit-project") {
-      await handleSubmitModule();
+      await handleSubmitDeliverable();
       return;
     }
   });

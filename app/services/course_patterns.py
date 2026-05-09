@@ -82,8 +82,8 @@ def _protocol_design(*, package_type: PackageType) -> AssignmentDesignSpec:
     return design
 
 
-class CourseModulePattern(BaseModel):
-    module_slug: str
+class CourseDeliverablePattern(BaseModel):
+    deliverable_slug: str
     title: str
     design_spec: AssignmentDesignSpec
     domain_pack: str | None = None
@@ -95,7 +95,7 @@ class CoursePattern(BaseModel):
     course_title: str
     package_type: PackageType
     shared_design_spec: AssignmentDesignSpec | None = None
-    modules: list[CourseModulePattern]
+    deliverables: list[CourseDeliverablePattern]
 
 
 CATALOG_PATTERNS = [
@@ -103,24 +103,24 @@ CATALOG_PATTERNS = [
         course_slug="tusharbisht-system-design-hands-on",
         course_title="System Design Hands On",
         package_type=PackageType.survey_course,
-        modules=[
-            CourseModulePattern(
-                module_slug="design/01-semantic-search",
+        deliverables=[
+            CourseDeliverablePattern(
+                deliverable_slug="design/01-semantic-search",
                 title="Semantic search",
                 design_spec=_ranked_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="design/02-rag-qa",
+            CourseDeliverablePattern(
+                deliverable_slug="design/02-rag-qa",
                 title="RAG QA",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="design/03-tinyurl",
+            CourseDeliverablePattern(
+                deliverable_slug="design/03-tinyurl",
                 title="TinyURL",
                 design_spec=_stateful_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="design/04-booking-concurrency",
+            CourseDeliverablePattern(
+                deliverable_slug="design/04-booking-concurrency",
                 title="Booking concurrency",
                 design_spec=_stateful_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -128,18 +128,18 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["scale_slo_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="design/05-langchain-agent",
+            CourseDeliverablePattern(
+                deliverable_slug="design/05-langchain-agent",
                 title="LangChain-style agent",
                 design_spec=_service_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="design/06-vector-database",
+            CourseDeliverablePattern(
+                deliverable_slug="design/06-vector-database",
                 title="Vector database",
                 design_spec=_ranked_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="design/07-mcp-server",
+            CourseDeliverablePattern(
+                deliverable_slug="design/07-mcp-server",
                 title="MCP server",
                 design_spec=_protocol_design(package_type=PackageType.progressive_codebase_course),
             ),
@@ -150,18 +150,16 @@ CATALOG_PATTERNS = [
         course_title="Forward Deployed Engineering",
         package_type=PackageType.survey_course,
         shared_design_spec=_service_design(package_type=PackageType.progressive_codebase_course),
-        modules=[
-            CourseModulePattern(
-                module_slug="design/01-support-triage",
-                title="Support triage",
+        deliverables=[
+            CourseDeliverablePattern(
+                deliverable_slug="design/01-feature-flag-control-plane",
+                title="Feature flag control plane",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                 ),
-                domain_pack="support_triage",
             ),
-            CourseModulePattern(
-                module_slug="design/02-oncall-copilot",
+            CourseDeliverablePattern(
+                deliverable_slug="design/02-oncall-copilot",
                 title="Oncall copilot",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -169,8 +167,8 @@ CATALOG_PATTERNS = [
                 ),
                 domain_pack="oncall_copilot",
             ),
-            CourseModulePattern(
-                module_slug="design/03-se-rfp-drafter",
+            CourseDeliverablePattern(
+                deliverable_slug="design/03-se-rfp-drafter",
                 title="SE RFP drafter",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -178,8 +176,8 @@ CATALOG_PATTERNS = [
                 ),
                 domain_pack="rfp_drafter",
             ),
-            CourseModulePattern(
-                module_slug="design/04-analyst-sql",
+            CourseDeliverablePattern(
+                deliverable_slug="design/04-analyst-sql",
                 title="Analyst SQL",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -187,8 +185,8 @@ CATALOG_PATTERNS = [
                 ),
                 domain_pack="analyst_sql",
             ),
-            CourseModulePattern(
-                module_slug="design/05-cs-qbr-prep",
+            CourseDeliverablePattern(
+                deliverable_slug="design/05-cs-qbr-prep",
                 title="CS QBR prep",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -196,8 +194,8 @@ CATALOG_PATTERNS = [
                 ),
                 domain_pack="qbr_prep",
             ),
-            CourseModulePattern(
-                module_slug="design/06-vc-investment-memo",
+            CourseDeliverablePattern(
+                deliverable_slug="design/06-vc-investment-memo",
                 title="VC investment memo",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -205,8 +203,8 @@ CATALOG_PATTERNS = [
                 ),
                 domain_pack="investment_memo",
             ),
-            CourseModulePattern(
-                module_slug="design/07-clinical-case-triage",
+            CourseDeliverablePattern(
+                deliverable_slug="design/07-clinical-case-triage",
                 title="Clinical case triage",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -218,66 +216,55 @@ CATALOG_PATTERNS = [
     ),
     CoursePattern(
         course_slug="tusharbisht-cs-demo-agent-to-production",
-        course_title="Customer Support Agent — Demo to Production",
+        course_title="Feature Flag Platform — Demo to Production",
         package_type=PackageType.progressive_codebase_course,
         shared_design_spec=_service_design(
             package_type=PackageType.progressive_codebase_course,
-            domain_pack="support_triage",
         ),
-        modules=[
-            CourseModulePattern(
-                module_slug="exercise/01-observability",
+        deliverables=[
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/01-observability",
                 title="Observability",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                     overlays=["productionization_overlay"],
                 ),
-                domain_pack="support_triage",
                 overlays=["productionization_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/02-state-and-fallback",
-                title="Durable state and fallback chains",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/02-state-and-fallback",
+                title="Safe updates and rollout state",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                     overlays=["productionization_overlay"],
                 ),
-                domain_pack="support_triage",
                 overlays=["productionization_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/03-confidence-calibration",
-                title="Confidence calibration",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/03-confidence-calibration",
+                title="Evaluation and decision quality",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                     overlays=["productionization_overlay"],
                 ),
-                domain_pack="support_triage",
                 overlays=["productionization_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/04-feedback-loops",
-                title="Feedback loops and prompt-as-artifact",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/04-feedback-loops",
+                title="Audit trails and rollout debugging",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                     overlays=["productionization_overlay"],
                 ),
-                domain_pack="support_triage",
                 overlays=["productionization_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="final/integrated",
-                title="Integrated production-grade agent",
+            CourseDeliverablePattern(
+                deliverable_slug="final/integrated",
+                title="Integrated production-grade control plane",
                 design_spec=_service_design(
                     package_type=PackageType.progressive_codebase_course,
-                    domain_pack="support_triage",
                     overlays=["productionization_overlay", "scale_slo_overlay"],
                 ),
-                domain_pack="support_triage",
                 overlays=["productionization_overlay", "scale_slo_overlay"],
             ),
         ],
@@ -289,39 +276,39 @@ CATALOG_PATTERNS = [
         shared_design_spec=_grounded_retrieval_design(
             package_type=PackageType.progressive_codebase_course,
         ),
-        modules=[
-            CourseModulePattern(
-                module_slug="exercise/01-structure-aware-chunking",
+        deliverables=[
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/01-structure-aware-chunking",
                 title="Structure-aware chunking",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/02-hybrid-retrieval",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/02-hybrid-retrieval",
                 title="Hybrid retrieval",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/03-query-decomposition",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/03-query-decomposition",
                 title="Query rewriting and decomposition",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/04-reranking",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/04-reranking",
                 title="Cross-encoder re-ranking",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/05-citation-faithfulness",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/05-citation-faithfulness",
                 title="Citation faithfulness and confidence calibration",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/06-disambiguation",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/06-disambiguation",
                 title="Disambiguation and entity resolution",
                 design_spec=_grounded_retrieval_design(package_type=PackageType.progressive_codebase_course),
             ),
-            CourseModulePattern(
-                module_slug="exercise/07-vector-scale",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/07-vector-scale",
                 title="Vector index at production scale",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -329,8 +316,8 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["scale_slo_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/08-freshness",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/08-freshness",
                 title="Index freshness via change stream",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -338,8 +325,8 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["freshness_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/09-adversarial",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/09-adversarial",
                 title="Prompt-injection robustness",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -347,8 +334,8 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["adversarial_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/10-cost-slo",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/10-cost-slo",
                 title="Cost optimization to SLO",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -356,8 +343,8 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["scale_slo_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="exercise/11-eval-driven",
+            CourseDeliverablePattern(
+                deliverable_slug="exercise/11-eval-driven",
                 title="Eval-driven iteration",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,
@@ -365,8 +352,8 @@ CATALOG_PATTERNS = [
                 ),
                 overlays=["productionization_overlay"],
             ),
-            CourseModulePattern(
-                module_slug="final/integrated",
+            CourseDeliverablePattern(
+                deliverable_slug="final/integrated",
                 title="Production deploy at SLO",
                 design_spec=_grounded_retrieval_design(
                     package_type=PackageType.progressive_codebase_course,

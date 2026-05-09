@@ -48,13 +48,13 @@ class GraderPlanEntry(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
-class ModuleGraderPlan(BaseModel):
-    module_id: str
-    module_title: str
-    module_objective: str
+class DeliverableGraderPlan(BaseModel):
+    deliverable_id: str
+    deliverable_title: str
+    deliverable_objective: str
     starter_type: str
     overlay_ids: list[str] = Field(default_factory=list)
-    cumulative_modules: list[str] = Field(default_factory=list)
+    cumulative_deliverables: list[str] = Field(default_factory=list)
     active_behavior_ids: list[str] = Field(default_factory=list)
     active_quality_ids: list[str] = Field(default_factory=list)
     total_tests: int
@@ -68,4 +68,4 @@ class TaskAgentGraderPlanCollection(BaseModel):
     title: str
     eval_dataset_id: str
     system_profile: list[str] = Field(default_factory=list)
-    module_plans: list[ModuleGraderPlan] = Field(default_factory=list)
+    deliverable_plans: list[DeliverableGraderPlan] = Field(default_factory=list)

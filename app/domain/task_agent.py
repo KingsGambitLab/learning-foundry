@@ -176,12 +176,12 @@ class ProductionContract(BaseModel):
 
 class WorkspaceScope(str, Enum):
     shared_course_workspace = "shared_course_workspace"
-    per_module_workspace = "per_module_workspace"
+    per_deliverable_workspace = "per_deliverable_workspace"
 
 
 class ProgressionMode(str, Enum):
-    cumulative_module_gates = "cumulative_module_gates"
-    independent_modules = "independent_modules"
+    cumulative_deliverable_gates = "cumulative_deliverable_gates"
+    independent_deliverables = "independent_deliverables"
 
 
 class ExecutionSurface(str, Enum):
@@ -211,6 +211,15 @@ class RetrievalMode(str, Enum):
     grounded_answers = "grounded_answers"
 
 
+class ProjectFamily(str, Enum):
+    generic_backend_service = "generic_backend_service"
+    workflow_agent_service = "workflow_agent_service"
+    ranked_retrieval_service = "ranked_retrieval_service"
+    grounded_retrieval_service = "grounded_retrieval_service"
+    transactional_stateful_service = "transactional_stateful_service"
+    control_plane_service = "control_plane_service"
+
+
 class CourseStructureSpec(BaseModel):
     package_type: PackageType
     workspace_scope: WorkspaceScope
@@ -233,6 +242,8 @@ class DataSourceSpec(BaseModel):
 class RuntimeDependencySpec(BaseModel):
     execution_surface: ExecutionSurface
     starter_type: StarterType = StarterType.partial_implementation
+    implementation_language: str | None = None
+    application_framework: str | None = None
     editable_files: list[str] = Field(default_factory=list)
     visible_fixture_files: list[str] = Field(default_factory=list)
     data_sources: list[DataSourceSpec] = Field(default_factory=list)
@@ -286,8 +297,77 @@ class CapabilitySpec(BaseModel):
 class AssessmentStrategySpec(BaseModel):
     public_checks_required: bool = True
     hidden_grader_required: bool = True
-    cumulative_module_gates: bool = True
+    cumulative_deliverable_gates: bool = True
     learner_submission_enabled: bool = True
+
+
+class ProjectServiceBinding(BaseModel):
+    service_id: str
+    role: str
+    technology: str | None = None
+    learner_managed: bool = False
+
+
+class ProjectRuntimeBindingSpec(BaseModel):
+    implementation_language: str | None = None
+    application_framework: str | None = None
+    backing_services: list[ProjectServiceBinding] = Field(default_factory=list)
+    seed_artifacts: list[str] = Field(default_factory=list)
+    integration_points: list[str] = Field(default_factory=list)
+
+
+class ProjectRuntimeCommandSpec(BaseModel):
+    phase: Literal["install", "build", "seed", "run", "check", "verify"]
+    command: str
+    target_service_id: str | None = None
+    notes: str | None = None
+
+
+class ProjectRuntimeServiceSpec(BaseModel):
+    service_id: str
+    role: str
+    technology: str | None = None
+    version_hint: str | None = None
+    package_manager: str | None = None
+    learner_managed: bool = False
+    run_command: str | None = None
+    healthcheck_path: str | None = None
+    default_port: int | None = None
+
+
+class ProjectRuntimePlanSpec(BaseModel):
+    implementation_language: str | None = None
+    language_version: str | None = None
+    application_framework: str | None = None
+    framework_version: str | None = None
+    package_manager: str | None = None
+    services: list[ProjectRuntimeServiceSpec] = Field(default_factory=list)
+    setup_steps: list[ProjectRuntimeCommandSpec] = Field(default_factory=list)
+    seed_steps: list[ProjectRuntimeCommandSpec] = Field(default_factory=list)
+    run_steps: list[ProjectRuntimeCommandSpec] = Field(default_factory=list)
+    check_steps: list[ProjectRuntimeCommandSpec] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ProjectContractSpec(BaseModel):
+    family: ProjectFamily = ProjectFamily.generic_backend_service
+    system_kind: str = "General backend service"
+    core_entities: list[str] = Field(default_factory=list)
+    primary_read_paths: list[str] = Field(default_factory=list)
+    primary_write_paths: list[str] = Field(default_factory=list)
+    invariants: list[str] = Field(default_factory=list)
+    operational_concerns: list[str] = Field(default_factory=list)
+    runtime_binding: ProjectRuntimeBindingSpec = Field(default_factory=ProjectRuntimeBindingSpec)
+    runtime_plan: ProjectRuntimePlanSpec = Field(default_factory=ProjectRuntimePlanSpec)
+
+
+def default_project_contract() -> ProjectContractSpec:
+    return ProjectContractSpec(
+        family=ProjectFamily.generic_backend_service,
+        system_kind="General backend service",
+        invariants=["The service returns a stable response contract for supported requests."],
+        operational_concerns=["Keep failures observable enough to debug quickly."],
+    )
 
 
 class AssignmentDesignSpec(BaseModel):
@@ -295,6 +375,7 @@ class AssignmentDesignSpec(BaseModel):
     runtime_dependencies: RuntimeDependencySpec
     capabilities: CapabilitySpec
     assessment_strategy: AssessmentStrategySpec
+    project_contract: ProjectContractSpec = Field(default_factory=default_project_contract)
     risk_class: RiskClass = RiskClass.standard
     domain_pack: str | None = None
     overlays: list[str] = Field(default_factory=list)
@@ -495,8 +576,8 @@ AssessmentTest = Annotated[
 ]
 
 
-class LearnerModuleBrief(BaseModel):
-    why_this_module_matters: str
+class LearnerDeliverableBrief(BaseModel):
+    why_this_deliverable_matters: str
     task_to_build: str
     files_to_edit: list[str] = Field(default_factory=list)
     definition_of_done: list[str] = Field(default_factory=list)
@@ -516,14 +597,14 @@ class PublicCheckSpec(BaseModel):
     covers_quality_ids: list[str] = Field(default_factory=list)
 
 
-class ModuleSpec(BaseModel):
+class DeliverableSpec(BaseModel):
     id: str
     title: str
     objective: str
     starter_type: StarterType
     overlay_ids: list[str] = Field(default_factory=list)
     learning_outcomes: list[str] = Field(default_factory=list)
-    learner_brief: LearnerModuleBrief | None = None
+    learner_brief: LearnerDeliverableBrief | None = None
     public_checks: list[PublicCheckSpec] = Field(default_factory=list)
 
 
@@ -542,9 +623,9 @@ class QualitySpec(BaseModel):
     test: AssessmentTest
 
 
-class ModuleGate(BaseModel):
-    module_id: str
-    cumulative_modules: list[str]
+class DeliverableGate(BaseModel):
+    deliverable_id: str
+    cumulative_deliverables: list[str]
     active_behavior_ids: list[str]
     active_quality_ids: list[str]
     active_test_ids: list[str]
@@ -561,8 +642,9 @@ class TaskAgentServiceSpec(BaseModel):
     runtime_dependencies: RuntimeDependencySpec
     capabilities: CapabilitySpec
     assessment_strategy: AssessmentStrategySpec
+    project_contract: ProjectContractSpec = Field(default_factory=default_project_contract)
     supported_modes: list[AgentMode] = Field(min_length=1)
-    modules: list[ModuleSpec] = Field(min_length=1)
+    deliverables: list[DeliverableSpec] = Field(min_length=1)
     task_schema: JsonSchema
     output_schema: JsonSchema
     trace_schema: JsonSchema
@@ -582,27 +664,27 @@ class TaskAgentServiceSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> "TaskAgentServiceSpec":
-        module_ids = [module.id for module in self.modules]
+        deliverable_ids = [deliverable.id for deliverable in self.deliverables]
         behavior_ids = [behavior.id for behavior in self.behaviors]
         quality_ids = [quality.id for quality in self.qualities]
 
-        if len(module_ids) != len(set(module_ids)):
-            raise ValueError("module ids must be unique")
+        if len(deliverable_ids) != len(set(deliverable_ids)):
+            raise ValueError("deliverable ids must be unique")
         if len(behavior_ids) != len(set(behavior_ids)):
             raise ValueError("behavior ids must be unique")
         if len(quality_ids) != len(set(quality_ids)):
             raise ValueError("quality ids must be unique")
         if self.course_structure.package_type != self.package_type:
             raise ValueError("course_structure.package_type must match package_type")
-        if self.package_type == PackageType.progressive_codebase_course and len(self.modules) < 2:
-            raise ValueError("progressive codebase courses need at least two modules")
-        if self.course_structure.progression_mode == ProgressionMode.cumulative_module_gates and not self.course_structure.shared_codebase:
-            raise ValueError("cumulative module gates require a shared codebase")
+        if self.package_type == PackageType.progressive_codebase_course and len(self.deliverables) < 2:
+            raise ValueError("progressive codebase courses need at least two deliverables")
+        if self.course_structure.progression_mode == ProgressionMode.cumulative_deliverable_gates and not self.course_structure.shared_codebase:
+            raise ValueError("cumulative deliverable gates require a shared codebase")
         return self
 
     @property
-    def module_order(self) -> dict[str, int]:
-        return {module.id: index for index, module in enumerate(self.modules)}
+    def deliverable_order(self) -> dict[str, int]:
+        return {deliverable.id: index for index, deliverable in enumerate(self.deliverables)}
 
     @property
     def tool_ids(self) -> set[str]:
@@ -612,26 +694,26 @@ class TaskAgentServiceSpec(BaseModel):
     def eval_case_ids(self) -> set[str]:
         return {case.id for case in self.eval_dataset.cases}
 
-    def gate_for(self, module_id: str) -> ModuleGate:
-        order = self.module_order
-        if module_id not in order:
-            raise ValueError(f"unknown module id: {module_id}")
+    def gate_for(self, deliverable_id: str) -> DeliverableGate:
+        order = self.deliverable_order
+        if deliverable_id not in order:
+            raise ValueError(f"unknown deliverable id: {deliverable_id}")
 
-        cutoff = order[module_id]
-        if self.course_structure.progression_mode == ProgressionMode.independent_modules:
-            cumulative_modules = [module_id]
+        cutoff = order[deliverable_id]
+        if self.course_structure.progression_mode == ProgressionMode.independent_deliverables:
+            cumulative_deliverables = [deliverable_id]
             active_behaviors = [
                 behavior.id
                 for behavior in self.behaviors
-                if behavior.first_required_in == module_id
+                if behavior.first_required_in == deliverable_id
             ]
             active_qualities = [
                 quality.id
                 for quality in self.qualities
-                if quality.first_required_in == module_id
+                if quality.first_required_in == deliverable_id
             ]
         else:
-            cumulative_modules = [module.id for module in self.modules[: cutoff + 1]]
+            cumulative_deliverables = [deliverable.id for deliverable in self.deliverables[: cutoff + 1]]
             active_behaviors = [
                 behavior.id
                 for behavior in self.behaviors
@@ -642,9 +724,9 @@ class TaskAgentServiceSpec(BaseModel):
                 for quality in self.qualities
                 if order.get(quality.first_required_in, cutoff + 1) <= cutoff
             ]
-        return ModuleGate(
-            module_id=module_id,
-            cumulative_modules=cumulative_modules,
+        return DeliverableGate(
+            deliverable_id=deliverable_id,
+            cumulative_deliverables=cumulative_deliverables,
             active_behavior_ids=active_behaviors,
             active_quality_ids=active_qualities,
             active_test_ids=active_behaviors + active_qualities,

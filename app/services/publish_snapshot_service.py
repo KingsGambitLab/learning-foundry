@@ -9,7 +9,7 @@ from app.domain.course import CourseRun
 from app.domain.learner import LearnerWorkspaceScope
 from app.domain.publish import (
     LearnerCoursePackage,
-    LearnerModulePackage,
+    LearnerDeliverablePackage,
     LearnerPackageFile,
     PublishSnapshot,
     PublishSnapshotProvenance,
@@ -17,8 +17,8 @@ from app.domain.publish import (
 from app.domain.workflow import MaterializeBundleRequest, WorkflowRun
 from app.services.learner_brief_builder import (
     combine_public_checks,
-    combine_learner_module_briefs,
-    render_learner_module_markdown,
+    combine_learner_deliverable_briefs,
+    render_learner_deliverable_markdown,
     render_learner_starter_readme,
 )
 from app.services.workflow_service import WorkflowService
@@ -30,7 +30,13 @@ class PublishSnapshotService:
         self.store = store
         self.workflow_service = workflow_service
 
-    def create_snapshot(self, course_run: CourseRun, linked_runs: dict[str, WorkflowRun]) -> PublishSnapshot | None:
+    def create_snapshot(
+        self,
+        course_run: CourseRun,
+        linked_runs: dict[str, WorkflowRun],
+        *,
+        persist: bool = True,
+    ) -> PublishSnapshot | None:
         shared_workflow_id = course_run.shared_workflow_run_id
         if not shared_workflow_id:
             return None
@@ -86,70 +92,71 @@ class PublishSnapshotService:
                 "Regenerate this snapshot from canonical course/workflow state instead of editing it directly.",
             ],
         )
-        self.store.save_publish_snapshot(snapshot)
+        if persist:
+            self.store.save_publish_snapshot(snapshot)
         return snapshot
 
     def _build_learner_package(self, course_run: CourseRun, workflow_run: WorkflowRun) -> LearnerCoursePackage:
         spec = workflow_run.artifacts.task_agent_spec
         assert spec is not None
 
-        deliverable_packages: list[LearnerModulePackage] = []
-        spec_modules = list(spec.modules)
-        for index, course_module in enumerate(course_run.modules, start=1):
-            spec_module = spec_modules[index - 1] if index - 1 < len(spec_modules) else None
-            gate = spec.gate_for(spec_module.id) if spec_module is not None else None
-            learner_brief = combine_learner_module_briefs(
+        deliverable_packages: list[LearnerDeliverablePackage] = []
+        spec_deliverables = list(spec.deliverables)
+        for index, course_deliverable in enumerate(course_run.deliverables, start=1):
+            spec_deliverable = spec_deliverables[index - 1] if index - 1 < len(spec_deliverables) else None
+            gate = spec.gate_for(spec_deliverable.id) if spec_deliverable is not None else None
+            learner_brief = combine_learner_deliverable_briefs(
                 fallback_task=(
-                    f"Extend the learner-visible starter so it satisfies {course_module.summary.rstrip('.').lower()}."
+                    f"Extend the learner-visible starter so it satisfies {course_deliverable.summary.rstrip('.').lower()}."
                 ),
-                fallback_why=course_module.summary,
+                fallback_why=course_deliverable.summary,
                 briefs=[
-                    aligned_module.learner_brief
-                    for aligned_module in [spec_module]
-                    if aligned_module is not None and aligned_module.learner_brief is not None
+                    aligned_deliverable.learner_brief
+                    for aligned_deliverable in [spec_deliverable]
+                    if aligned_deliverable is not None and aligned_deliverable.learner_brief is not None
                 ],
             )
             public_checks = combine_public_checks(
                 check
-                for aligned_module in [spec_module]
-                if aligned_module is not None
-                for check in aligned_module.public_checks
+                for aligned_deliverable in [spec_deliverable]
+                if aligned_deliverable is not None
+                for check in aligned_deliverable.public_checks
             )
-            content_markdown = self._learner_module_markdown(
-                course_module=course_module,
-                module_index=index,
+            content_markdown = self._learner_deliverable_markdown(
+                course_deliverable=course_deliverable,
+                deliverable_index=index,
                 learner_brief=learner_brief,
                 public_checks=public_checks,
             )
             starter_readme = self._learner_starter_readme(
-                course_module_title=course_module.title,
+                course_deliverable_title=course_deliverable.title,
                 learner_brief=learner_brief,
                 public_checks=public_checks,
             )
             seed_files = self._workspace_seed_files(
                 spec=spec,
                 workflow_run_id=workflow_run.id,
-                spec_module_id=(spec_module.id if spec_module is not None else None),
+                spec_deliverable_id=(spec_deliverable.id if spec_deliverable is not None else None),
                 content_markdown=content_markdown,
                 starter_readme=starter_readme,
             )
             deliverable_packages.append(
-                LearnerModulePackage(
-                    deliverable_id=course_module.deliverable_slug,
-                    course_deliverable_slug=course_module.deliverable_slug,
-                    title=course_module.title,
-                    objective=course_module.summary,
+                LearnerDeliverablePackage(
+                    deliverable_id=course_deliverable.deliverable_slug,
+                    course_deliverable_slug=course_deliverable.deliverable_slug,
+                    title=course_deliverable.title,
+                    objective=course_deliverable.summary,
                     deliverable_index=index,
                     learner_brief=learner_brief,
                     public_checks=public_checks,
                     content_markdown=content_markdown,
                     starter_readme=starter_readme,
-                    learning_outcomes=list(course_module.learning_outcomes),
+                    learning_outcomes=list(course_deliverable.learning_outcomes),
                     active_test_ids=list(gate.active_test_ids) if gate is not None else [],
                     completion_rule=(
                         learner_brief.definition_of_done[0]
                         if learner_brief.definition_of_done
-                        else f"Complete {course_module.title}."
+                        else f"Complete {course_deliverable.title}."
                     ),
                     visible_files=[file.relative_path for file in seed_files],
                     workspace_seed_files=seed_files,
@@ -175,7 +182,7 @@ class PublishSnapshotService:
     def _project_brief_markdown(
         self,
         course_run: CourseRun,
-        deliverables: list[LearnerModulePackage],
+        deliverables: list[LearnerDeliverablePackage],
     ) -> str:
         lines = [
             f"# {course_run.title}",
@@ -204,19 +211,19 @@ class PublishSnapshotService:
         )
         return "\n".join(lines).strip() + "\n"
 
-    def _learner_module_markdown(
+    def _learner_deliverable_markdown(
         self,
         *,
-        course_module,
-        module_index: int,
+        course_deliverable,
+        deliverable_index: int,
         learner_brief,
         public_checks,
     ) -> str:
-        return render_learner_module_markdown(
-            module_index=module_index,
-            title=course_module.title,
-            summary=course_module.summary,
-            learning_outcomes=list(course_module.learning_outcomes),
+        return render_learner_deliverable_markdown(
+            deliverable_index=deliverable_index,
+            title=course_deliverable.title,
+            summary=course_deliverable.summary,
+            learning_outcomes=list(course_deliverable.learning_outcomes),
             brief=learner_brief,
             public_checks=public_checks,
         )
@@ -224,12 +231,12 @@ class PublishSnapshotService:
     def _learner_starter_readme(
         self,
         *,
-        course_module_title: str,
+        course_deliverable_title: str,
         learner_brief,
         public_checks,
     ) -> str:
         return render_learner_starter_readme(
-            title=course_module_title,
+            title=course_deliverable_title,
             brief=learner_brief,
             public_checks=public_checks,
         )
@@ -239,7 +246,7 @@ class PublishSnapshotService:
         *,
         spec,
         workflow_run_id: str,
-        spec_module_id: str | None,
+        spec_deliverable_id: str | None,
         content_markdown: str,
         starter_readme: str,
     ) -> list[LearnerPackageFile]:
@@ -248,24 +255,24 @@ class PublishSnapshotService:
             self._read_seed_file(workflow_run_id, "runtime/task_agent_runtime.py", "public/runtime/task_agent_runtime.py"),
             self._read_seed_file(workflow_run_id, "runtime/requirements.txt", "public/runtime/requirements.txt"),
         ]
-        if spec_module_id is None:
+        if spec_deliverable_id is None:
             return seed_files
         seed_files[:0] = [
-            self._read_seed_file(workflow_run_id, "app.py", f"public/starter/{spec_module_id}/app.py"),
+            self._read_seed_file(workflow_run_id, "app.py", f"public/starter/{spec_deliverable_id}/app.py"),
             self._read_seed_file(
                 workflow_run_id,
                 "starter_manifest.json",
-                f"public/starter/{spec_module_id}/starter_manifest.json",
+                f"public/starter/{spec_deliverable_id}/starter_manifest.json",
             ),
             self._read_seed_file(
                 workflow_run_id,
                 "checks/run_visible_checks.py",
-                f"public/starter/{spec_module_id}/checks/run_visible_checks.py",
+                f"public/starter/{spec_deliverable_id}/checks/run_visible_checks.py",
             ),
             self._read_seed_file(
                 workflow_run_id,
                 ".vscode/tasks.json",
-                f"public/starter/{spec_module_id}/.vscode/tasks.json",
+                f"public/starter/{spec_deliverable_id}/.vscode/tasks.json",
             ),
         ]
         seen_paths = {file.relative_path for file in seed_files}
@@ -277,7 +284,7 @@ class PublishSnapshotService:
                     self._read_seed_file(
                         workflow_run_id,
                         relative_path,
-                        f"public/starter/{spec_module_id}/{relative_path}",
+                        f"public/starter/{spec_deliverable_id}/{relative_path}",
                     )
                 )
                 seen_paths.add(relative_path)

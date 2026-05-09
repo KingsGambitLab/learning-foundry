@@ -14,7 +14,7 @@ from app.domain.task_agent import (
     EscalationPolicyTestParams,
     FallbackPolicyTestParams,
     IdempotentActionTestParams,
-    ModuleGate,
+    DeliverableGate,
     OutputSchemaTestParams,
     P95RunLatencyTestParams,
     QualitySpec,
@@ -50,8 +50,8 @@ class ValidationIssue(BaseModel):
     message: str
 
 
-class ModuleGateSummary(BaseModel):
-    module_id: str
+class DeliverableGateSummary(BaseModel):
+    deliverable_id: str
     active_behavior_ids: list[str]
     active_quality_ids: list[str]
     active_test_count: int
@@ -61,16 +61,16 @@ class ValidationResult(BaseModel):
     valid: bool
     errors: list[ValidationIssue] = Field(default_factory=list)
     warnings: list[ValidationIssue] = Field(default_factory=list)
-    module_gates: list[ModuleGateSummary] = Field(default_factory=list)
+    deliverable_gates: list[DeliverableGateSummary] = Field(default_factory=list)
 
 
-def _gate_summaries(spec: TaskAgentServiceSpec) -> list[ModuleGateSummary]:
-    summaries: list[ModuleGateSummary] = []
-    for module in spec.modules:
-        gate = spec.gate_for(module.id)
+def _gate_summaries(spec: TaskAgentServiceSpec) -> list[DeliverableGateSummary]:
+    summaries: list[DeliverableGateSummary] = []
+    for deliverable in spec.deliverables:
+        gate = spec.gate_for(deliverable.id)
         summaries.append(
-            ModuleGateSummary(
-                module_id=gate.module_id,
+            DeliverableGateSummary(
+                deliverable_id=gate.deliverable_id,
                 active_behavior_ids=gate.active_behavior_ids,
                 active_quality_ids=gate.active_quality_ids,
                 active_test_count=len(gate.active_test_ids),
@@ -82,12 +82,12 @@ def _gate_summaries(spec: TaskAgentServiceSpec) -> list[ModuleGateSummary]:
 def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
     errors: list[ValidationIssue] = []
     warnings: list[ValidationIssue] = []
-    module_ids = set(spec.module_order.keys())
+    deliverable_ids = set(spec.deliverable_order.keys())
     tool_ids = spec.tool_ids
     eval_case_ids = spec.eval_case_ids
     inferred_case_tags = infer_review_area_case_tags(spec)
     hidden_coverage = {
-        summary.module_id: summary
+        summary.deliverable_id: summary
         for summary in summarize_review_area_hidden_coverage(spec)
     }
     endpoint_paths = {endpoint.path for endpoint in spec.production_contract.canonical_endpoints}
@@ -133,12 +133,12 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
             "runtime_dependencies.visible_check_command",
             "Add a visible check command so learners can debug before submitting to the grader.",
         )
-    if spec.course_structure.workspace_scope.value == "per_module_workspace" and spec.course_structure.shared_codebase:
+    if spec.course_structure.workspace_scope.value == "per_deliverable_workspace" and spec.course_structure.shared_codebase:
         add_issue(
             ValidationLevel.error,
             "workspace_scope_conflict",
             "course_structure.workspace_scope",
-            "Per-module workspaces cannot be paired with a shared codebase course structure.",
+            "Per-deliverable workspaces cannot be paired with a shared codebase course structure.",
         )
     if spec.capabilities.answer_synthesis_required and spec.capabilities.retrieval_mode.value == "none":
         add_issue(
@@ -162,11 +162,11 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
             "Public/basic checks are required, but the runtime dependency spec has no visible check command.",
         )
 
-    if spec.package_type == PackageType.survey_course and len(spec.modules) > 3:
+    if spec.package_type == PackageType.survey_course and len(spec.deliverables) > 3:
         add_issue(
             ValidationLevel.warning,
-            "survey_many_modules",
-            "modules",
+            "survey_many_deliverables",
+            "deliverables",
             "This looks more like a progressive codebase than a survey assignment.",
         )
 
@@ -178,33 +178,33 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
             "This spec should require human review before publish.",
         )
 
-    for module in spec.modules:
-        gate = spec.gate_for(module.id)
-        coverage = hidden_coverage[module.id]
-        for overlay_id in module.overlay_ids:
+    for deliverable in spec.deliverables:
+        gate = spec.gate_for(deliverable.id)
+        coverage = hidden_coverage[deliverable.id]
+        for overlay_id in deliverable.overlay_ids:
             if overlay_id not in overlay_ids:
                 add_issue(
                     ValidationLevel.error,
                     "unknown_overlay",
-                    f"modules.{module.id}.overlay_ids",
+                    f"deliverables.{deliverable.id}.overlay_ids",
                     f"Unknown overlay '{overlay_id}'.",
                 )
-        if not module.learning_outcomes:
+        if not deliverable.learning_outcomes:
             add_issue(
                 ValidationLevel.error,
-                "missing_module_learning_outcomes",
-                f"modules.{module.id}.learning_outcomes",
-                "Each module should publish concrete learning outcomes derived from the learner task.",
+                "missing_deliverable_learning_outcomes",
+                f"deliverables.{deliverable.id}.learning_outcomes",
+                "Each deliverable should publish concrete learning outcomes derived from the learner task.",
             )
         else:
             seen_outcomes: set[str] = set()
-            for index, outcome in enumerate(module.learning_outcomes):
-                location = f"modules.{module.id}.learning_outcomes[{index}]"
+            for index, outcome in enumerate(deliverable.learning_outcomes):
+                location = f"deliverables.{deliverable.id}.learning_outcomes[{index}]"
                 normalized = outcome.strip()
                 if not normalized:
                     add_issue(
                         ValidationLevel.error,
-                        "blank_module_learning_outcome",
+                        "blank_deliverable_learning_outcome",
                         location,
                         "Learning outcomes must not be blank.",
                     )
@@ -213,7 +213,7 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 if lowered in seen_outcomes:
                     add_issue(
                         ValidationLevel.warning,
-                        "duplicate_module_learning_outcome",
+                        "duplicate_deliverable_learning_outcome",
                         location,
                         f"Duplicate learning outcome '{normalized}'.",
                     )
@@ -221,89 +221,89 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 if any(phrase in lowered for phrase in ["understand", "learn about", "be familiar"]):
                     add_issue(
                         ValidationLevel.warning,
-                        "vague_module_learning_outcome",
+                        "vague_deliverable_learning_outcome",
                         location,
                         "Learning outcomes should describe an observable learner capability, not vague understanding.",
                     )
-            if len(module.learning_outcomes) > 4:
+            if len(deliverable.learning_outcomes) > 4:
                 add_issue(
                     ValidationLevel.warning,
-                    "too_many_module_learning_outcomes",
-                    f"modules.{module.id}.learning_outcomes",
-                    "Keep module outcomes focused. More than four usually means the module is trying to teach too much at once.",
+                    "too_many_deliverable_learning_outcomes",
+                    f"deliverables.{deliverable.id}.learning_outcomes",
+                    "Keep deliverable outcomes focused. More than four usually means the deliverable is trying to teach too much at once.",
                 )
-        if module.learner_brief is None:
+        if deliverable.learner_brief is None:
             add_issue(
                 ValidationLevel.error,
                 "missing_learner_brief",
-                f"modules.{module.id}.learner_brief",
-                "Each module needs a learner-facing brief before it can be reviewed or published.",
+                f"deliverables.{deliverable.id}.learner_brief",
+                "Each deliverable needs a learner-facing brief before it can be reviewed or published.",
             )
             continue
-        if not module.learner_brief.files_to_edit:
+        if not deliverable.learner_brief.files_to_edit:
             add_issue(
                 ValidationLevel.error,
                 "missing_files_to_edit",
-                f"modules.{module.id}.learner_brief.files_to_edit",
+                f"deliverables.{deliverable.id}.learner_brief.files_to_edit",
                 "Learner briefs must tell the learner which files to edit.",
             )
-        if not module.learner_brief.definition_of_done:
+        if not deliverable.learner_brief.definition_of_done:
             add_issue(
                 ValidationLevel.error,
                 "missing_definition_of_done",
-                f"modules.{module.id}.learner_brief.definition_of_done",
-                "Learner briefs must explain what done looks like for the module.",
+                f"deliverables.{deliverable.id}.learner_brief.definition_of_done",
+                "Learner briefs must explain what done looks like for the deliverable.",
             )
-        if not module.learner_brief.example_scenarios:
+        if not deliverable.learner_brief.example_scenarios:
             add_issue(
                 ValidationLevel.warning,
                 "missing_examples",
-                f"modules.{module.id}.learner_brief.example_scenarios",
+                f"deliverables.{deliverable.id}.learner_brief.example_scenarios",
                 "Add at least one concrete learner-facing example or scenario.",
             )
         learner_brief_text = " ".join(
             [
-                module.learner_brief.why_this_module_matters,
-                module.learner_brief.task_to_build,
-                *module.learner_brief.example_scenarios,
+                deliverable.learner_brief.why_this_deliverable_matters,
+                deliverable.learner_brief.task_to_build,
+                *deliverable.learner_brief.example_scenarios,
             ]
         ).lower()
         if "hidden checkpoint" in learner_brief_text or "active checks" in learner_brief_text:
             add_issue(
                 ValidationLevel.error,
                 "internal_jargon_in_brief",
-                f"modules.{module.id}.learner_brief",
+                f"deliverables.{deliverable.id}.learner_brief",
                 "Learner briefs should explain the task without internal checkpoint or grader jargon.",
             )
-        if module.learning_outcomes:
+        if deliverable.learning_outcomes:
             alignment_text = " ".join(
                 [
-                    module.title,
-                    module.objective,
-                    module.learner_brief.task_to_build,
-                    *module.learner_brief.definition_of_done,
-                    *module.learner_brief.example_scenarios,
+                    deliverable.title,
+                    deliverable.objective,
+                    deliverable.learner_brief.task_to_build,
+                    *deliverable.learner_brief.definition_of_done,
+                    *deliverable.learner_brief.example_scenarios,
                 ]
             ).lower()
-            if not any(token in alignment_text for token in _alignment_tokens(module.learning_outcomes)):
+            if not any(token in alignment_text for token in _alignment_tokens(deliverable.learning_outcomes)):
                 add_issue(
                     ValidationLevel.warning,
-                    "module_learning_outcomes_need_alignment_review",
-                    f"modules.{module.id}.learning_outcomes",
+                    "deliverable_learning_outcomes_need_alignment_review",
+                    f"deliverables.{deliverable.id}.learning_outcomes",
                     "The learning outcomes do not obviously line up with the learner brief. Review them before publish.",
                 )
-        if not module.public_checks:
+        if not deliverable.public_checks:
             add_issue(
                 ValidationLevel.error,
                 "missing_public_checks",
-                f"modules.{module.id}.public_checks",
-                "Each module needs learner-visible public checks before it can be reviewed or published.",
+                f"deliverables.{deliverable.id}.public_checks",
+                "Each deliverable needs learner-visible public checks before it can be reviewed or published.",
             )
         seen_public_check_ids: set[str] = set()
         active_behavior_ids = set(gate.active_behavior_ids)
         active_quality_ids = set(gate.active_quality_ids)
-        for index, public_check in enumerate(module.public_checks):
-            location = f"modules.{module.id}.public_checks[{index}]"
+        for index, public_check in enumerate(deliverable.public_checks):
+            location = f"deliverables.{deliverable.id}.public_checks[{index}]"
             if public_check.id in seen_public_check_ids:
                 add_issue(
                     ValidationLevel.error,
@@ -353,7 +353,7 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     ValidationLevel.error,
                     "inactive_public_check_behavior",
                     f"{location}.covers_behavior_ids",
-                    "Public checks can only reference active behaviors for the module: "
+                    "Public checks can only reference active behaviors for the deliverable: "
                     + ", ".join(f"'{item}'" for item in invalid_behavior_ids),
                 )
             invalid_quality_ids = sorted(set(public_check.covers_quality_ids) - active_quality_ids)
@@ -362,7 +362,7 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     ValidationLevel.error,
                     "inactive_public_check_quality",
                     f"{location}.covers_quality_ids",
-                    "Public checks can only reference active qualities for the module: "
+                    "Public checks can only reference active qualities for the deliverable: "
                     + ", ".join(f"'{item}'" for item in invalid_quality_ids),
                 )
             if not public_check.covers_behavior_ids and not public_check.covers_quality_ids:
@@ -372,31 +372,31 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     location,
                     "Public checks should map to at least one active behavior or quality so reviewers can verify intent.",
                 )
-        if len(module.public_checks) > 4:
+        if len(deliverable.public_checks) > 4:
             add_issue(
                 ValidationLevel.warning,
                 "too_many_public_checks",
-                f"modules.{module.id}.public_checks",
-                "Keep learner-visible checks focused. More than four checks usually signals that the module should rely on the hidden grader for depth.",
+                f"deliverables.{deliverable.id}.public_checks",
+                "Keep learner-visible checks focused. More than four checks usually signals that the deliverable should rely on the hidden grader for depth.",
             )
         if spec.assessment_strategy.hidden_grader_required and not coverage.hidden_test_ids:
             add_issue(
                 ValidationLevel.error,
                 "missing_hidden_grader_coverage",
-                f"modules.{module.id}",
+                f"deliverables.{deliverable.id}",
                 "Each review area needs at least one hidden grader test so submission feedback can go deeper than the public checks.",
             )
         elif spec.assessment_strategy.hidden_grader_required and not coverage.hidden_case_ids:
             add_issue(
                 ValidationLevel.error,
                 "missing_hidden_eval_cases",
-                f"modules.{module.id}",
+                f"deliverables.{deliverable.id}",
                 "Hidden grader coverage must exercise at least one tagged eval case for this review area.",
             )
 
     for case in spec.eval_dataset.cases:
         explicit_tags = set(case.tags)
-        invalid_tags = sorted(explicit_tags - module_ids - RESERVED_REVIEW_AREA_TAGS)
+        invalid_tags = sorted(explicit_tags - deliverable_ids - RESERVED_REVIEW_AREA_TAGS)
         if invalid_tags:
             add_issue(
                 ValidationLevel.error,
@@ -415,12 +415,12 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
             )
 
     for behavior in spec.behaviors:
-        if behavior.first_required_in not in module_ids:
+        if behavior.first_required_in not in deliverable_ids:
             add_issue(
                 ValidationLevel.error,
-                "unknown_behavior_module",
+                "unknown_behavior_deliverable",
                 f"behaviors.{behavior.id}.first_required_in",
-                f"Unknown module '{behavior.first_required_in}'.",
+                f"Unknown deliverable '{behavior.first_required_in}'.",
             )
 
         test = behavior.test
@@ -572,12 +572,12 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     )
 
     for quality in spec.qualities:
-        if quality.first_required_in not in module_ids:
+        if quality.first_required_in not in deliverable_ids:
             add_issue(
                 ValidationLevel.error,
-                "unknown_quality_module",
+                "unknown_quality_deliverable",
                 f"qualities.{quality.id}.first_required_in",
-                f"Unknown module '{quality.first_required_in}'.",
+                f"Unknown deliverable '{quality.first_required_in}'.",
             )
 
         test = quality.test
@@ -680,12 +680,12 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
         valid=not errors,
         errors=errors,
         warnings=warnings,
-        module_gates=_gate_summaries(spec),
+        deliverable_gates=_gate_summaries(spec),
     )
 
 
-def compute_task_agent_gate(spec: TaskAgentServiceSpec, module_id: str) -> ModuleGate:
-    return spec.gate_for(module_id)
+def compute_task_agent_gate(spec: TaskAgentServiceSpec, deliverable_id: str) -> DeliverableGate:
+    return spec.gate_for(deliverable_id)
 
 
 def _alignment_tokens(outcomes: list[str]) -> set[str]:
@@ -701,7 +701,7 @@ def _alignment_tokens(outcomes: list[str]) -> set[str]:
         "your",
         "each",
         "learner",
-        "module",
+        "deliverable",
         "service",
         "system",
         "visible",

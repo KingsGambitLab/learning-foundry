@@ -13,9 +13,9 @@ from app.domain.course import (
     CourseRun,
     CreatorCourseSetupChoices,
     CreatorCourseSetupInput,
-    CreatorCourseModulePlan,
+    CreatorCourseDeliverablePlan,
     CreatorCoursePlan,
-    CreateCourseModuleRequest,
+    CreateCourseDeliverableRequest,
     CreateCourseRunRequest,
     GenerateCreatorCoursePlanRequest,
     GenerateCreatorCoursePlanResponse,
@@ -32,6 +32,7 @@ from app.domain.task_agent import (
     DataSourceKind,
     DataSourcePurpose,
     DataSourceSpec,
+    ProjectFamily,
     ProgressionMode,
     RetrievalMode,
     WorkspaceScope,
@@ -143,15 +144,15 @@ class CourseGenerationService:
             normalized_plan.shared_design_spec,
             resolved_setup,
         )
-        creator_modules = self._creator_plan_modules(
+        creator_deliverables = self._creator_plan_deliverables(
             request=plan_request,
             design_spec=adjusted_shared_design_spec,
-            default_modules=normalized_plan.modules,
+            default_deliverables=normalized_plan.deliverables,
             creator_summary=normalized_plan.summary,
             creator_choices=resolved_setup,
         )
         normalized_outcomes = self._derive_plan_learning_outcomes(
-            creator_modules,
+            creator_deliverables,
             adjusted_shared_design_spec,
         )
         creator_plan = CreatorCoursePlan(
@@ -162,13 +163,13 @@ class CourseGenerationService:
             package_type=normalized_plan.package_type,
             creator_choices=resolved_setup,
             shared_design_spec=adjusted_shared_design_spec,
-            modules=creator_modules,
+            deliverables=creator_deliverables,
             creator_summary=self._creator_summary(adjusted_shared_design_spec, resolved_setup),
             notes=list(
                 dict.fromkeys(
                     [
                         *normalized_plan.notes,
-                        "Review the module ladder before creating the draft.",
+                        "Review the deliverable plan before creating the draft.",
                         "The approved creator plan feeds the same course-generation and review pipeline.",
                     ]
                 )
@@ -193,19 +194,19 @@ class CourseGenerationService:
                 summary=generated_plan.summary,
                 package_type=generated_plan.package_type,
                 shared_design_spec=generated_plan.shared_design_spec,
-                modules=generated_plan.modules,
+                deliverables=generated_plan.deliverables,
             )
         )
-        if len(course_run.modules) == len(plan.modules):
-            for stored_module, planned_module in zip(course_run.modules, plan.modules, strict=False):
-                stored_module.title = planned_module.title
-                stored_module.summary = planned_module.summary
-                stored_module.learning_outcomes = list(planned_module.learning_outcomes)
-                stored_module.notes = list(
+        if len(course_run.deliverables) == len(plan.deliverables):
+            for stored_deliverable, planned_deliverable in zip(course_run.deliverables, plan.deliverables, strict=False):
+                stored_deliverable.title = planned_deliverable.title
+                stored_deliverable.summary = planned_deliverable.summary
+                stored_deliverable.learning_outcomes = list(planned_deliverable.learning_outcomes)
+                stored_deliverable.notes = list(
                     dict.fromkeys(
                         [
-                            *stored_module.notes,
-                            *planned_module.creator_notes,
+                            *stored_deliverable.notes,
+                            *planned_deliverable.creator_notes,
                         ]
                     )
                 )
@@ -215,6 +216,8 @@ class CourseGenerationService:
                     *course_run.notes,
                     "Draft created from an approved creator plan.",
                     f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
+                    *([f"Implementation language: `{plan.creator_choices.implementation_language}`."] if plan.creator_choices.implementation_language else []),
+                    *([f"Application framework: `{plan.creator_choices.application_framework}`."] if plan.creator_choices.application_framework else []),
                     *( [f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else [] ),
                     *( [f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else [] ),
                     *(
@@ -237,10 +240,13 @@ class CourseGenerationService:
             course_run.id,
             "creator_plan_accepted",
             {
-                "module_count": len(plan.modules),
+                "deliverable_count": len(plan.deliverables),
+                "deliverable_count": len(plan.deliverables),
                 "goal": plan.goal,
                 "learning_outcome_count": len(plan.learning_outcomes),
                 "starter_type": plan.creator_choices.starter_type.value,
+                "implementation_language": plan.creator_choices.implementation_language,
+                "application_framework": plan.creator_choices.application_framework,
                 "primary_database": plan.creator_choices.primary_database,
                 "cache_backend": plan.creator_choices.cache_backend,
                 "data_source_count": len(plan.creator_choices.data_sources),
@@ -270,8 +276,10 @@ class CourseGenerationService:
             dict.fromkeys(
                 [
                     *course_run.notes,
-                    "Creator-approved module plan queued.",
+                    "Creator-approved deliverable plan queued.",
                     f"Starter preference: `{plan.creator_choices.starter_type.value}`.",
+                    *([f"Implementation language: `{plan.creator_choices.implementation_language}`."] if plan.creator_choices.implementation_language else []),
+                    *([f"Application framework: `{plan.creator_choices.application_framework}`."] if plan.creator_choices.application_framework else []),
                     *([f"Primary database: `{plan.creator_choices.primary_database}`."] if plan.creator_choices.primary_database else []),
                     *([f"Cache backend: `{plan.creator_choices.cache_backend}`."] if plan.creator_choices.cache_backend else []),
                     *(
@@ -291,14 +299,17 @@ class CourseGenerationService:
             course_run.id,
             "creator_plan_accepted",
             {
-                "module_count": len(plan.modules),
+                "deliverable_count": len(plan.deliverables),
+                "deliverable_count": len(plan.deliverables),
                 "goal": plan.goal,
                 "learning_outcome_count": len(plan.learning_outcomes),
                 "starter_type": plan.creator_choices.starter_type.value,
+                "implementation_language": plan.creator_choices.implementation_language,
+                "application_framework": plan.creator_choices.application_framework,
                 "primary_database": plan.creator_choices.primary_database,
                 "cache_backend": plan.creator_choices.cache_backend,
                 "data_source_count": len(plan.creator_choices.data_sources),
-                "message": "Approved module plan accepted. Building the draft in the background.",
+                "message": "Approved deliverable plan accepted. Building the draft in the background.",
             },
         )
         self.course_workflow_service.store.append_course_event(
@@ -327,7 +338,7 @@ class CourseGenerationService:
                 summary=normalized_plan.summary,
                 package_type=normalized_plan.package_type,
                 shared_design_spec=normalized_plan.shared_design_spec,
-                modules=normalized_plan.modules,
+                deliverables=normalized_plan.deliverables,
             )
         )
         aligned_plan = self.course_workflow_service.generated_plan_from_run(
@@ -336,7 +347,7 @@ class CourseGenerationService:
         )
         course_run.goal = request.goal
         course_run.requested_learning_outcomes = self._derive_plan_learning_outcomes(
-            aligned_plan.modules,
+            aligned_plan.deliverables,
             aligned_plan.shared_design_spec,
         )
         course_run.generated_plan = aligned_plan
@@ -418,16 +429,16 @@ class CourseGenerationService:
                 execute_shared_workflow_nodes=False,
                 clear_active_operation=False,
             )
-            if len(built.modules) == len(plan.modules):
-                for stored_module, planned_module in zip(built.modules, plan.modules, strict=False):
-                    stored_module.title = planned_module.title
-                    stored_module.summary = planned_module.summary
-                    stored_module.learning_outcomes = list(planned_module.learning_outcomes)
-                    stored_module.notes = list(
+            if len(built.deliverables) == len(plan.deliverables):
+                for stored_deliverable, planned_deliverable in zip(built.deliverables, plan.deliverables, strict=False):
+                    stored_deliverable.title = planned_deliverable.title
+                    stored_deliverable.summary = planned_deliverable.summary
+                    stored_deliverable.learning_outcomes = list(planned_deliverable.learning_outcomes)
+                    stored_deliverable.notes = list(
                         dict.fromkeys(
                             [
-                                *stored_module.notes,
-                                *planned_module.creator_notes,
+                                *stored_deliverable.notes,
+                                *planned_deliverable.creator_notes,
                             ]
                         )
                     )
@@ -451,7 +462,8 @@ class CourseGenerationService:
                 built.id,
                 "creator_plan_applied",
                 {
-                    "module_count": len(plan.modules),
+                    "deliverable_count": len(plan.deliverables),
+                    "deliverable_count": len(plan.deliverables),
                     "message": "Draft shell created from the approved creator plan. Review checks are still running.",
                 },
             )
@@ -501,7 +513,7 @@ class CourseGenerationService:
             "course_generation_completed",
             {
                 "message": completion_message,
-                "deliverable_count": len(course_run.modules),
+                "deliverable_count": len(course_run.deliverables),
                 "shared_workflow_run_id": course_run.shared_workflow_run_id,
             },
         )
@@ -545,27 +557,27 @@ class CourseGenerationService:
             plan.shared_design_spec,
             plan.creator_choices,
         )
-        modules = [
-            CreateCourseModuleRequest(
-                module_slug=module.module_slug,
-                title=module.title,
-                summary=module.summary,
-                learning_outcomes=module.learning_outcomes,
-                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or shared_design_spec, plan.creator_choices),
+        deliverables = [
+            CreateCourseDeliverableRequest(
+                deliverable_slug=deliverable.deliverable_slug,
+                title=deliverable.title,
+                summary=deliverable.summary,
+                learning_outcomes=deliverable.learning_outcomes,
+                design_spec=self._apply_creator_choices_to_design_spec(deliverable.design_spec or shared_design_spec, plan.creator_choices),
             )
-            for module in plan.modules
+            for deliverable in plan.deliverables
         ]
         return GeneratedCoursePlan(
             title=plan.title,
             summary=plan.summary,
             package_type=plan.package_type,
             shared_design_spec=shared_design_spec,
-            modules=modules,
+            deliverables=deliverables,
             notes=list(
                 dict.fromkeys(
                     [
                         *plan.notes,
-                        "Creator-approved module plan.",
+                        "Creator-approved deliverable plan.",
                     ]
                 )
             ),
@@ -583,6 +595,8 @@ class CourseGenerationService:
             problem_statement=request.goal,
             package_type_hint=request.package_type_hint or plan.package_type,
             starter_type=creator_choices.starter_type,
+            implementation_language=creator_choices.implementation_language,
+            application_framework=creator_choices.application_framework,
             primary_database=creator_choices.primary_database,
             cache_backend=creator_choices.cache_backend,
             tech_stack=list(creator_choices.tech_stack),
@@ -593,6 +607,8 @@ class CourseGenerationService:
             problem_statement=intake.problem_statement,
             package_type_hint=intake.package_type_hint,
             starter_type=intake.starter_type,
+            implementation_language=intake.implementation_language,
+            application_framework=intake.application_framework,
             primary_database=intake.primary_database,
             cache_backend=intake.cache_backend,
             tech_stack=intake.tech_stack,
@@ -613,19 +629,19 @@ class CourseGenerationService:
         shared_design_spec = self._apply_creator_choices_to_design_spec(shared_design_spec, creator_choices)
         normalized.shared_design_spec = shared_design_spec
 
-        modules: list[CreateCourseModuleRequest] = []
-        for module in normalized.modules:
-            design_spec = module.design_spec or shared_design_spec
+        deliverables: list[CreateCourseDeliverableRequest] = []
+        for deliverable in normalized.deliverables:
+            design_spec = deliverable.design_spec or shared_design_spec
             design_spec = self._with_package_type(design_spec, normalized.package_type)
             design_spec = self._apply_creator_choices_to_design_spec(design_spec, creator_choices)
             learning_outcomes = self._normalize_learning_outcomes(
-                module.learning_outcomes or self._derive_module_learning_outcomes(module.title, module.summary or module.title, design_spec)
+                deliverable.learning_outcomes or self._derive_deliverable_learning_outcomes(deliverable.title, deliverable.summary or deliverable.title, design_spec)
             )
-            modules.append(
-                CreateCourseModuleRequest(
-                    module_slug=module.module_slug,
-                    title=module.title.strip(),
-                    summary=(module.summary or module.title).strip(),
+            deliverables.append(
+                CreateCourseDeliverableRequest(
+                    deliverable_slug=deliverable.deliverable_slug,
+                    title=deliverable.title.strip(),
+                    summary=(deliverable.summary or deliverable.title).strip(),
                     learning_outcomes=learning_outcomes[:3],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
@@ -633,16 +649,16 @@ class CourseGenerationService:
                 )
             )
 
-        if not modules:
-            modules = self._fallback_modules(request, shared_design_spec, normalized.package_type)
+        if not deliverables:
+            deliverables = self._fallback_deliverables(request, shared_design_spec, normalized.package_type)
 
         if normalized.package_type == PackageType.progressive_codebase_course:
-            modules = [
-                module.model_copy(update={"design_spec": shared_design_spec})
-                for module in modules
+            deliverables = [
+                deliverable.model_copy(update={"design_spec": shared_design_spec})
+                for deliverable in deliverables
             ]
 
-        normalized.modules = modules
+        normalized.deliverables = deliverables
         normalized.notes = list(dict.fromkeys(normalized.notes))
         return normalized
 
@@ -654,6 +670,8 @@ class CourseGenerationService:
             problem_statement=request.goal,
             package_type_hint=request.package_type_hint,
             starter_type=creator_choices.starter_type,
+            implementation_language=creator_choices.implementation_language,
+            application_framework=creator_choices.application_framework,
             primary_database=creator_choices.primary_database,
             cache_backend=creator_choices.cache_backend,
             tech_stack=list(creator_choices.tech_stack),
@@ -671,22 +689,23 @@ class CourseGenerationService:
             summary=request.goal.strip(),
             package_type=package_type,
             shared_design_spec=design_spec,
-            modules=self._fallback_modules(request, design_spec, package_type),
+            deliverables=self._fallback_deliverables(request, design_spec, package_type),
             notes=[
                 "Built from deterministic fallback planning.",
                 "The course structure was inferred from the explicit assignment design because live OpenAI planning was unavailable.",
             ],
         )
 
-    def _fallback_modules(
+    def _fallback_deliverables(
         self,
         request: GenerateCourseFromBriefRequest,
         design_spec: AssignmentDesignSpec,
         package_type: PackageType,
-    ) -> list[CreateCourseModuleRequest]:
+    ) -> list[CreateCourseDeliverableRequest]:
+        family = design_spec.project_contract.family
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
             return [
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Corpus ingestion and chunking",
                     summary="Stand up the retrieval substrate and make the corpus queryable.",
                     learning_outcomes=[
@@ -697,7 +716,7 @@ class CourseGenerationService:
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Grounded retrieval and citations",
                     summary="Return answers that stay anchored to the corpus and cite supporting evidence.",
                     learning_outcomes=[
@@ -708,7 +727,7 @@ class CourseGenerationService:
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Quality tuning and evals",
                     summary="Improve answer quality with decomposition, reranking, and eval-driven iteration.",
                     learning_outcomes=[
@@ -718,7 +737,7 @@ class CourseGenerationService:
                     design_spec=design_spec,
                     overlays_hint=["productionization_overlay"],
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Scale, freshness, and final SLO",
                     summary="Push the system to production bars for latency, freshness, and operating cost.",
                     learning_outcomes=[
@@ -732,7 +751,7 @@ class CourseGenerationService:
 
         if design_spec.capabilities.retrieval_mode == RetrievalMode.ranked_results:
             return [
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Index design and retrieval contract",
                     summary="Build the corpus, query interface, and ranking baseline.",
                     learning_outcomes=[
@@ -743,7 +762,7 @@ class CourseGenerationService:
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Ranking quality and filtering",
                     summary="Improve retrieval precision, ordering, and metadata-aware filters.",
                     learning_outcomes=[
@@ -754,7 +773,7 @@ class CourseGenerationService:
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=list(design_spec.overlays),
                 ),
-                CreateCourseModuleRequest(
+                CreateCourseDeliverableRequest(
                     title="Production retrieval final",
                     summary="Meet quality and latency expectations for a production retrieval service.",
                     learning_outcomes=[
@@ -766,117 +785,241 @@ class CourseGenerationService:
                 ),
             ]
 
-        if design_spec.capabilities.durable_state_required and not design_spec.capabilities.tool_use_required:
+        return self._compile_contract_deliverables(design_spec, package_type)
+
+    def _compile_contract_deliverables(
+        self,
+        design_spec: AssignmentDesignSpec,
+        package_type: PackageType,
+    ) -> list[CreateCourseDeliverableRequest]:
+        contract = design_spec.project_contract
+        runtime_binding = contract.runtime_binding
+        read_focus = contract.primary_read_paths[0] if contract.primary_read_paths else "serve the main request path reliably"
+        write_focus = (
+            contract.primary_write_paths[0]
+            if contract.primary_write_paths
+            else "apply changes without breaking the public contract"
+        )
+        invariant_focus = contract.invariants[0] if contract.invariants else "preserve the public contract for supported requests"
+        operational_focus = (
+            ", ".join(contract.operational_concerns[:2])
+            if contract.operational_concerns
+            else "observability and reliability"
+        )
+        runtime_focus = (
+            runtime_binding.integration_points[0]
+            if runtime_binding.integration_points
+            else "Integrate the runtime pieces without breaking the project contract."
+        )
+        seed_focus = (
+            runtime_binding.seed_artifacts[0]
+            if runtime_binding.seed_artifacts
+            else "Keep the starter and seeded data honest enough for the visible checks."
+        )
+        service_labels = [
+            binding.technology or binding.service_id
+            for binding in runtime_binding.backing_services
+        ]
+        services_summary = ", ".join(service_labels[:2]) if service_labels else "the runtime dependencies"
+        base_overlays = list(design_spec.overlays)
+
+        if contract.family == ProjectFamily.control_plane_service:
+            deliverables = [
+                CreateCourseDeliverableRequest(
+                    title="Evaluation contract and state model",
+                    summary=f"Define the control-plane surface, core entities, and invariants so the service can {read_focus}.",
+                    learning_outcomes=[
+                        f"Model the service around the invariant that {invariant_focus.rstrip('.')}.",
+                        "Make the evaluation contract deterministic enough to debug confidently.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Live read path and decision logic",
+                    summary=f"Implement the main read path so the service can {read_focus}.",
+                    learning_outcomes=[
+                        "Build the read path around clear decision rules and request context.",
+                        "Keep read behavior understandable enough to explain why each decision happened.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Safe mutation path and runtime integration",
+                    summary=f"Connect {services_summary} and the mutation path so the service can {write_focus}.",
+                    learning_outcomes=[
+                        f"Wire the runtime around {services_summary} without losing configuration coherence.",
+                        seed_focus,
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Auditability and production confidence",
+                    summary=f"Raise the service to a production bar for {operational_focus}.",
+                    learning_outcomes=[
+                        "Record enough traces and audit evidence for an operator to trust the system.",
+                        "Harden the project against realistic rollout and incident scenarios.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=["productionization_overlay", "scale_slo_overlay"],
+                ),
+            ]
+            return deliverables
+
+        if contract.family == ProjectFamily.transactional_stateful_service:
             return [
-                CreateCourseModuleRequest(
-                    title="Contract and data model",
-                    summary="Define the service surface, persistence model, and baseline invariants.",
+                CreateCourseDeliverableRequest(
+                    title="Service contract and durable model",
+                    summary=f"Define the service surface, core entities, and persistence plan so the system can {read_focus}.",
                     learning_outcomes=[
-                        "Define the service contract and persistence model around the core invariants.",
-                        "Model data so the workflow can stay correct as mutable state changes.",
+                        f"Model the durable state around the invariant that {invariant_focus.rstrip('.')}.",
+                        "Define a service contract that stays stable as state changes.",
                     ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
-                    overlays_hint=list(design_spec.overlays),
+                    overlays_hint=base_overlays,
                 ),
-                CreateCourseModuleRequest(
-                    title="Correctness under concurrency",
-                    summary="Make the state transitions safe under duplicate requests and parallel access.",
+                CreateCourseDeliverableRequest(
+                    title="Read and write path correctness",
+                    summary=f"Implement the main read and write paths so the service can {write_focus}.",
                     learning_outcomes=[
-                        "Keep concurrent or repeated requests from breaking critical invariants.",
-                        "Use retries, idempotency, or locking to make mutable state safe under load.",
+                        "Keep repeated or concurrent requests from breaking critical state transitions.",
+                        "Connect the core read and write paths without hiding correctness tradeoffs.",
                     ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
-                    overlays_hint=list(design_spec.overlays),
+                    overlays_hint=base_overlays,
                 ),
-                CreateCourseModuleRequest(
-                    title="Throughput and production final",
-                    summary="Harden the service for real traffic, latency, and failure handling.",
+                CreateCourseDeliverableRequest(
+                    title="Runtime integration and failure recovery",
+                    summary=f"Connect {services_summary} and recovery behavior so the service can stay correct under load.",
                     learning_outcomes=[
-                        "Raise the service to a production-minded bar for throughput, latency, and reliability.",
-                        "Make stateful failures visible enough for an operator to debug them confidently.",
+                        runtime_focus,
+                        seed_focus,
                     ],
                     design_spec=design_spec,
-                    overlays_hint=["scale_slo_overlay"],
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Operational hardening",
+                    summary=f"Raise the project to a production-minded bar for {operational_focus}.",
+                    learning_outcomes=[
+                        "Make failures visible enough for an operator to debug them quickly.",
+                        "Push the project toward believable production reliability and latency.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=["productionization_overlay", "scale_slo_overlay"],
                 ),
             ]
 
-        modules = [
-            CreateCourseModuleRequest(
-                title="Run contract and structured output",
-                summary="Get the service onto a stable run contract with a reliable output schema.",
-                learning_outcomes=[
-                    "Implement a stable run contract with the expected structured response shape.",
-                    "Return reliable outputs for the visible scenarios before adding deeper controls.",
-                ],
-                design_spec=design_spec,
-                domain_pack_hint=design_spec.domain_pack,
-                overlays_hint=list(design_spec.overlays),
-            ),
-            CreateCourseModuleRequest(
-                title="Tooling and control flow",
-                summary="Teach the system how to choose tools and execute bounded workflows.",
-                learning_outcomes=[
-                    "Choose the right tools and bounded control flow for the supported workflow paths.",
-                    "Keep tool usage explicit enough that the learner can debug why each step happened.",
-                ],
-                design_spec=design_spec,
-                domain_pack_hint=design_spec.domain_pack,
-                overlays_hint=list(design_spec.overlays),
-            ),
-            CreateCourseModuleRequest(
-                title="Approvals, fallbacks, and observability",
-                    summary="Add safety controls, error recovery, and traces that make the system operable.",
+        if contract.family == ProjectFamily.workflow_agent_service:
+            deliverables = [
+                CreateCourseDeliverableRequest(
+                    title="Request contract and bounded workflow",
+                    summary=f"Define the workflow surface so the service can {read_focus}.",
                     learning_outcomes=[
-                        "Add approvals and fallback behavior without breaking the public contract.",
-                        "Emit observability signals that make failures understandable to an operator.",
+                        "Define the request and response contract around bounded workflow steps.",
+                        f"Keep the workflow honest about the invariant that {invariant_focus.rstrip('.')}.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Routing, tools, and control flow",
+                    summary=f"Implement the workflow path so the service can {write_focus}.",
+                    learning_outcomes=[
+                        "Choose tools and control flow deliberately enough to explain each step.",
+                        "Keep bounded routing behavior stable across the visible scenarios.",
+                    ],
+                    design_spec=design_spec,
+                    domain_pack_hint=design_spec.domain_pack,
+                    overlays_hint=base_overlays,
+                ),
+                CreateCourseDeliverableRequest(
+                    title="Fallbacks, approvals, and runtime wiring",
+                    summary=f"Connect {services_summary} and the failure path so the project can stay operable.",
+                    learning_outcomes=[
+                        runtime_focus,
+                        "Add fallback or approval behavior without breaking the public contract.",
                     ],
                     design_spec=design_spec,
                     domain_pack_hint=design_spec.domain_pack,
                     overlays_hint=["productionization_overlay"],
-            ),
-        ]
-        if package_type == PackageType.progressive_codebase_course:
-            modules.extend(
-                [
-                    CreateCourseModuleRequest(
-                        title="Eval-driven quality improvements",
-                        summary="Use evals to improve reliability, escalation quality, and output usefulness.",
+                ),
+            ]
+            if package_type == PackageType.progressive_codebase_course:
+                deliverables.append(
+                    CreateCourseDeliverableRequest(
+                        title="Evaluation and production polish",
+                        summary=f"Use evaluation feedback to raise the workflow to a production bar for {operational_focus}.",
                         learning_outcomes=[
-                            "Use evaluation feedback to improve behavior without guessing what changed.",
-                            "Tighten the system while protecting earlier supported scenarios from regression.",
-                        ],
-                        design_spec=design_spec,
-                        domain_pack_hint=design_spec.domain_pack,
-                        overlays_hint=["productionization_overlay"],
-                    ),
-                    CreateCourseModuleRequest(
-                        title="Production final at SLO",
-                        summary="Push the system to its final reliability, latency, and cost bar.",
-                        learning_outcomes=[
-                            "Integrate the full system until it meets a production-minded reliability and latency bar.",
-                            "Balance quality, latency, and cost without regressing the learner-visible contract.",
+                            "Use evaluation feedback to improve workflow quality without guessing what regressed.",
+                            "Balance reliability, latency, and operator visibility in the final system.",
                         ],
                         design_spec=design_spec,
                         domain_pack_hint=design_spec.domain_pack,
                         overlays_hint=["productionization_overlay", "scale_slo_overlay"],
-                    ),
-                ]
-            )
-        return modules
+                    )
+                )
+            return deliverables
 
-    def _creator_plan_modules(
+        deliverables = [
+            CreateCourseDeliverableRequest(
+                title="Project contract and core behavior",
+                summary=f"Define the service surface, core entities, and visible behavior so the project can {read_focus}.",
+                learning_outcomes=[
+                    "Turn the project brief into a bounded contract with clear observable behavior.",
+                    f"Keep the implementation aligned to the invariant that {invariant_focus.rstrip('.')}.",
+                ],
+                design_spec=design_spec,
+                domain_pack_hint=design_spec.domain_pack,
+                overlays_hint=base_overlays,
+            ),
+            CreateCourseDeliverableRequest(
+                title="Runtime integrations and data flow",
+                summary=f"Connect {services_summary} and the main workflow so the project can {write_focus}.",
+                learning_outcomes=[
+                    runtime_focus,
+                    seed_focus,
+                ],
+                design_spec=design_spec,
+                domain_pack_hint=design_spec.domain_pack,
+                overlays_hint=base_overlays,
+            ),
+            CreateCourseDeliverableRequest(
+                title="Quality signals and production hardening",
+                summary=f"Add checks, observability, and operational polish around {operational_focus}.",
+                learning_outcomes=[
+                    "Make failures and regressions visible through explicit checks and diagnostics.",
+                    "Raise the project to a production-minded bar for reliability and operator trust.",
+                ],
+                design_spec=design_spec,
+                domain_pack_hint=design_spec.domain_pack,
+                overlays_hint=["productionization_overlay", "scale_slo_overlay"],
+            ),
+        ]
+        return deliverables
+
+    def _creator_plan_deliverables(
         self,
         *,
         request: GenerateCourseFromBriefRequest,
         design_spec: AssignmentDesignSpec,
-        default_modules: list[CreateCourseModuleRequest],
+        default_deliverables: list[CreateCourseDeliverableRequest],
         creator_summary: str,
         creator_choices,
-    ) -> list[CreatorCourseModulePlan]:
+    ) -> list[CreatorCourseDeliverablePlan]:
         text = " ".join([request.goal, creator_summary]).lower()
-        modules: list[CreateCourseModuleRequest]
+        deliverables: list[CreateCourseDeliverableRequest]
         if (
             design_spec.capabilities.durable_state_required
             and any(keyword in text for keyword in ["flight", "booking", "reservation", "inventory"])
@@ -888,9 +1031,9 @@ class CourseGenerationService:
                 else "Improve read-path performance without breaking booking correctness."
             )
             db_label = creator_choices.primary_database or "the primary database"
-            modules = [
-                CreateCourseModuleRequest(
-                    module_slug="exercise/01-core-booking-flow",
+            deliverables = [
+                CreateCourseDeliverableRequest(
+                    deliverable_slug="exercise/01-core-booking-flow",
                     title="Core booking contract and seat inventory",
                     summary="Model the booking flow, inventory records, and baseline invariants before adding concurrency controls.",
                     learning_outcomes=[
@@ -899,8 +1042,8 @@ class CourseGenerationService:
                     ],
                     design_spec=design_spec,
                 ),
-                CreateCourseModuleRequest(
-                    module_slug="exercise/02-pessimistic-locking",
+                CreateCourseDeliverableRequest(
+                    deliverable_slug="exercise/02-pessimistic-locking",
                     title=f"Pessimistic locking in {db_label}",
                     summary="Prevent overselling by introducing pessimistic locking around the critical reservation path.",
                     learning_outcomes=[
@@ -909,8 +1052,8 @@ class CourseGenerationService:
                     ],
                     design_spec=design_spec,
                 ),
-                CreateCourseModuleRequest(
-                    module_slug="exercise/03-optimistic-locking",
+                CreateCourseDeliverableRequest(
+                    deliverable_slug="exercise/03-optimistic-locking",
                     title=f"Optimistic locking and retries in {db_label}",
                     summary="Shift the booking path to optimistic control with version checks, retries, and clear failure responses.",
                     learning_outcomes=[
@@ -919,8 +1062,8 @@ class CourseGenerationService:
                     ],
                     design_spec=design_spec,
                 ),
-                CreateCourseModuleRequest(
-                    module_slug="exercise/04-caching",
+                CreateCourseDeliverableRequest(
+                    deliverable_slug="exercise/04-caching",
                     title=f"{cache_label} for availability reads",
                     summary=cache_summary,
                     learning_outcomes=[
@@ -929,8 +1072,8 @@ class CourseGenerationService:
                     ],
                     design_spec=design_spec,
                 ),
-                CreateCourseModuleRequest(
-                    module_slug="final/production-readiness",
+                CreateCourseDeliverableRequest(
+                    deliverable_slug="final/production-readiness",
                     title="Production hardening and failure drills",
                     summary="Pull the booking service together with observability, retries, and realistic operational drills.",
                     learning_outcomes=[
@@ -943,33 +1086,36 @@ class CourseGenerationService:
                 ),
             ]
         else:
-            fallback_modules = self._fallback_modules(
+            fallback_deliverables = self._fallback_deliverables(
                 request,
                 design_spec,
                 design_spec.course_structure.package_type,
             )
-            if fallback_modules and len(default_modules) > len(fallback_modules):
-                modules = fallback_modules
+            if fallback_deliverables and (
+                len(default_deliverables) > len(fallback_deliverables)
+                or self._deliverable_plan_needs_override(default_deliverables, design_spec)
+            ):
+                deliverables = fallback_deliverables
             else:
-                modules = default_modules
+                deliverables = default_deliverables
 
         return [
-            CreatorCourseModulePlan(
-                module_slug=module.module_slug or f"module-{index}",
-                title=module.title,
-                summary=module.summary or module.title,
+            CreatorCourseDeliverablePlan(
+                deliverable_slug=deliverable.deliverable_slug or f"deliverable-{index}",
+                title=deliverable.title,
+                summary=deliverable.summary or deliverable.title,
                 learning_outcomes=self._normalize_learning_outcomes(
-                    module.learning_outcomes
-                    or self._derive_module_learning_outcomes(
-                        module.title,
-                        module.summary or module.title,
-                        module.design_spec or design_spec,
+                    deliverable.learning_outcomes
+                    or self._derive_deliverable_learning_outcomes(
+                        deliverable.title,
+                        deliverable.summary or deliverable.title,
+                        deliverable.design_spec or design_spec,
                     )
                 ),
-                creator_notes=self._creator_notes_for_module(module, creator_choices),
-                design_spec=self._apply_creator_choices_to_design_spec(module.design_spec or design_spec, creator_choices),
+                creator_notes=self._creator_notes_for_deliverable(deliverable, creator_choices),
+                design_spec=self._apply_creator_choices_to_design_spec(deliverable.design_spec or design_spec, creator_choices),
             )
-            for index, module in enumerate(modules, start=1)
+            for index, deliverable in enumerate(deliverables, start=1)
         ]
 
     def _fallback_learning_outcomes(self, goal: str) -> list[str]:
@@ -985,6 +1131,14 @@ class CourseGenerationService:
                 "Implement the core workflow end to end and make failure handling visible.",
                 "Add debugging and quality signals so a teammate can trust the system under load.",
                 "Push the system to a production bar for correctness, safety, or operational confidence.",
+            ]
+
+        if design_spec.project_contract.family == ProjectFamily.control_plane_service:
+            return [
+                "Model flags, rollout rules, and evaluation inputs so the service preserves deterministic decisions.",
+                "Implement targeting and rollout logic without breaking the low-latency read path.",
+                "Add safe configuration updates and audit trails that operators can trust.",
+                "Raise the system to a production bar for cache coherence, latency, and rollout safety.",
             ]
 
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
@@ -1016,15 +1170,60 @@ class CourseGenerationService:
                 "Model the core state transitions and the invariants the service must preserve.",
                 "Make duplicate requests and concurrent access safe to handle in production.",
                 "Capture traces or audit records that make stateful failures easier to debug.",
-                "Raise the system to a production-minded bar for latency, reliability, and correctness.",
-            ]
+                    "Raise the system to a production-minded bar for latency, reliability, and correctness.",
+                ]
 
+        return self._contract_learning_outcomes(design_spec)
+
+    def _contract_learning_outcomes(self, design_spec: AssignmentDesignSpec) -> list[str]:
+        contract = design_spec.project_contract
+        runtime_binding = contract.runtime_binding
+        invariant = contract.invariants[0] if contract.invariants else "preserve the service contract for supported requests"
+        read_path = contract.primary_read_paths[0] if contract.primary_read_paths else "serve the main request path reliably"
+        write_path = contract.primary_write_paths[0] if contract.primary_write_paths else "evolve the implementation without breaking the public contract"
+        operational_focus = (
+            ", ".join(contract.operational_concerns[:2])
+            if contract.operational_concerns
+            else "observability and production reliability"
+        )
+        runtime_focus = (
+            runtime_binding.integration_points[0]
+            if runtime_binding.integration_points
+            else "Integrate the runtime pieces without losing correctness."
+        )
         return [
-            "Define a bounded service contract with clear inputs, outputs, and failure handling.",
-            "Implement the primary workflow end to end with observable, testable behavior.",
-            "Add evaluation checks that make quality visible during development.",
-            "Raise the system to a production-minded bar for correctness, safety, or reliability.",
+            f"Define the project contract so the system can {read_path}.",
+            f"Implement the core workflow while preserving the invariant that {invariant.rstrip('.')}.",
+            runtime_focus,
+            f"Raise the project to a production-minded bar for {operational_focus}.",
         ]
+
+    def _deliverable_plan_needs_override(
+        self,
+        deliverables: list[CreateCourseDeliverableRequest],
+        design_spec: AssignmentDesignSpec,
+    ) -> bool:
+        if not deliverables:
+            return False
+        family = design_spec.project_contract.family
+        lowered = " ".join(
+            f"{deliverable.title} {deliverable.summary or ''}"
+            for deliverable in deliverables
+        ).lower()
+        generic_markers = [
+            "run contract",
+            "structured output",
+            "tooling and control flow",
+            "approvals, fallbacks",
+            "eval-driven",
+            "production final at slo",
+        ]
+        if family == ProjectFamily.control_plane_service:
+            specific_markers = ["flag", "rollout", "target", "audit", "cache", "config"]
+            return sum(marker in lowered for marker in specific_markers) < 3 or any(
+                marker in lowered for marker in generic_markers
+            )
+        return False
 
     def _title_from_goal(self, goal: str) -> str:
         text = goal.strip()
@@ -1054,23 +1253,23 @@ class CourseGenerationService:
 
     def _derive_plan_learning_outcomes(
         self,
-        modules: list[CreateCourseModuleRequest] | list[CreatorCourseModulePlan],
+        deliverables: list[CreateCourseDeliverableRequest] | list[CreatorCourseDeliverablePlan],
         design_spec: AssignmentDesignSpec | None,
     ) -> list[str]:
         outcomes: list[str] = []
-        for module in modules:
-            module_outcomes = list(module.learning_outcomes) if getattr(module, "learning_outcomes", None) else []
-            if not module_outcomes:
-                module_design_spec = getattr(module, "design_spec", None) or design_spec
-                module_outcomes = self._derive_module_learning_outcomes(
-                    getattr(module, "title", "Module"),
-                    getattr(module, "summary", "Build the module"),
-                    module_design_spec,
+        for deliverable in deliverables:
+            deliverable_outcomes = list(deliverable.learning_outcomes) if getattr(deliverable, "learning_outcomes", None) else []
+            if not deliverable_outcomes:
+                deliverable_design_spec = getattr(deliverable, "design_spec", None) or design_spec
+                deliverable_outcomes = self._derive_deliverable_learning_outcomes(
+                    getattr(deliverable, "title", "Deliverable"),
+                    getattr(deliverable, "summary", "Build the deliverable"),
+                    deliverable_design_spec,
                 )
-            outcomes.extend(module_outcomes[:2])
+            outcomes.extend(deliverable_outcomes[:2])
         return self._normalize_learning_outcomes(outcomes)[:6]
 
-    def _derive_module_learning_outcomes(
+    def _derive_deliverable_learning_outcomes(
         self,
         title: str,
         summary: str,
@@ -1102,7 +1301,7 @@ class CourseGenerationService:
         if any(keyword in title_lower for keyword in ["observability", "trace", "production", "slo"]):
             return [
                 "Make the service observable enough to explain what happened during a run.",
-                "Raise the module to a production-minded bar for reliability, latency, or operator trust.",
+                "Raise the deliverable to a production-minded bar for reliability, latency, or operator trust.",
             ]
 
         outcomes: list[str] = []
@@ -1149,8 +1348,51 @@ class CourseGenerationService:
         ):
             cache_backend = "redis"
 
+        implementation_language = (setup.implementation_language or "").strip().lower() or None
+        application_framework = (setup.application_framework or "").strip().lower() or None
+
+        framework_language_defaults = {
+            "fastapi": "python",
+            "flask": "python",
+            "django": "python",
+            "express": "typescript",
+            "hono": "typescript",
+            "nestjs": "typescript",
+            "gin": "go",
+            "fiber": "go",
+            "actix": "rust",
+            "actix-web": "rust",
+            "axum": "rust",
+        }
+        default_frameworks = {
+            "python": "fastapi",
+            "typescript": "express",
+            "javascript": "express",
+            "go": "gin",
+            "rust": "actix-web",
+        }
+
+        if application_framework and implementation_language is None:
+            implementation_language = framework_language_defaults.get(application_framework)
+        if implementation_language is None:
+            stack_signal = " ".join([lowered_goal, *list(setup.tech_stack)]).lower()
+            if any(token in stack_signal for token in ["typescript", "nestjs", "hono"]):
+                implementation_language = "typescript"
+            elif any(token in stack_signal for token in ["javascript", "node", "express"]):
+                implementation_language = "javascript"
+            elif any(token in stack_signal for token in ["golang", "go", "gin", "fiber"]):
+                implementation_language = "go"
+            elif any(token in stack_signal for token in ["rust", "actix", "axum"]):
+                implementation_language = "rust"
+            else:
+                implementation_language = "python"
+        if application_framework is None:
+            application_framework = default_frameworks.get(implementation_language)
+
         return CreatorCourseSetupChoices(
             starter_type=starter_type,
+            implementation_language=implementation_language,
+            application_framework=application_framework,
             primary_database=primary_database,
             cache_backend=cache_backend,
             tech_stack=list(setup.tech_stack),
@@ -1197,6 +1439,8 @@ class CourseGenerationService:
                 "runtime_dependencies": design_spec.runtime_dependencies.model_copy(
                     update={
                         "starter_type": creator_choices.starter_type,
+                        "implementation_language": creator_choices.implementation_language,
+                        "application_framework": creator_choices.application_framework,
                         "visible_fixture_files": [
                             source.workspace_path
                             for source in creator_choices.data_sources
@@ -1216,13 +1460,18 @@ class CourseGenerationService:
         parts = [
             "We will create the course as a shared production-ready codebase."
             if design_spec.course_structure.shared_codebase
-            else "We will create the course as separate module projects.",
+            else "We will create the course as separate deliverable projects.",
             (
-                "Learners start from a scaffolded starter app."
+                "Learners start from a starter app with key pieces already wired."
                 if creator_choices.starter_type != StarterType.bare_stub
-                else "Learners start closer to a blank scaffold and implement most of the system themselves."
+                else "Learners start closer to a blank starter and implement most of the system themselves."
             ),
         ]
+        if creator_choices.implementation_language:
+            stack_note = f"The current plan targets `{creator_choices.implementation_language}`"
+            if creator_choices.application_framework:
+                stack_note += f" with `{creator_choices.application_framework}`"
+            parts.append(stack_note + ".")
         if creator_choices.primary_database:
             parts.append(f"The current plan assumes `{creator_choices.primary_database}` as the primary database.")
         if creator_choices.cache_backend:
@@ -1230,21 +1479,38 @@ class CourseGenerationService:
         if creator_choices.data_sources:
             labels = ", ".join(f"`{source.title}`" for source in creator_choices.data_sources[:3])
             parts.append(f"Learners will also work with data sources such as {labels}.")
+        if creator_choices.tech_stack:
+            parts.append(
+                "The runtime should honor explicit requirements such as "
+                + ", ".join(f"`{item}`" for item in creator_choices.tech_stack[:4])
+                + "."
+            )
         capability_labels = ", ".join(design_spec.capabilities.summary_labels())
         parts.append(f"Under the hood, the generation pipeline will target {capability_labels}.")
         return " ".join(parts)
 
-    def _creator_notes_for_module(self, module: CreateCourseModuleRequest, creator_choices) -> list[str]:
+    def _creator_notes_for_deliverable(self, deliverable: CreateCourseDeliverableRequest, creator_choices) -> list[str]:
         notes: list[str] = []
-        summary_lower = (module.summary or "").lower()
+        summary_lower = (deliverable.summary or "").lower()
         if creator_choices.primary_database and any(keyword in summary_lower for keyword in ["lock", "transaction", "concurrency"]):
-            notes.append(f"Expected to use `{creator_choices.primary_database}` in this module.")
+            notes.append(f"Expected to use `{creator_choices.primary_database}` in this deliverable.")
         if creator_choices.cache_backend and "cache" in summary_lower:
-            notes.append(f"Expected to use `{creator_choices.cache_backend}` in this module.")
+            notes.append(f"Expected to use `{creator_choices.cache_backend}` in this deliverable.")
         if creator_choices.data_sources and any(keyword in summary_lower for keyword in ["retrieval", "grounded", "corpus", "search", "citation"]):
             notes.append(
-                "This module should use learner-visible data sources such as "
+                "This deliverable should use learner-visible data sources such as "
                 + ", ".join(f"`{source.title}`" for source in creator_choices.data_sources[:2])
+                + "."
+            )
+        if creator_choices.implementation_language:
+            stack_note = f"Implement this deliverable in `{creator_choices.implementation_language}`"
+            if creator_choices.application_framework:
+                stack_note += f" using `{creator_choices.application_framework}`"
+            notes.append(stack_note + ".")
+        if creator_choices.tech_stack:
+            notes.append(
+                "Keep this deliverable aligned with runtime requirements like "
+                + ", ".join(f"`{item}`" for item in creator_choices.tech_stack[:3])
                 + "."
             )
         if creator_choices.starter_type.name.startswith("working"):
@@ -1252,7 +1518,7 @@ class CourseGenerationService:
         elif creator_choices.starter_type == creator_choices.starter_type.partial_implementation:
             notes.append("Learners should inherit a partial starter so they can focus on the core change.")
         else:
-            notes.append("Learners should implement most of this module themselves from a bare scaffold.")
+            notes.append("Learners should implement most of this deliverable themselves from a bare starter.")
         return notes
 
     def _preferred_package_type(
@@ -1290,14 +1556,14 @@ class CourseGenerationService:
                         "workspace_scope": (
                             WorkspaceScope.shared_course_workspace
                             if shared_codebase
-                            else WorkspaceScope.per_module_workspace
+                            else WorkspaceScope.per_deliverable_workspace
                         ),
-                        "progression_mode": ProgressionMode.independent_modules,
+                        "progression_mode": ProgressionMode.independent_deliverables,
                         "shared_codebase": shared_codebase,
                     }
                 ),
                 "assessment_strategy": design_spec.assessment_strategy.model_copy(
-                    update={"cumulative_module_gates": False}
+                    update={"cumulative_deliverable_gates": False}
                 ),
             }
         )

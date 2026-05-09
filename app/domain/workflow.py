@@ -60,6 +60,7 @@ class WorkflowNodeKind(str, Enum):
     reviewer_code = "reviewer_code"
     reviewer_pedagogy = "reviewer_pedagogy"
     reviewer_tests = "reviewer_tests"
+    reviewer_learner_runtime = "reviewer_learner_runtime"
 
 
 class WorkflowNodeStatus(str, Enum):
@@ -88,8 +89,8 @@ class FailureContextValidationIssue(BaseModel):
     message: str
 
 
-class FailureContextModuleReport(BaseModel):
-    module_id: str
+class FailureContextDeliverableReport(BaseModel):
+    deliverable_id: str
     compile_succeeded: bool
     runtime_succeeded: bool
     error: str | None = None
@@ -102,8 +103,8 @@ class FailureContextSandboxSummary(BaseModel):
     build_stderr_excerpt: str | None = None
     run_stdout_excerpt: str | None = None
     run_stderr_excerpt: str | None = None
-    failed_modules: list[str] = Field(default_factory=list)
-    module_reports: list[FailureContextModuleReport] = Field(default_factory=list)
+    failed_deliverables: list[str] = Field(default_factory=list)
+    deliverable_reports: list[FailureContextDeliverableReport] = Field(default_factory=list)
 
 
 class FailureContext(BaseModel):

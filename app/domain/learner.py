@@ -6,7 +6,7 @@ from enum import Enum
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.domain.course import CourseRunStatus, CourseRunSummary
-from app.domain.grading import AssignmentGradeReport, ModuleGradeReport
+from app.domain.grading import AssignmentGradeReport, DeliverableGradeReport
 from app.domain.registry import PackageType
 
 
@@ -16,7 +16,7 @@ class LearnerEnrollmentStatus(str, Enum):
     blocked = "blocked"
 
 
-class LearnerModuleStatus(str, Enum):
+class LearnerDeliverableStatus(str, Enum):
     available = "available"
     passed = "passed"
 
@@ -38,7 +38,7 @@ class PublishedCourseSummary(BaseModel):
     title: str
     summary: str
     package_type: PackageType
-    deliverable_count: int = Field(validation_alias=AliasChoices("deliverable_count", "module_count"))
+    deliverable_count: int = Field(validation_alias="deliverable_count")
     shared_workflow_run_id: str | None = None
     supported_for_lms: bool = False
     support_reason: str | None = None
@@ -81,7 +81,7 @@ class PublishedCourseCatalog(BaseModel):
 class LearnerWorkspaceSession(BaseModel):
     id: str
     enrollment_id: str
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     scope: LearnerWorkspaceScope
     created_at: datetime
     updated_at: datetime
@@ -98,22 +98,22 @@ class LearnerSubmissionRecord(BaseModel):
     id: str
     submission_group_id: str | None = None
     enrollment_id: str
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     created_at: datetime
     status: str
     passed_tests: int
     total_tests: int
     pass_rate: float = Field(ge=0.0, le=1.0)
-    grade_report: ModuleGradeReport
+    grade_report: DeliverableGradeReport
     assignment_report: AssignmentGradeReport | None = None
 
 
-class LearnerModuleProgress(BaseModel):
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+class LearnerDeliverableProgress(BaseModel):
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     title: str
     objective: str
-    status: LearnerModuleStatus
-    deliverable_index: int = Field(validation_alias=AliasChoices("deliverable_index", "module_index"))
+    status: LearnerDeliverableStatus
+    deliverable_index: int = Field(validation_alias="deliverable_index")
     content_markdown: str = ""
     starter_readme: str = ""
     visible_files: list[str] = Field(default_factory=list)
@@ -136,11 +136,11 @@ class LearnerEnrollment(BaseModel):
     workspace_scope: LearnerWorkspaceScope
     current_deliverable_id: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("current_deliverable_id", "current_module_id"),
+        validation_alias="current_deliverable_id",
     )
-    deliverables: list[LearnerModuleProgress] = Field(
+    deliverables: list[LearnerDeliverableProgress] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("deliverables", "modules"),
+        validation_alias="deliverables",
     )
     notes: list[str] = Field(default_factory=list)
 
@@ -152,21 +152,21 @@ class LearnerEnrollmentSummary(BaseModel):
     course_title: str
     course_summary: str
     status: LearnerEnrollmentStatus
-    deliverable_count: int = Field(validation_alias=AliasChoices("deliverable_count", "module_count"))
+    deliverable_count: int = Field(validation_alias="deliverable_count")
     completed_deliverable_count: int = Field(
-        validation_alias=AliasChoices("completed_deliverable_count", "completed_module_count"),
+        validation_alias="completed_deliverable_count",
     )
     current_deliverable_id: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("current_deliverable_id", "current_module_id"),
+        validation_alias="current_deliverable_id",
     )
     current_deliverable_title: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("current_deliverable_title", "current_module_title"),
+        validation_alias="current_deliverable_title",
     )
     current_deliverable_index: int | None = Field(
         default=None,
-        validation_alias=AliasChoices("current_deliverable_index", "current_module_index"),
+        validation_alias="current_deliverable_index",
     )
     created_at: datetime
     updated_at: datetime
@@ -188,7 +188,7 @@ class LearnerEnrollmentSummary(BaseModel):
             completed_deliverable_count=sum(
                 1
                 for deliverable in enrollment.deliverables
-                if deliverable.status == LearnerModuleStatus.passed
+                if deliverable.status == LearnerDeliverableStatus.passed
             ),
             current_deliverable_id=enrollment.current_deliverable_id,
             current_deliverable_title=current_deliverable.title if current_deliverable is not None else None,
@@ -208,11 +208,11 @@ class CreateEnrollmentRequest(BaseModel):
 
 
 class LaunchWorkspaceRequest(BaseModel):
-    deliverable_id: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str | None = Field(default=None, validation_alias="deliverable_id")
 
 
-class SubmitModuleRequest(BaseModel):
-    deliverable_id: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_id", "module_id"))
+class SubmitDeliverableRequest(BaseModel):
+    deliverable_id: str | None = Field(default=None, validation_alias="deliverable_id")
 
 
 class LearnerWorkspaceFileSummary(BaseModel):
@@ -223,14 +223,14 @@ class LearnerWorkspaceFileSummary(BaseModel):
 
 class LearnerWorkspaceFileList(BaseModel):
     enrollment_id: str
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     workspace_root: str
     files: list[LearnerWorkspaceFileSummary] = Field(default_factory=list)
 
 
 class LearnerWorkspaceFileContent(BaseModel):
     enrollment_id: str
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     workspace_root: str
     relative_path: str
     media_type: str
@@ -238,31 +238,31 @@ class LearnerWorkspaceFileContent(BaseModel):
 
 
 class WriteLearnerWorkspaceFileRequest(BaseModel):
-    deliverable_id: str | None = Field(default=None, validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str | None = Field(default=None, validation_alias="deliverable_id")
     relative_path: str
     content: str
 
 
 class LearnerWorkspaceFileWriteResult(BaseModel):
     enrollment_id: str
-    deliverable_id: str = Field(validation_alias=AliasChoices("deliverable_id", "module_id"))
+    deliverable_id: str = Field(validation_alias="deliverable_id")
     workspace_root: str
     relative_path: str
     media_type: str
     size_bytes: int = Field(ge=0)
 
 
-class LearnerModuleExperience(BaseModel):
+class LearnerDeliverableExperience(BaseModel):
     enrollment: LearnerEnrollmentSummary
     project_brief_markdown: str = ""
     workspace_session: LearnerWorkspaceSession | None = None
     latest_assignment_report: AssignmentGradeReport | None = None
     latest_assignment_submission: LearnerSubmissionRecord | None = None
-    active_deliverable: LearnerModuleProgress = Field(
-        validation_alias=AliasChoices("active_deliverable", "active_module"),
+    active_deliverable: LearnerDeliverableProgress = Field(
+        validation_alias="active_deliverable",
     )
-    deliverables: list[LearnerModuleProgress] = Field(
+    deliverables: list[LearnerDeliverableProgress] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("deliverables", "modules"),
+        validation_alias="deliverables",
     )
     submissions: list[LearnerSubmissionRecord] = Field(default_factory=list)

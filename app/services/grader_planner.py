@@ -6,7 +6,7 @@ from app.domain.grader import (
     ControlFlag,
     GraderEntryKind,
     GraderPlanEntry,
-    ModuleGraderPlan,
+    DeliverableGraderPlan,
     TaskAgentGraderPlanCollection,
     TestDependencies,
 )
@@ -34,12 +34,12 @@ from app.domain.task_agent import (
 )
 
 
-def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, module_id: str) -> ModuleGraderPlan:
-    module = next((item for item in spec.modules if item.id == module_id), None)
-    if module is None:
-        raise ValueError(f"unknown module id: {module_id}")
+def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, deliverable_id: str) -> DeliverableGraderPlan:
+    deliverable = next((item for item in spec.deliverables if item.id == deliverable_id), None)
+    if deliverable is None:
+        raise ValueError(f"unknown deliverable id: {deliverable_id}")
 
-    gate = spec.gate_for(module_id)
+    gate = spec.gate_for(deliverable_id)
     behaviors_by_id = {behavior.id: behavior for behavior in spec.behaviors}
     qualities_by_id = {quality.id: quality for quality in spec.qualities}
 
@@ -56,13 +56,13 @@ def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, module_id: str) -> 
         key=lambda item: item.value,
     )
 
-    return ModuleGraderPlan(
-        module_id=module.id,
-        module_title=module.title,
-        module_objective=module.objective,
-        starter_type=module.starter_type.value,
-        overlay_ids=module.overlay_ids,
-        cumulative_modules=gate.cumulative_modules,
+    return DeliverableGraderPlan(
+        deliverable_id=deliverable.id,
+        deliverable_title=deliverable.title,
+        deliverable_objective=deliverable.objective,
+        starter_type=deliverable.starter_type.value,
+        overlay_ids=deliverable.overlay_ids,
+        cumulative_deliverables=gate.cumulative_deliverables,
         active_behavior_ids=gate.active_behavior_ids,
         active_quality_ids=gate.active_quality_ids,
         total_tests=len(entries),
@@ -73,22 +73,22 @@ def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, module_id: str) -> 
     )
 
 
-def build_task_agent_review_area_plan(spec: TaskAgentServiceSpec, module_id: str) -> ModuleGraderPlan:
-    module = next((item for item in spec.modules if item.id == module_id), None)
-    if module is None:
-        raise ValueError(f"unknown module id: {module_id}")
+def build_task_agent_review_area_plan(spec: TaskAgentServiceSpec, deliverable_id: str) -> DeliverableGraderPlan:
+    deliverable = next((item for item in spec.deliverables if item.id == deliverable_id), None)
+    if deliverable is None:
+        raise ValueError(f"unknown deliverable id: {deliverable_id}")
 
     behaviors_by_id = {behavior.id: behavior for behavior in spec.behaviors}
     qualities_by_id = {quality.id: quality for quality in spec.qualities}
     active_behavior_ids = [
         behavior.id
         for behavior in spec.behaviors
-        if behavior.first_required_in == module_id
+        if behavior.first_required_in == deliverable_id
     ]
     active_quality_ids = [
         quality.id
         for quality in spec.qualities
-        if quality.first_required_in == module_id
+        if quality.first_required_in == deliverable_id
     ]
 
     entries: list[GraderPlanEntry] = []
@@ -104,13 +104,13 @@ def build_task_agent_review_area_plan(spec: TaskAgentServiceSpec, module_id: str
         key=lambda item: item.value,
     )
 
-    return ModuleGraderPlan(
-        module_id=module.id,
-        module_title=module.title,
-        module_objective=module.objective,
-        starter_type=module.starter_type.value,
-        overlay_ids=module.overlay_ids,
-        cumulative_modules=[module.id],
+    return DeliverableGraderPlan(
+        deliverable_id=deliverable.id,
+        deliverable_title=deliverable.title,
+        deliverable_objective=deliverable.objective,
+        starter_type=deliverable.starter_type.value,
+        overlay_ids=deliverable.overlay_ids,
+        cumulative_deliverables=[deliverable.id],
         active_behavior_ids=active_behavior_ids,
         active_quality_ids=active_quality_ids,
         total_tests=len(entries),
@@ -126,7 +126,7 @@ def build_all_task_agent_grader_plans(spec: TaskAgentServiceSpec) -> TaskAgentGr
         title=spec.title,
         eval_dataset_id=spec.eval_dataset.id,
         system_profile=spec.capabilities.summary_labels(),
-        module_plans=[build_task_agent_grader_plan(spec, module.id) for module in spec.modules],
+        deliverable_plans=[build_task_agent_grader_plan(spec, deliverable.id) for deliverable in spec.deliverables],
     )
 
 
@@ -135,7 +135,7 @@ def build_all_task_agent_review_area_plans(spec: TaskAgentServiceSpec) -> TaskAg
         title=spec.title,
         eval_dataset_id=spec.eval_dataset.id,
         system_profile=spec.capabilities.summary_labels(),
-        module_plans=[build_task_agent_review_area_plan(spec, module.id) for module in spec.modules],
+        deliverable_plans=[build_task_agent_review_area_plan(spec, deliverable.id) for deliverable in spec.deliverables],
     )
 
 

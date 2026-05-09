@@ -183,14 +183,36 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                   </div>
                   <div class="panel-body creator-flow-body">
                     <section id="creator-pane-1" class="creator-pane active">
-                      <p class="field-hint creator-pane-intro">Tell us what you want the learner to build. We will turn this into outcomes, setup options, and a plan you can review.</p>
+                      <p class="field-hint creator-pane-intro">Tell us what you want the learner to build. You can also pin runtime preferences up front, or leave them blank and let us suggest a stack before planning.</p>
                       <label class="field field-goal">
                         <span class="field-label-row"><span>Problem statement</span><span id="goal-count" class="status-pill">0 characters</span></span>
                         <textarea id="goal" placeholder="Build a flight booking system that is production ready. Mock external dependent services where required." required></textarea>
                         <p class="field-hint">Describe the system the learner should build and what “working” means at the end.</p>
                       </label>
+                      <div class="creator-choice-row">
+                        <label class="field">
+                          <span>Preferred language</span>
+                          <select name="implementation_language" id="creator-language" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest for me</option>
+                            <option value="python">Python</option>
+                            <option value="typescript">TypeScript</option>
+                            <option value="javascript">JavaScript</option>
+                            <option value="go">Go</option>
+                            <option value="rust">Rust</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Preferred framework</span>
+                          <input name="application_framework" id="creator-framework" class="creator-text-input" type="text" value="" placeholder="Leave blank and we’ll suggest one" autocomplete="off" spellcheck="false" />
+                        </label>
+                      </div>
+                      <label class="field">
+                        <span>Optional runtime requirements</span>
+                        <textarea id="creator-runtime-requirements" rows="3" placeholder="Node 22, NestJS 11, MongoDB 7, pnpm" autocomplete="off" spellcheck="false"></textarea>
+                        <p class="field-hint">Add version or infrastructure requirements here if the course must target a specific stack.</p>
+                      </label>
                       <div class="creator-pane-actions">
-                        <button id="creator-step-1-next" class="button primary" type="button">Suggest outcomes</button>
+                        <button id="creator-step-1-next" class="button primary" type="button">Suggest outcomes and stack</button>
                       </div>
                     </section>
 
@@ -210,12 +232,12 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                     </section>
 
                     <section id="creator-pane-3" class="creator-pane" hidden>
-                      <p class="field-hint creator-pane-intro">A few practical choices help us shape the codebase. You can change these later.</p>
+                      <p class="field-hint creator-pane-intro">These practical setup choices shape the runtime around the stack you picked or accepted above.</p>
                       <fieldset class="creator-choice">
                         <legend>How much starter code should learners get?</legend>
                         <div class="creator-choice-grid">
-                          <label><input type="radio" name="starter_type" value="bare_stub" /> <span><strong>Bare stub</strong><em>Empty scaffolds; learners write everything from scratch.</em></span></label>
-                          <label><input type="radio" name="starter_type" value="partial_implementation" checked /> <span><strong>Partial scaffold</strong><em>Some pieces wired; learners fill in the core.</em></span></label>
+                          <label><input type="radio" name="starter_type" value="bare_stub" /> <span><strong>Bare stub</strong><em>Empty starter project; learners write everything from scratch.</em></span></label>
+                          <label><input type="radio" name="starter_type" value="partial_implementation" checked /> <span><strong>Partial starter</strong><em>Some pieces wired; learners fill in the core.</em></span></label>
                           <label><input type="radio" name="starter_type" value="working_buggy" /> <span><strong>Working but buggy</strong><em>Learners debug and fix existing code.</em></span></label>
                           <label><input type="radio" name="starter_type" value="working_suboptimal" /> <span><strong>Working but suboptimal</strong><em>Learners refactor and improve.</em></span></label>
                         </div>
@@ -223,7 +245,7 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                       <div class="creator-choice-row">
                         <label class="field">
                           <span>Which database should the course assume?</span>
-                          <select name="primary_database" id="creator-database">
+                          <select name="primary_database" id="creator-database" class="creator-select">
                             <option value="">No database</option>
                             <option value="postgres" selected>PostgreSQL</option>
                             <option value="mysql">MySQL</option>
@@ -233,7 +255,7 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                         </label>
                         <label class="field">
                           <span>Should learners have a cache available?</span>
-                          <select name="cache_backend" id="creator-cache">
+                          <select name="cache_backend" id="creator-cache" class="creator-select">
                             <option value="">No cache</option>
                             <option value="redis" selected>Redis</option>
                             <option value="memcached">Memcached</option>
@@ -339,7 +361,7 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                         </summary>
                         <div class="panel-body accordion-body">
                           <p class="field-hint review-step-copy" id="review-step-copy">Approve to keep the draft moving, or request changes with what you want fixed.</p>
-                          <div id="linked-workflows" class="module-list"></div>
+                          <div id="linked-workflows" class="deliverable-list"></div>
                         </div>
                       </details>
 
@@ -353,7 +375,7 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                         <div class="panel-body accordion-body">
                           <div id="course-summary" class="summary-list"></div>
                           <div id="plan-summary" class="summary-list"></div>
-                          <div id="module-list" class="module-list"></div>
+                          <div id="deliverable-list" class="deliverable-list"></div>
                         </div>
                       </details>
 
@@ -363,7 +385,7 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                             <h3>Published versions</h3>
                           </summary>
                           <div class="panel-body accordion-body">
-                            <div id="published-versions" class="module-list"></div>
+                            <div id="published-versions" class="deliverable-list"></div>
                           </div>
                         </details>
 

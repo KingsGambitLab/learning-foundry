@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.domain.sandbox import (
-    ModuleSandboxReport,
+    DeliverableSandboxReport,
     SandboxAvailability,
     SandboxExecutionResult,
     SandboxExecutionStatus,
@@ -176,9 +176,9 @@ class DockerSandboxRunner:
                 timeout=self.run_timeout_s,
             )
             parsed = self._parse_run_output(run_result.stdout)
-            module_reports = [
-                ModuleSandboxReport.model_validate(item)
-                for item in parsed.get("module_reports", [])
+            deliverable_reports = [
+                DeliverableSandboxReport.model_validate(item)
+                for item in parsed.get("deliverable_reports", [])
             ]
             run_succeeded = run_result.returncode == 0 and bool(parsed.get("success"))
             return SandboxExecutionResult(
@@ -198,7 +198,7 @@ class DockerSandboxRunner:
                 build_stderr=build_result.stderr,
                 run_stdout=run_result.stdout,
                 run_stderr=run_result.stderr,
-                module_reports=module_reports,
+                deliverable_reports=deliverable_reports,
                 error=None if run_succeeded else parsed.get("error") or "Assignment sandbox verification failed.",
             )
         except subprocess.TimeoutExpired as exc:
@@ -252,11 +252,11 @@ class DockerSandboxRunner:
     def _parse_run_output(self, stdout: str) -> dict:
         text = stdout.strip()
         if not text:
-            return {"success": False, "module_reports": [], "error": "Sandbox verification did not emit JSON output."}
+            return {"success": False, "deliverable_reports": [], "error": "Sandbox verification did not emit JSON output."}
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            return {"success": False, "module_reports": [], "error": "Sandbox verification output was not valid JSON."}
+            return {"success": False, "deliverable_reports": [], "error": "Sandbox verification output was not valid JSON."}
 
     def _coerce_bytes(self, value) -> str:
         if value is None:

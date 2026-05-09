@@ -5,8 +5,8 @@ from uuid import uuid4
 
 from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.registry import PackageType, RiskClass
-from app.domain.grader import ModuleGraderPlan, TaskAgentGraderPlanCollection
-from app.domain.grading import LiveGradeTaskAgentRequest, LiveTaskAgentGradeReport, ModuleGradeReport, TaskAgentSubmission
+from app.domain.grader import DeliverableGraderPlan, TaskAgentGraderPlanCollection
+from app.domain.grading import LiveGradeTaskAgentRequest, LiveTaskAgentGradeReport, DeliverableGradeReport, TaskAgentSubmission
 from app.domain.workflow import (
     BundleFileContent,
     DecisionOutcome,
@@ -38,7 +38,7 @@ from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
 from app.services.failure_context_builder import build_failure_context
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
-from app.services.learner_brief_builder import ensure_task_agent_module_briefs
+from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService, TaskAgentAuthoringStatus
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
@@ -106,7 +106,7 @@ class WorkflowService:
         if run.artifacts.task_agent_spec is not None:
             validation = validate_task_agent_spec(run.artifacts.task_agent_spec)
             run.artifacts.validation_summary = validation.model_dump(mode="json")
-            run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+            run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.deliverable_gates]
             if not validation.valid:
                 self._refresh_review_summary(run)
                 self.store.save_run(run)
@@ -162,18 +162,18 @@ class WorkflowService:
         spec = self._require_task_agent_spec(run_id)
         return build_all_task_agent_grader_plans(spec)
 
-    def get_task_agent_grader_plan(self, run_id: str, module_id: str) -> ModuleGraderPlan:
+    def get_task_agent_grader_plan(self, run_id: str, deliverable_id: str) -> DeliverableGraderPlan:
         spec = self._require_task_agent_spec(run_id)
-        return build_task_agent_grader_plan(spec, module_id)
+        return build_task_agent_grader_plan(spec, deliverable_id)
 
-    def grade_task_agent_run(self, run_id: str, module_id: str, submission: TaskAgentSubmission) -> ModuleGradeReport:
+    def grade_task_agent_run(self, run_id: str, deliverable_id: str, submission: TaskAgentSubmission) -> DeliverableGradeReport:
         spec = self._require_task_agent_spec(run_id)
-        report = grade_task_agent_submission(spec, module_id, submission)
+        report = grade_task_agent_submission(spec, deliverable_id, submission)
         self.store.append_event(
             run_id,
             "submission_graded",
             {
-                "module_id": module_id,
+                "deliverable_id": deliverable_id,
                 "submission_id": submission.submission_id,
                 "status": report.status.value,
                 "passed_tests": report.passed_tests,
@@ -185,16 +185,16 @@ class WorkflowService:
     def grade_task_agent_run_live(
         self,
         run_id: str,
-        module_id: str,
+        deliverable_id: str,
         request: LiveGradeTaskAgentRequest,
     ) -> LiveTaskAgentGradeReport:
         spec = self._require_task_agent_spec(run_id)
-        report = self.runner.grade_live(spec, module_id, request)
+        report = self.runner.grade_live(spec, deliverable_id, request)
         self.store.append_event(
             run_id,
             "submission_graded_live",
             {
-                "module_id": module_id,
+                "deliverable_id": deliverable_id,
                 "base_url": request.base_url,
                 "status": report.grade_report.status.value,
                 "passed_tests": report.grade_report.passed_tests,
@@ -209,6 +209,8 @@ class WorkflowService:
             problem_statement=intake.problem_statement,
             package_type_hint=intake.package_type_hint,
             starter_type=intake.starter_type,
+            implementation_language=intake.implementation_language,
+            application_framework=intake.application_framework,
             primary_database=intake.primary_database,
             cache_backend=intake.cache_backend,
             tech_stack=intake.tech_stack,
@@ -279,7 +281,7 @@ class WorkflowService:
         run_id = f"run_{uuid4().hex[:12]}"
         artifacts = WorkflowArtifacts(
             draft_kind=DraftKind.scope_blocked,
-            notes=["No learner-ready scaffold was created for this brief."],
+            notes=["No learner-ready starter project was created for this brief."],
         )
         run = WorkflowRun(
             id=run_id,
@@ -323,11 +325,11 @@ class WorkflowService:
             task_agent_spec=task_agent_spec,
             ai_usage=authoring_result.usage or AIUsageSummary(),
             validation_summary=validation.model_dump(mode="json"),
-            progression_preview=[summary.model_dump(mode="json") for summary in validation.module_gates],
+            progression_preview=[summary.model_dump(mode="json") for summary in validation.deliverable_gates],
             artifact_plan=self._artifact_plan_for_task_agent(task_agent_spec),
             origin_template=origin_template,
             notes=[
-                "Draft scaffold created from the explicit assignment design spec.",
+                "Draft starter project created from the explicit assignment design spec.",
                 *authoring_result.notes,
                 "Edit the learner-ready assignment spec, revalidate it, then move through the HIL gates.",
             ],
@@ -378,12 +380,12 @@ class WorkflowService:
         if run.artifacts.task_agent_spec is None:
             raise WorkflowConflictError("This run does not contain a task-agent draft spec.")
 
-        spec = ensure_task_agent_module_briefs(spec, overwrite=False)
+        spec = ensure_task_agent_deliverable_briefs(spec, overwrite=False)
         validation = validate_task_agent_spec(spec)
         run.artifacts.task_agent_spec = spec
         self._invalidate_generated_artifacts(run, reason="task-agent spec update")
         run.artifacts.validation_summary = validation.model_dump(mode="json")
-        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.deliverable_gates]
         run.updated_at = datetime.now(UTC)
         self.store.save_run(run)
         self.store.append_event(
@@ -413,7 +415,7 @@ class WorkflowService:
         run = self.node_runtime.execute(run)
         validation = validate_task_agent_spec(run.artifacts.task_agent_spec)
         run.artifacts.validation_summary = validation.model_dump(mode="json")
-        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.module_gates]
+        run.artifacts.progression_preview = [summary.model_dump(mode="json") for summary in validation.deliverable_gates]
         self._refresh_review_summary(run)
         if run.artifacts.workspace_snapshot is None:
             run.artifacts.workspace_snapshot = self.workspace_manager.prepare_run_workspace(run, overwrite=True)
@@ -544,9 +546,9 @@ class WorkflowService:
     def _artifact_plan_for_task_agent(self, spec: TaskAgentServiceSpec) -> list[str]:
         lines = [
             "learner-ready spec with deterministic test bindings",
-            "module gate ladder derived from first_required_in markers",
-            "starter plan per module based on starter_type",
-            "per-module learning content and evaluation bundle",
+            "deliverable activation plan derived from readiness markers",
+            "starter plan per deliverable based on starter_type",
+            "per-deliverable learning content and evaluation bundle",
         ]
         if spec.production_contract.supports_dry_run:
             lines.append("dry-run and approval-gate contract in final artifact set")

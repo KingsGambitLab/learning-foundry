@@ -23,8 +23,8 @@ class SandboxAvailability(BaseModel):
     docker_version: str | None = None
 
 
-class ModuleSandboxReport(BaseModel):
-    module_id: str
+class DeliverableSandboxReport(BaseModel):
+    deliverable_id: str
     compile_succeeded: bool
     runtime_succeeded: bool
     health_status_code: int | None = None
@@ -51,5 +51,5 @@ class SandboxExecutionResult(BaseModel):
     build_stderr: str = ""
     run_stdout: str = ""
     run_stderr: str = ""
-    module_reports: list[ModuleSandboxReport] = Field(default_factory=list)
+    deliverable_reports: list[DeliverableSandboxReport] = Field(default_factory=list)
     error: str | None = None

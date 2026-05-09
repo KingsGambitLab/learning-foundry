@@ -398,7 +398,7 @@ a:hover {
 .summary-card,
 .card,
 .summary-item,
-.module-item,
+.deliverable-item,
 .review-item,
 .metric-item {
   border: 1px solid var(--line);
@@ -425,7 +425,7 @@ a:hover {
 .summary-card h3,
 .card h3,
 .summary-item h4,
-.module-item h4,
+.deliverable-item h4,
 .metric-item h4 {
   margin: 0 0 6px;
   font-size: 15px;
@@ -434,7 +434,7 @@ a:hover {
 .summary-card p,
 .card p,
 .summary-item p,
-.module-item p,
+.deliverable-item p,
 .review-item p,
 .metric-item p {
   margin: 0;

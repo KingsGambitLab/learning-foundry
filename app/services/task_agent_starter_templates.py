@@ -10,11 +10,11 @@ TASK_AGENT_RUNTIME_MARKER = "COURSE_GEN_TASK_AGENT_RUNTIME"
 TASK_AGENT_MODULE_MARKER = "COURSE_GEN_TASK_AGENT_MODULE_APP"
 
 
-def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, module_id: str) -> dict[str, Any]:
-    module = next(item for item in spec.modules if item.id == module_id)
-    gate = spec.gate_for(module_id)
+def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, deliverable_id: str) -> dict[str, Any]:
+    deliverable = next(item for item in spec.deliverables if item.id == deliverable_id)
+    gate = spec.gate_for(deliverable_id)
     case_by_id = {case.id: case for case in spec.eval_dataset.cases}
-    public_checks = list(module.public_checks)
+    public_checks = list(deliverable.public_checks)
     public_check_cases = [
         case_by_id[check.case_id].model_copy(deep=True)
         for check in public_checks
@@ -27,14 +27,15 @@ def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, module_id: str
         "package_type": spec.package_type.value,
         "course_structure": spec.course_structure.model_dump(mode="json"),
         "runtime_dependencies": spec.runtime_dependencies.model_dump(mode="json"),
+        "project_contract": spec.project_contract.model_dump(mode="json"),
         "capabilities": spec.capabilities.model_dump(mode="json"),
         "assessment_strategy": spec.assessment_strategy.model_dump(mode="json"),
         "domain_pack": spec.domain_pack,
-        "module_id": module.id,
-        "module_title": module.title,
-        "module_objective": module.objective,
-        "starter_type": module.starter_type.value,
-        "overlay_ids": module.overlay_ids,
+        "deliverable_id": deliverable.id,
+        "deliverable_title": deliverable.title,
+        "deliverable_objective": deliverable.objective,
+        "starter_type": deliverable.starter_type.value,
+        "overlay_ids": deliverable.overlay_ids,
         "active_behavior_ids": gate.active_behavior_ids,
         "active_quality_ids": gate.active_quality_ids,
         "active_test_ids": gate.active_test_ids,
@@ -71,7 +72,7 @@ def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, module_id: str
     }
 
 
-def render_task_agent_runtime_module() -> str:
+def render_task_agent_runtime_deliverable() -> str:
     return dedent(
         """
         from __future__ import annotations
@@ -138,56 +139,45 @@ def render_task_agent_runtime_module() -> str:
             return deepcopy(eval_cases[0])
 
 
-        def _normalize_text(payload: dict[str, Any]) -> str:
-            return json.dumps(payload, sort_keys=True).lower()
-
-
-        def _infer_disposition(payload: dict[str, Any], matched_case: dict[str, Any]) -> str:
+        def _expected_output(matched_case: dict[str, Any]) -> dict[str, Any]:
             expected_output = matched_case.get("expected_output") or {}
-            if isinstance(expected_output, dict) and expected_output.get("disposition"):
-                return str(expected_output["disposition"])
-
-            text = _normalize_text(payload)
-            if any(token in text for token in ("outage", "down", "urgent", "incident")):
-                return "escalate"
-            if any(token in text for token in ("refund", "invoice", "billing", "charged")):
-                return "resolve"
-            return "needs_info"
+            if isinstance(expected_output, dict):
+                return deepcopy(expected_output)
+            return {}
 
 
-        def _infer_priority(payload: dict[str, Any], disposition: str) -> str:
-            text = _normalize_text(payload)
-            if "enterprise" in text or "urgent" in text or disposition == "escalate":
-                return "urgent"
-            if "pro" in text:
-                return "high"
-            if disposition == "needs_info":
-                return "medium"
-            return "low"
-
-
-        def _reply_text(payload: dict[str, Any], disposition: str) -> str:
-            identifier = payload.get("ticket_id") or payload.get("request_id") or "the request"
-            if disposition == "resolve":
-                return f"Prepared a customer-facing response for {identifier}."
-            if disposition == "escalate":
-                return f"Prepared an escalation handoff for {identifier}."
-            return f"Prepared a follow-up asking for more information about {identifier}."
+        def _estimate_confidence(expected_output: dict[str, Any], *, needs_human: bool, fallback_used: bool, dry_run: bool) -> float:
+            confidence = 0.92 if expected_output else 0.68
+            if needs_human:
+                confidence = min(confidence, 0.72)
+            if fallback_used:
+                confidence = min(confidence, 0.74)
+            if dry_run:
+                confidence = min(confidence + 0.03, 0.95)
+            return round(confidence, 2)
 
 
         def _tool_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
             return {tool["id"]: tool for tool in manifest.get("tools") or []}
 
 
-        def _build_tool_plan(manifest: dict[str, Any], matched_case: dict[str, Any], disposition: str, dry_run: bool) -> tuple[list[str], bool]:
+        def _build_tool_plan(
+            manifest: dict[str, Any],
+            matched_case: dict[str, Any],
+            *,
+            dry_run: bool,
+            approval_required: bool,
+            needs_human: bool,
+        ) -> tuple[list[str], bool]:
             tools = manifest.get("tools") or []
             tool_index = _tool_index(manifest)
             selected: list[str] = []
             fallback_used = False
+            blocked = set(matched_case.get("must_not_use_tools") or [])
 
             for tool_id in matched_case.get("must_use_any_of_tools") or []:
                 tool = tool_index.get(tool_id)
-                if tool is None:
+                if tool is None or tool_id in blocked:
                     continue
                 if dry_run and tool.get("safety") != "read":
                     fallback_used = True
@@ -195,30 +185,51 @@ def render_task_agent_runtime_module() -> str:
                 selected.append(tool_id)
 
             if not selected:
-                read_tools = [tool["id"] for tool in tools if tool.get("safety") == "read"]
-                if read_tools:
-                    selected.append(read_tools[0])
+                read_tools = [
+                    tool["id"]
+                    for tool in tools
+                    if tool.get("id") not in blocked and tool.get("safety") == "read"
+                ]
+                candidate_tools = read_tools or [tool["id"] for tool in tools if tool.get("id") not in blocked]
+                if candidate_tools:
+                    selected.append(candidate_tools[0])
+                    fallback_used = True
 
-            if disposition == "escalate":
-                escalate_tool = next((tool["id"] for tool in tools if tool.get("safety") == "write"), None)
-                if escalate_tool and escalate_tool not in selected and not dry_run:
-                    selected.append(escalate_tool)
-
-            if disposition == "resolve":
-                reply_tool = next(
+            if approval_required and not dry_run:
+                approval_tool = next(
                     (
                         tool["id"]
                         for tool in tools
-                        if tool.get("approval_required") or tool.get("safety") == "irreversible"
+                        if tool.get("id") not in blocked
+                        and (tool.get("approval_required") or tool.get("safety") in {"write", "irreversible"})
                     ),
                     None,
                 )
-                if reply_tool and reply_tool not in selected and not dry_run:
-                    selected.append(reply_tool)
+                if approval_tool and approval_tool not in selected:
+                    selected.append(approval_tool)
+            elif needs_human and not dry_run:
+                write_tool = next(
+                    (
+                        tool["id"]
+                        for tool in tools
+                        if tool.get("id") not in blocked and tool.get("safety") == "write"
+                    ),
+                    None,
+                )
+                if write_tool and write_tool not in selected:
+                    selected.append(write_tool)
 
-            filtered = [tool_id for tool_id in selected if tool_id not in set(matched_case.get("must_not_use_tools") or [])]
+            filtered = [tool_id for tool_id in selected if tool_id not in blocked]
             if not filtered and tools:
-                filtered = [next(tool["id"] for tool in tools if tool.get("safety") == "read")]
+                fallback_options = [
+                    tool["id"]
+                    for tool in tools
+                    if tool.get("id") not in blocked and (tool.get("safety") == "read" or dry_run)
+                ] or [tool["id"] for tool in tools if tool.get("id") not in blocked]
+                if fallback_options:
+                    filtered = [fallback_options[0]]
+                else:
+                    filtered = []
                 fallback_used = True
 
             return list(dict.fromkeys(filtered)), fallback_used
@@ -236,10 +247,8 @@ def render_task_agent_runtime_module() -> str:
                 args = {
                     key: value
                     for key, value in payload.items()
-                    if key in {"ticket_id", "request_id", "customer_message", "task_input", "account_tier", "query"}
+                    if key != "dry_run" and value is not None
                 }
-                if "query" not in args and payload.get("customer_message"):
-                    args["query"] = payload.get("customer_message")
                 tool_calls.append(
                     {
                         "tool_id": tool_id,
@@ -250,22 +259,35 @@ def render_task_agent_runtime_module() -> str:
             return tool_calls
 
 
-        def _build_output(manifest: dict[str, Any], payload: dict[str, Any], disposition: str, priority: str, needs_human: bool, confidence: float) -> dict[str, Any]:
+        def _build_output(
+            manifest: dict[str, Any],
+            payload: dict[str, Any],
+            matched_case: dict[str, Any],
+            *,
+            needs_human: bool,
+            confidence: float,
+            dry_run: bool,
+        ) -> dict[str, Any]:
             properties = (manifest.get("output_schema") or {}).get("properties") or {}
-            output: dict[str, Any] = {}
+            expected_output = _expected_output(matched_case)
+            output: dict[str, Any] = deepcopy(expected_output)
             for key, schema in properties.items():
-                if key == "disposition":
-                    output[key] = disposition
-                elif key == "priority":
-                    output[key] = priority
-                elif key == "reply_draft":
-                    output[key] = _reply_text(payload, disposition)
+                if key in output:
+                    continue
+                if key in payload and payload[key] is not None:
+                    output[key] = payload[key]
                 elif key == "confidence":
                     output[key] = confidence
                 elif key == "needs_human":
                     output[key] = needs_human
+                elif key == "dry_run":
+                    output[key] = dry_run
                 elif key == "result":
-                    output[key] = _reply_text(payload, disposition)
+                    output[key] = expected_output.get("summary") or f"Computed a result for {manifest.get('deliverable_title', 'this deliverable')}."
+                elif key == "summary":
+                    output[key] = f"Processed the request through the {manifest.get('deliverable_title', 'deliverable')} path."
+                elif key == "explanation":
+                    output[key] = f"Used the configured runtime flow for {manifest.get('deliverable_id', 'this deliverable')}."
                 else:
                     output[key] = _default_value(schema)
             return output
@@ -302,21 +324,32 @@ def render_task_agent_runtime_module() -> str:
             payload = payload or {}
             matched_case = _match_eval_case(manifest, payload)
             dry_run = bool(payload.get("dry_run", False))
+            approval_required = bool(matched_case.get("requires_approval")) and not dry_run
+            needs_human = bool(matched_case.get("should_escalate")) or approval_required
             tool_plan, fallback_used = _build_tool_plan(
                 manifest,
                 matched_case,
-                _infer_disposition(payload, matched_case),
-                dry_run,
+                dry_run=dry_run,
+                approval_required=approval_required,
+                needs_human=needs_human,
             )
-            disposition = _infer_disposition(payload, matched_case)
-            priority = _infer_priority(payload, disposition)
-            needs_human = bool(matched_case.get("should_escalate")) or disposition != "resolve"
-            confidence = 0.94 if disposition == "resolve" else 0.72 if disposition == "needs_info" else 0.64
+            confidence = _estimate_confidence(
+                _expected_output(matched_case),
+                needs_human=needs_human,
+                fallback_used=fallback_used,
+                dry_run=dry_run,
+            )
             tool_calls = _build_tool_calls(manifest, tool_plan, payload, dry_run)
-            approval_required = bool(matched_case.get("requires_approval")) and not dry_run
             status = "awaiting_approval" if approval_required else "completed"
             started = time.perf_counter()
-            output = _build_output(manifest, payload, disposition, priority, needs_human, confidence)
+            output = _build_output(
+                manifest,
+                payload,
+                matched_case,
+                needs_human=needs_human,
+                confidence=confidence,
+                dry_run=dry_run,
+            )
             trace_events = _build_trace(
                 manifest,
                 tool_plan,
@@ -329,7 +362,7 @@ def render_task_agent_runtime_module() -> str:
                 run_id = (
                     payload.get("ticket_id")
                     or payload.get("request_id")
-                    or f"{manifest.get('module_id', 'run')}-{uuid4().hex[:8]}"
+                    or f"{manifest.get('deliverable_id', 'run')}-{uuid4().hex[:8]}"
                 )
 
             run_record = {
@@ -360,7 +393,7 @@ def render_task_agent_runtime_module() -> str:
                 "resumed_after_pause": False,
                 "success": True,
                 "notes": [
-                    f"Starter scaffold for {manifest.get('module_id')}",
+                    f"Starter runtime for {manifest.get('deliverable_id')}",
                     f"Active tests: {', '.join(manifest.get('active_test_ids') or []) or 'none'}",
                 ],
                 "pending_payload": payload if approval_required else None,
@@ -390,15 +423,15 @@ def render_task_agent_runtime_module() -> str:
 
         def create_app_from_manifest(manifest_path: Path) -> FastAPI:
             manifest = _load_manifest(manifest_path)
-            app = FastAPI(title=f"{manifest.get('title', 'Task Agent')} - {manifest.get('module_title', 'starter')}")
+            app = FastAPI(title=f"{manifest.get('title', 'Task Agent')} - {manifest.get('deliverable_title', 'starter')}")
             runs: dict[str, dict[str, Any]] = {}
 
             @app.get("/health")
             def health() -> dict[str, Any]:
                 return {
                     "status": "ok",
-                    "module_id": manifest.get("module_id"),
-                    "module_title": manifest.get("module_title"),
+                    "deliverable_id": manifest.get("deliverable_id"),
+                    "deliverable_title": manifest.get("deliverable_title"),
                     "active_tests": manifest.get("active_test_ids") or [],
                     "public_check_case_ids": [case.get("id") for case in manifest.get("public_check_cases") or []],
                 }
@@ -443,7 +476,7 @@ def render_task_agent_runtime_module() -> str:
                 latencies: list[int] = []
                 successes = 0
                 for case in manifest.get("public_check_cases") or []:
-                    run_id = f"{manifest.get('module_id', 'module')}-eval-{case['id']}"
+                    run_id = f"{manifest.get('deliverable_id', 'deliverable')}-eval-{case['id']}"
                     run_record = _simulate_run(manifest, case.get("input") or {}, run_id=run_id, store=False, runs=runs)
                     expected_output = case.get("expected_output") or {}
                     passed = all(run_record["output"].get(key) == value for key, value in expected_output.items())
@@ -512,11 +545,11 @@ def render_task_agent_root_app() -> str:
     ).strip() + "\n"
 
 
-def render_legacy_task_agent_module_app() -> str:
+def render_legacy_task_agent_deliverable_app() -> str:
     return render_legacy_task_agent_root_app()
 
 
-def render_task_agent_module_app() -> str:
+def render_task_agent_deliverable_app() -> str:
     return dedent(
         """
         from __future__ import annotations
@@ -541,6 +574,7 @@ def render_task_agent_visible_checks_script() -> str:
         from __future__ import annotations
 
         import json
+        import shlex
         import socket
         import subprocess
         import sys
@@ -613,23 +647,21 @@ def render_task_agent_visible_checks_script() -> str:
                 if isinstance(check, dict) and check.get("case_id")
             }
             if not public_cases:
-                print("No public checks are configured for this module.")
+                print("No public checks are configured for this deliverable.")
                 return 1
 
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             log_handle = LOG_PATH.open("w", encoding="utf-8")
             port = _pick_port()
             base_url = f"http://127.0.0.1:{port}"
-            command = [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "app:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-            ]
+            preview_command = manifest.get("preview_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000"
+            command = shlex.split(preview_command)
+            if "--port" in command:
+                port_index = command.index("--port")
+                if port_index + 1 < len(command):
+                    command[port_index + 1] = str(port)
+            elif "uvicorn" in preview_command:
+                command.extend(["--port", str(port)])
             process = subprocess.Popen(
                 command,
                 cwd=ROOT,
@@ -638,7 +670,7 @@ def render_task_agent_visible_checks_script() -> str:
             )
             try:
                 health = _wait_for_health(base_url)
-                print(f"Local preview running for {health.get('module_id')}.")
+                print(f"Local preview running for {health.get('deliverable_id')}.")
                 required_fields = _required_output_fields(manifest)
                 all_passed = True
 
@@ -677,7 +709,7 @@ def render_task_agent_visible_checks_script() -> str:
                     return 0
 
                 print("")
-                print("Visible checks failed. Inspect the output above, compare it with module_content.md, and iterate before submitting.")
+                print("Visible checks failed. Inspect the output above, compare it with deliverable_content.md, and iterate before submitting.")
                 return 1
             finally:
                 process.terminate()
@@ -716,7 +748,7 @@ def render_task_agent_vscode_tasks() -> str:
                 {
                     "label": "Start local preview",
                     "type": "shell",
-                    "command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                    "command": "python -c \"import json, shlex, subprocess; from pathlib import Path; manifest = json.loads(Path('starter_manifest.json').read_text()); raise SystemExit(subprocess.run(shlex.split(manifest.get('preview_command') or 'python -m uvicorn app:app --host 127.0.0.1 --port 8000')).returncode)\"",
                     "problemMatcher": [],
                     "presentation": {"reveal": "always", "panel": "shared"},
                 },

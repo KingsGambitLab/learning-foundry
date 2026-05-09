@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +7,7 @@ from pathlib import PurePosixPath
 from uuid import uuid4
 
 from app.domain.course import CourseRun, CourseRunStatus, CourseRunSummary
-from app.domain.grading import AssignmentGradeReport, GradeStatus, ModuleGradeReport, ReviewAreaGradeReport
+from app.domain.grading import AssignmentGradeReport, GradeStatus, DeliverableGradeReport, ReviewAreaGradeReport
 from app.domain.learner import (
     CreateEnrollmentRequest,
     LaunchWorkspaceRequest,
@@ -16,9 +15,9 @@ from app.domain.learner import (
     LearnerEnrollmentList,
     LearnerEnrollmentStatus,
     LearnerEnrollmentSummary,
-    LearnerModuleExperience,
-    LearnerModuleProgress,
-    LearnerModuleStatus,
+    LearnerDeliverableExperience,
+    LearnerDeliverableProgress,
+    LearnerDeliverableStatus,
     LearnerSubmissionRecord,
     LearnerWorkspaceFileContent,
     LearnerWorkspaceFileList,
@@ -27,21 +26,23 @@ from app.domain.learner import (
     LearnerWorkspaceScope,
     PublishedCourseCatalog,
     PublishedCourseSummary,
-    SubmitModuleRequest,
+    SubmitDeliverableRequest,
     WriteLearnerWorkspaceFileRequest,
 )
-from app.domain.publish import LearnerModulePackage, PublishSnapshot
+from app.domain.publish import LearnerDeliverablePackage, PublishSnapshot
 from app.domain.testing import (
     CreateLearnerFeedbackRequest,
     LearnerFeedbackList,
     LearnerFeedbackRecord,
     LearnerTestingView,
 )
-from app.services.learner_studio_service import LearnerStudioService
-from app.services.task_agent_starter_templates import (
-    render_legacy_task_agent_root_app,
-    render_task_agent_root_app,
+from app.services.learner_package_runtime import (
+    project_brief_markdown,
+    remap_assignment_report_to_deliverables,
+    seed_workspace_from_snapshot,
 )
+from app.services.learner_studio_service import LearnerStudioService
+from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -62,11 +63,13 @@ class LMSService:
         store: SQLiteWorkflowStore,
         workflow_service: WorkflowService,
         learner_studio_service: LearnerStudioService | None = None,
+        learner_feedback_service: OpenAILearnerFeedbackService | None = None,
         base_dir: str | Path | None = None,
     ) -> None:
         self.store = store
         self.workflow_service = workflow_service
         self.learner_studio_service = learner_studio_service or LearnerStudioService()
+        self.learner_feedback_service = learner_feedback_service or OpenAILearnerFeedbackService(enabled=False)
         self.base_dir = Path(base_dir or default_learner_workspace_dir())
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -163,13 +166,13 @@ class LMSService:
             deliverable.latest_submission = latest_submission
             if latest_submission is not None:
                 deliverable.status = (
-                    LearnerModuleStatus.passed
+                    LearnerDeliverableStatus.passed
                     if latest_submission.grade_report is not None
                     and latest_submission.grade_report.status == GradeStatus.passed
-                    else LearnerModuleStatus.available
+                    else LearnerDeliverableStatus.available
                 )
             deliverable.workspace_session = latest_session
-        if all(deliverable.status == LearnerModuleStatus.passed for deliverable in refreshed.deliverables):
+        if all(deliverable.status == LearnerDeliverableStatus.passed for deliverable in refreshed.deliverables):
             refreshed.status = LearnerEnrollmentStatus.completed
             refreshed.current_deliverable_id = None
         if refreshed.model_dump(mode="json") != enrollment.model_dump(mode="json"):
@@ -177,7 +180,7 @@ class LMSService:
             self.store.save_learner_enrollment(refreshed)
         return refreshed
 
-    def get_deliverable_experience(self, enrollment_id: str, deliverable_id: str | None = None) -> LearnerModuleExperience:
+    def get_deliverable_experience(self, enrollment_id: str, deliverable_id: str | None = None) -> LearnerDeliverableExperience:
         enrollment = self.get_enrollment(enrollment_id)
         active_deliverable = self._resolve_target_deliverable(enrollment, deliverable_id)
         all_submissions = self.store.list_learner_submissions(enrollment.id)
@@ -187,7 +190,7 @@ class LMSService:
         latest_session = self.store.list_learner_workspace_sessions(enrollment.id)
         workspace_session = latest_session[0] if latest_session else None
         project_brief_markdown = self._project_brief_markdown(snapshot)
-        return LearnerModuleExperience(
+        return LearnerDeliverableExperience(
             enrollment=LearnerEnrollmentSummary.from_enrollment(enrollment),
             project_brief_markdown=project_brief_markdown,
             workspace_session=workspace_session,
@@ -317,7 +320,7 @@ class LMSService:
             size_bytes=target.stat().st_size,
         )
 
-    def submit_project(self, enrollment_id: str, request: SubmitModuleRequest) -> LearnerModuleExperience:
+    def submit_project(self, enrollment_id: str, request: SubmitDeliverableRequest) -> LearnerDeliverableExperience:
         enrollment, deliverable, deliverable_package, workspace_root = self._workspace_context(
             enrollment_id,
             request.deliverable_id,
@@ -333,6 +336,15 @@ class LMSService:
         submission_group_id = f"submission_{uuid4().hex[:12]}"
         created_at = datetime.now(UTC)
         assignment_report = self._learner_assignment_report(snapshot, report.assignment_report)
+        learner_package = snapshot.learner_package
+        if learner_package is not None:
+            assignment_report = self.learner_feedback_service.annotate_assignment_report(
+                project_brief_markdown=self._project_brief_markdown(snapshot),
+                learner_package=learner_package,
+                assignment_report=assignment_report,
+                workspace_root=workspace_root,
+                spec=snapshot.task_agent_spec,
+            )
         submissions_by_deliverable: dict[str, LearnerSubmissionRecord] = {}
         for review_area in assignment_report.review_areas:
             submission = LearnerSubmissionRecord(
@@ -357,9 +369,9 @@ class LMSService:
             if latest_submission is not None:
                 item.latest_submission = latest_submission
                 item.status = (
-                    LearnerModuleStatus.passed
+                    LearnerDeliverableStatus.passed
                     if latest_submission.grade_report.status == GradeStatus.passed
-                    else LearnerModuleStatus.available
+                    else LearnerDeliverableStatus.available
                 )
         refreshed.current_deliverable_id = deliverable.deliverable_id
         if assignment_report.status == GradeStatus.passed:
@@ -378,7 +390,7 @@ class LMSService:
         self,
         enrollment_id: str,
         deliverable_id: str | None = None,
-    ) -> tuple[LearnerEnrollment, LearnerModuleProgress, LearnerModulePackage, Path]:
+    ) -> tuple[LearnerEnrollment, LearnerDeliverableProgress, LearnerDeliverablePackage, Path]:
         enrollment = self.get_enrollment(enrollment_id)
         deliverable = self._resolve_target_deliverable(enrollment, deliverable_id)
         snapshot = self._require_snapshot(enrollment.publish_snapshot_id)
@@ -429,12 +441,12 @@ class LMSService:
             return False, "This course is being prepared and is not ready for learners yet."
         return True, None
 
-    def _deliverable_progress(self, deliverable_package: LearnerModulePackage) -> LearnerModuleProgress:
-        return LearnerModuleProgress(
+    def _deliverable_progress(self, deliverable_package: LearnerDeliverablePackage) -> LearnerDeliverableProgress:
+        return LearnerDeliverableProgress(
             deliverable_id=deliverable_package.deliverable_id,
             title=deliverable_package.title,
             objective=deliverable_package.objective,
-            status=LearnerModuleStatus.available,
+            status=LearnerDeliverableStatus.available,
             deliverable_index=deliverable_package.deliverable_index,
             content_markdown=deliverable_package.content_markdown,
             starter_readme=deliverable_package.starter_readme,
@@ -444,208 +456,27 @@ class LMSService:
     def _ensure_workspace_seeded(self, enrollment: LearnerEnrollment, snapshot: PublishSnapshot) -> Path:
         workspace_root = self._workspace_root(enrollment)
         workspace_root.mkdir(parents=True, exist_ok=True)
-        seed_marker = workspace_root / ".coursegen" / "workspace_seeded.txt"
-
-        learner_package = snapshot.learner_package
-        if learner_package is None or not learner_package.deliverables:
-            raise LMSConflictError("This publish snapshot is missing learner workspace seed files.")
-
-        files_to_write: dict[str, str] = {}
-        for deliverable in learner_package.deliverables:
-            for file in deliverable.workspace_seed_files:
-                files_to_write.setdefault(file.relative_path, file.content)
-        legacy_app = render_legacy_task_agent_root_app()
-        current_app = render_task_agent_root_app()
-        if files_to_write.get("app.py") == legacy_app:
-            files_to_write["app.py"] = current_app
-        project_brief_markdown = self._project_brief_markdown(snapshot)
-        files_to_write["README.md"] = project_brief_markdown
-        files_to_write["project_brief.md"] = project_brief_markdown
-        files_to_write["deliverables.md"] = self._deliverables_markdown(learner_package.deliverables)
-        files_to_write[".coursegen/workspace_seeded.txt"] = snapshot.id + "\n"
-        files_to_write[".coursegen/review_areas/index.json"] = self._review_area_index_json(learner_package.deliverables)
-        files_to_write[".coursegen/deliverables/index.json"] = self._review_area_index_json(learner_package.deliverables)
-        for deliverable in learner_package.deliverables:
-            files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
-            files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/module_content.md"] = deliverable.content_markdown
-            files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
-            files_to_write[f".coursegen/deliverables/{deliverable.deliverable_id}/deliverable.md"] = deliverable.content_markdown
-
-        for relative_path, content in files_to_write.items():
-            target = workspace_root / relative_path
-            if target.exists():
-                if relative_path == "app.py" and target.read_text(encoding="utf-8") == legacy_app:
-                    target.write_text(current_app, encoding="utf-8")
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        return workspace_root
+        try:
+            return seed_workspace_from_snapshot(workspace_root, snapshot)
+        except ValueError as exc:
+            raise LMSConflictError(str(exc)) from exc
 
     def _project_brief_markdown(self, snapshot: PublishSnapshot) -> str:
-        learner_package = snapshot.learner_package
-        if learner_package is None:
-            return ""
-        brief = (learner_package.project_brief_markdown or "").strip()
-        if brief:
-            return brief
-        lines = [
-            f"# {learner_package.title}",
-            "",
-            learner_package.summary or "Build the shared project in the workspace.",
-            "",
-            "## What review will look at",
-            "",
-        ]
-        for index, deliverable in enumerate(learner_package.deliverables, start=1):
-            objective = (deliverable.objective or deliverable.title).strip()
-            lines.append(f"{index}. **{deliverable.title}** - {objective}")
-        lines.extend(
-            [
-                "",
-                "## How to work",
-                "",
-                "- Open the shared VS Code workspace.",
-                "- Run the visible checks while you iterate.",
-                "- Submit the full project for review.",
-                "- Use the deliverable scorecard to see what still needs work.",
-            ]
-        )
-        return "\n".join(lines).strip() + "\n"
-
-    def _review_area_index_json(self, deliverables: list[LearnerModulePackage]) -> str:
-        rows = [
-            {
-                "deliverable_id": deliverable.deliverable_id,
-                "title": deliverable.title,
-                "objective": deliverable.objective,
-                "deliverable_index": deliverable.deliverable_index,
-            }
-            for deliverable in deliverables
-        ]
-        return json.dumps({"review_areas": rows, "deliverables": rows}, indent=2, ensure_ascii=True) + "\n"
-
-    def _deliverables_markdown(self, deliverables: list[LearnerModulePackage]) -> str:
-        lines = [
-            "# Project deliverables",
-            "",
-            "Use this as the checklist for what review will look at on submission.",
-            "",
-        ]
-        for deliverable in deliverables:
-            lines.extend(
-                [
-                    f"## {deliverable.deliverable_index}. {deliverable.title}",
-                    "",
-                    deliverable.objective,
-                    "",
-                ]
-            )
-        return "\n".join(lines).strip() + "\n"
+        return project_brief_markdown(snapshot)
 
     def _learner_assignment_report(
         self,
         snapshot: PublishSnapshot,
         assignment_report: AssignmentGradeReport,
     ) -> AssignmentGradeReport:
-        learner_package = snapshot.learner_package
-        if learner_package is None:
-            return assignment_report
-
-        spec_deliverable_order = (
-            {
-                deliverable.id: index
-                for index, deliverable in enumerate(snapshot.task_agent_spec.modules)
-            }
-            if snapshot.task_agent_spec is not None
-            else {}
-        )
-        deliverable_positions = {
-            deliverable.deliverable_id: position
-            for position, deliverable in enumerate(learner_package.deliverables)
-        }
-        aggregated: dict[str, ReviewAreaGradeReport] = {}
-        for review_area in assignment_report.review_areas:
-            learner_deliverable = self._resolve_review_area_deliverable(
-                learner_package.deliverables,
-                review_area.deliverable_id,
-                spec_deliverable_order,
-            )
-            learner_deliverable_id = (
-                learner_deliverable.deliverable_id if learner_deliverable is not None else review_area.deliverable_id
-            )
-            learner_title = learner_deliverable.title if learner_deliverable is not None else review_area.title
-            learner_objective = learner_deliverable.objective if learner_deliverable is not None else review_area.objective
-            learner_index = (
-                learner_deliverable.deliverable_index
-                if learner_deliverable is not None
-                else review_area.deliverable_index
-            )
-
-            existing = aggregated.get(learner_deliverable_id)
-            if existing is None:
-                aggregated[learner_deliverable_id] = ReviewAreaGradeReport(
-                    deliverable_id=learner_deliverable_id,
-                    title=learner_title,
-                    objective=learner_objective,
-                    deliverable_index=learner_index,
-                    grade_report=review_area.grade_report.model_copy(update={"deliverable_id": learner_deliverable_id}),
-                )
-                continue
-
-            merged_results = [*existing.grade_report.results, *review_area.grade_report.results]
-            merged_warnings = list(dict.fromkeys([
-                *existing.grade_report.submission_warnings,
-                *review_area.grade_report.submission_warnings,
-            ]))
-            passed_tests = existing.grade_report.passed_tests + review_area.grade_report.passed_tests
-            total_tests = existing.grade_report.total_tests + review_area.grade_report.total_tests
-            failed_tests = total_tests - passed_tests
-            pass_rate = passed_tests / total_tests if total_tests else 0.0
-            aggregated[learner_deliverable_id] = ReviewAreaGradeReport(
-                deliverable_id=learner_deliverable_id,
-                title=learner_title,
-                objective=learner_objective,
-                deliverable_index=learner_index,
-                grade_report=ModuleGradeReport(
-                    deliverable_id=learner_deliverable_id,
-                    total_tests=total_tests,
-                    passed_tests=passed_tests,
-                    failed_tests=failed_tests,
-                    pass_rate=pass_rate,
-                    status=GradeStatus.passed if failed_tests == 0 else GradeStatus.failed,
-                    results=merged_results,
-                    submission_warnings=merged_warnings,
-                ),
-            )
-
-        ordered_review_areas = sorted(
-            aggregated.values(),
-            key=lambda item: (
-                deliverable_positions.get(item.deliverable_id, item.deliverable_index - 1),
-                item.deliverable_index,
-                item.deliverable_id,
-            ),
-        )
-        passed_tests = sum(item.grade_report.passed_tests for item in ordered_review_areas)
-        total_tests = sum(item.grade_report.total_tests for item in ordered_review_areas)
-        failed_tests = total_tests - passed_tests
-        pass_rate = passed_tests / total_tests if total_tests else 0.0
-        return AssignmentGradeReport(
-            total_tests=total_tests,
-            passed_tests=passed_tests,
-            failed_tests=failed_tests,
-            pass_rate=pass_rate,
-            status=GradeStatus.passed if failed_tests == 0 else GradeStatus.failed,
-            review_areas=ordered_review_areas,
-            submission_warnings=assignment_report.submission_warnings,
-        )
+        return remap_assignment_report_to_deliverables(snapshot, assignment_report)
 
     def _resolve_review_area_deliverable(
         self,
-        deliverables: list[LearnerModulePackage],
+        deliverables: list[LearnerDeliverablePackage],
         spec_deliverable_id: str,
         spec_deliverable_order: dict[str, int] | None = None,
-    ) -> LearnerModulePackage | None:
+    ) -> LearnerDeliverablePackage | None:
         for deliverable in deliverables:
             if deliverable.deliverable_id == spec_deliverable_id:
                 return deliverable
@@ -677,7 +508,7 @@ class LMSService:
         self,
         enrollment: LearnerEnrollment,
         requested_deliverable_id: str | None,
-    ) -> LearnerModuleProgress:
+    ) -> LearnerDeliverableProgress:
         target_deliverable_id = requested_deliverable_id or enrollment.current_deliverable_id
         if target_deliverable_id is None and enrollment.deliverables:
             target_deliverable_id = enrollment.deliverables[-1].deliverable_id
@@ -700,7 +531,7 @@ class LMSService:
             return None
         return max(grouped.values(), key=lambda item: item.created_at)
 
-    def _resolve_deliverable_package(self, snapshot: PublishSnapshot, deliverable_id: str) -> LearnerModulePackage:
+    def _resolve_deliverable_package(self, snapshot: PublishSnapshot, deliverable_id: str) -> LearnerDeliverablePackage:
         learner_package = snapshot.learner_package
         if learner_package is None:
             raise LMSConflictError("This publish snapshot is missing its learner package.")

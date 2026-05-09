@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field
 from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.task_agent_starter_templates import (
-    render_task_agent_module_app,
-    render_task_agent_runtime_module,
+    render_task_agent_deliverable_app,
+    render_task_agent_runtime_deliverable,
 )
 
 
@@ -59,19 +59,19 @@ class TaskAgentWorkspaceAuthoringService:
         if workspace is None:
             return run, False, "The workspace is missing and could not be prepared."
 
-        failed_modules = {
-            report.module_id
-            for report in (latest_node.sandbox_result.module_reports if latest_node.sandbox_result else [])
+        failed_deliverables = {
+            report.deliverable_id
+            for report in (latest_node.sandbox_result.deliverable_reports if latest_node.sandbox_result else [])
             if not report.compile_succeeded or not report.runtime_succeeded
         }
         if failure_context is not None and failure_context.sandbox is not None:
-            failed_modules.update(failure_context.sandbox.failed_modules)
+            failed_deliverables.update(failure_context.sandbox.failed_deliverables)
         finding_text = " ".join(
             f"{finding.title} {finding.detail}"
             for finding in (failure_context.findings if failure_context is not None else latest_node.findings)
         ).lower()
         full_repair = (
-            not failed_modules
+            not failed_deliverables
             or "placeholder starter" in finding_text
             or "starter endpoints remain" in finding_text
             or (
@@ -99,7 +99,7 @@ class TaskAgentWorkspaceAuthoringService:
             )
         updated_files = self._write_runtime_files(
             run,
-            module_ids=sorted(failed_modules),
+            deliverable_ids=sorted(failed_deliverables),
             force=True,
         )
         if updated_files:
@@ -113,7 +113,7 @@ class TaskAgentWorkspaceAuthoringService:
                 run,
                 True,
                 (
-                    "Re-rendered the shared runtime and starter wrappers for the failed workspace modules."
+                    "Re-rendered the shared runtime and starter wrappers for the failed workspace deliverables."
                     if not full_repair
                     else "Re-rendered the shared runtime and starter wrappers across the workspace."
                 )
@@ -128,7 +128,7 @@ class TaskAgentWorkspaceAuthoringService:
         self,
         run: WorkflowRun,
         *,
-        module_ids: list[str] | None = None,
+        deliverable_ids: list[str] | None = None,
         force: bool = False,
     ) -> list[str]:
         spec = run.artifacts.task_agent_spec
@@ -142,21 +142,21 @@ class TaskAgentWorkspaceAuthoringService:
         updated_files.extend(
             self._write_if_needed(
                 runtime_path,
-                render_task_agent_runtime_module(),
+                render_task_agent_runtime_deliverable(),
                 workspace.root_dir,
                 force=force,
             )
         )
 
-        allowed_modules = set(module_ids or [module.id for module in spec.modules])
-        for module in spec.modules:
-            if module.id not in allowed_modules:
+        allowed_deliverables = set(deliverable_ids or [deliverable.id for deliverable in spec.deliverables])
+        for deliverable in spec.deliverables:
+            if deliverable.id not in allowed_deliverables:
                 continue
-            module_app = Path(workspace.public_dir) / "starter" / module.id / "app.py"
+            deliverable_app = Path(workspace.public_dir) / "starter" / deliverable.id / "app.py"
             updated_files.extend(
                 self._write_if_needed(
-                    module_app,
-                    render_task_agent_module_app(),
+                    deliverable_app,
+                    render_task_agent_deliverable_app(),
                     workspace.root_dir,
                     force=force,
                 )
