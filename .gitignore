@@ -10,3 +10,5 @@ generated-test-alignment/
 workspaces/
 learner_workspaces/
 archives/
+course_gen.db
+tmp/

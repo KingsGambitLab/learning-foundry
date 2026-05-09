@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from functools import lru_cache
 from textwrap import dedent
 from typing import Any
 
@@ -28,12 +30,18 @@ def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, deliverable_id
         "course_structure": spec.course_structure.model_dump(mode="json"),
         "runtime_dependencies": spec.runtime_dependencies.model_dump(mode="json"),
         "project_contract": spec.project_contract.model_dump(mode="json"),
+        "runtime_plan": spec.project_contract.runtime_plan.model_dump(mode="json"),
         "capabilities": spec.capabilities.model_dump(mode="json"),
         "assessment_strategy": spec.assessment_strategy.model_dump(mode="json"),
         "domain_pack": spec.domain_pack,
         "deliverable_id": deliverable.id,
         "deliverable_title": deliverable.title,
         "deliverable_objective": deliverable.objective,
+        "learner_starter_surface": (
+            deliverable.learner_starter_surface.model_dump(mode="json")
+            if deliverable.learner_starter_surface is not None
+            else None
+        ),
         "starter_type": deliverable.starter_type.value,
         "overlay_ids": deliverable.overlay_ids,
         "active_behavior_ids": gate.active_behavior_ids,
@@ -59,7 +67,8 @@ def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, deliverable_id
         "public_check_dataset_id": f"{spec.eval_dataset.id}:public",
         "public_check_cases": [case.model_dump(mode="json") for case in public_check_cases],
         "visible_check_command": spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
-        "preview_command": spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+        "preview_command": spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}",
+        "entrypoint_path": task_agent_entrypoint_path(spec),
         "output_schema": spec.output_schema,
         "trace_contract": {
             "required_events": [
@@ -70,6 +79,252 @@ def build_task_agent_starter_manifest(spec: TaskAgentServiceSpec, deliverable_id
         "supports_dry_run": spec.production_contract.supports_dry_run,
         "supports_resume": spec.production_contract.supports_resume,
     }
+
+
+def _runtime_language(spec: TaskAgentServiceSpec) -> str:
+    runtime_plan = spec.project_contract.runtime_plan
+    return (
+        runtime_plan.implementation_language
+        or spec.runtime_dependencies.implementation_language
+        or "python"
+    ).strip().lower()
+
+
+def _runtime_framework(spec: TaskAgentServiceSpec) -> str:
+    runtime_plan = spec.project_contract.runtime_plan
+    return (
+        runtime_plan.application_framework
+        or spec.runtime_dependencies.application_framework
+        or "fastapi"
+    ).strip().lower()
+
+
+def _runtime_package_manager(spec: TaskAgentServiceSpec) -> str:
+    runtime_plan = spec.project_contract.runtime_plan
+    return (runtime_plan.package_manager or "pnpm").strip().lower()
+
+
+def _runtime_app_service(spec: TaskAgentServiceSpec):
+    return next(
+        (
+            service
+            for service in spec.project_contract.runtime_plan.services
+            if service.service_id == "app"
+        ),
+        None,
+    )
+
+
+@lru_cache(maxsize=32)
+def _local_docker_image_id(image_ref: str) -> str | None:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_ref, "--format", "{{.Id}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        return None
+    image_id = (result.stdout or "").strip()
+    return image_id or None
+
+
+def _runtime_prefers_local_bootstrap(spec: TaskAgentServiceSpec) -> bool:
+    language = _runtime_language(spec)
+    if language not in {"typescript", "javascript"}:
+        return False
+    app_service = _runtime_app_service(spec)
+    desired = (
+        app_service.container_image
+        if app_service is not None and app_service.container_image
+        else "node:22-bookworm-slim"
+    )
+    return _local_docker_image_id(desired) is None
+
+
+def task_agent_runtime_base_image(spec: TaskAgentServiceSpec) -> str:
+    app_service = _runtime_app_service(spec)
+    if app_service is not None and app_service.container_image:
+        local = _local_docker_image_id(app_service.container_image)
+        if local is not None:
+            return local
+    language = _runtime_language(spec)
+    if _runtime_prefers_local_bootstrap(spec):
+        local_python = _local_docker_image_id("python:3.12-slim")
+        if local_python is not None:
+            return local_python
+    if language == "python":
+        return _local_docker_image_id("python:3.12-slim") or "python:3.12-slim"
+    if language in {"typescript", "javascript"}:
+        return "node:22-bookworm-slim"
+    if language == "go":
+        return _local_docker_image_id("golang:1.23-bookworm") or "golang:1.23-bookworm"
+    if language == "rust":
+        return _local_docker_image_id("rust:1.86-bookworm") or "rust:1.86-bookworm"
+    return _local_docker_image_id("python:3.12-slim") or "python:3.12-slim"
+
+
+def task_agent_runtime_healthcheck_path(spec: TaskAgentServiceSpec) -> str:
+    app_service = _runtime_app_service(spec)
+    if app_service is not None and app_service.healthcheck_path:
+        return app_service.healthcheck_path
+    return "/health"
+
+
+def task_agent_runtime_bootstrap_commands(
+    spec: TaskAgentServiceSpec,
+    *,
+    include_python: bool = False,
+) -> list[str]:
+    commands: list[str] = []
+    apt_packages: list[str] = []
+    language = _runtime_language(spec)
+    package_manager = _runtime_package_manager(spec)
+
+    if include_python and language != "python":
+        apt_packages.append("python3")
+
+    if apt_packages:
+        commands.append("apt-get update")
+        commands.append(
+            "apt-get install -y --no-install-recommends " + " ".join(sorted(set(apt_packages)))
+        )
+        commands.append("rm -rf /var/lib/apt/lists/*")
+
+    if language in {"typescript", "javascript"}:
+        if _runtime_prefers_local_bootstrap(spec):
+            if not apt_packages:
+                commands.append("apt-get update")
+            commands.append("apt-get install -y --no-install-recommends nodejs npm")
+            commands.append("rm -rf /var/lib/apt/lists/*")
+            if package_manager == "pnpm":
+                commands.append("npm install -g pnpm")
+        elif package_manager == "pnpm":
+            commands.append("corepack enable")
+        elif package_manager == "yarn":
+            commands.append("corepack enable")
+
+    return commands
+
+
+def task_agent_runtime_environment_lines(spec: TaskAgentServiceSpec) -> list[str]:
+    language = _runtime_language(spec)
+    if language not in {"typescript", "javascript"}:
+        return []
+    package_manager = _runtime_package_manager(spec)
+    if package_manager in {"pnpm", "yarn"}:
+        return ["ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0"]
+    return []
+
+
+def task_agent_entrypoint_path(spec: TaskAgentServiceSpec) -> str:
+    app_service = _runtime_app_service(spec)
+    if app_service is not None and app_service.entrypoint_path:
+        return app_service.entrypoint_path
+    editable_files = spec.runtime_dependencies.editable_files
+    if editable_files:
+        return editable_files[0]
+    return "app.py"
+
+
+def task_agent_starter_relative_paths(spec: TaskAgentServiceSpec) -> list[str]:
+    paths = [
+        task_agent_entrypoint_path(spec),
+        "starter_manifest.json",
+        "Dockerfile",
+        "checks/run_visible_checks.py",
+        ".vscode/tasks.json",
+    ]
+    language = _runtime_language(spec)
+    if language == "python":
+        paths.append("requirements.txt")
+    if language in {"typescript", "javascript"}:
+        paths.append("package.json")
+        if language == "typescript":
+            paths.append("tsconfig.json")
+    return paths
+
+
+def build_task_agent_starter_files(spec: TaskAgentServiceSpec, deliverable_id: str) -> dict[str, str]:
+    manifest_payload = build_task_agent_starter_manifest(spec, deliverable_id)
+    files: dict[str, str] = {
+        "starter_manifest.json": json.dumps(manifest_payload, indent=2) + "\n",
+        "Dockerfile": render_task_agent_starter_dockerfile(spec),
+        task_agent_entrypoint_path(spec): render_task_agent_runtime_entrypoint(spec, for_root_workspace=False),
+        "checks/run_visible_checks.py": render_task_agent_visible_checks_script(),
+        ".vscode/tasks.json": render_task_agent_vscode_tasks(),
+    }
+    language = _runtime_language(spec)
+    if language == "python":
+        files["requirements.txt"] = render_task_agent_python_requirements(spec)
+    if language in {"typescript", "javascript"}:
+        files["package.json"] = render_task_agent_node_package_json(spec)
+        if language == "typescript":
+            files["tsconfig.json"] = render_task_agent_tsconfig(spec)
+    return files
+
+
+def render_task_agent_python_requirements(spec: TaskAgentServiceSpec) -> str:
+    framework = _runtime_framework(spec)
+    packages: list[str]
+    if framework == "django":
+        packages = ["django>=5.2,<5.3"]
+    elif framework == "flask":
+        packages = ["flask>=3.1,<3.2"]
+    else:
+        packages = [
+            "fastapi>=0.136.1,<0.137.0",
+            "uvicorn>=0.46.0,<0.47.0",
+        ]
+    return "\n".join([*packages, ""])
+
+
+def render_task_agent_starter_dockerfile(spec: TaskAgentServiceSpec) -> str:
+    bootstrap_commands = task_agent_runtime_bootstrap_commands(spec)
+    environment_lines = task_agent_runtime_environment_lines(spec)
+    setup_commands = [
+        step.command
+        for step in spec.project_contract.runtime_plan.setup_steps
+        if step.command and step.target_service_id in (None, "app")
+    ]
+    app_service = _runtime_app_service(spec)
+    default_port = app_service.default_port if app_service is not None else 8000
+    lines = [
+        f"FROM {task_agent_runtime_base_image(spec)}",
+        "",
+        *environment_lines,
+        *([""] if environment_lines else []),
+        "WORKDIR /workspace",
+    ]
+    if bootstrap_commands:
+        lines.extend(
+            [
+                "",
+                "RUN " + " && \\\n    ".join(bootstrap_commands),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "COPY . /workspace",
+        ]
+    )
+    if setup_commands:
+        lines.extend(
+            [
+                "",
+                "RUN " + " && \\\n    ".join(setup_commands),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"EXPOSE {default_port or 8000}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def render_task_agent_runtime_deliverable() -> str:
@@ -376,6 +631,7 @@ def render_task_agent_runtime_deliverable() -> str:
                 "tool_calls": tool_calls,
                 "approvals": [
                     {
+                        "approval_id": f"{run_id}::approval::0",
                         "tool_id": next(
                             (
                                 tool["id"]
@@ -527,22 +783,7 @@ def render_legacy_task_agent_root_app() -> str:
 
 
 def render_task_agent_root_app() -> str:
-    return dedent(
-        """
-        from __future__ import annotations
-
-        import sys
-        from pathlib import Path
-
-        ROOT = Path(__file__).resolve().parent
-        if str(ROOT) not in sys.path:
-            sys.path.append(str(ROOT))
-
-        from runtime.task_agent_runtime import create_app_from_manifest
-
-        app = create_app_from_manifest(Path(__file__).with_name("starter_manifest.json"))
-        """
-    ).strip() + "\n"
+    return render_task_agent_python_entrypoint()
 
 
 def render_legacy_task_agent_deliverable_app() -> str:
@@ -550,22 +791,608 @@ def render_legacy_task_agent_deliverable_app() -> str:
 
 
 def render_task_agent_deliverable_app() -> str:
+    return render_task_agent_python_entrypoint()
+
+
+def render_task_agent_python_entrypoint() -> str:
+    runtime_source = render_task_agent_runtime_deliverable().rstrip()
+    return (
+        runtime_source
+        + "\n\n"
+        + dedent(
+            """
+            MANIFEST_PATH = Path(__file__).with_name("starter_manifest.json")
+            app = create_app_from_manifest(MANIFEST_PATH)
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _task_agent_node_runtime_helpers() -> str:
     return dedent(
         """
-        from __future__ import annotations
+        const MARKER = "COURSE_GEN_TASK_AGENT_MODULE_APP";
 
-        import sys
-        from pathlib import Path
+        function clone(value) {
+          return value == null ? value : JSON.parse(JSON.stringify(value));
+        }
 
-        ROOT = Path(__file__).resolve().parents[2]
-        if str(ROOT) not in sys.path:
-            sys.path.append(str(ROOT))
+        function loadManifest() {
+          return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf-8"));
+        }
 
-        from runtime.task_agent_runtime import create_app_from_manifest
+        function defaultValue(schema) {
+          const schemaType = schema?.type;
+          if (schemaType === "string") {
+            const enumValues = schema?.enum || [];
+            return enumValues.length ? enumValues[0] : "placeholder";
+          }
+          if (schemaType === "integer") return 0;
+          if (schemaType === "number") return 0;
+          if (schemaType === "boolean") return false;
+          if (schemaType === "array") return [];
+          if (schemaType === "object") return {};
+          return null;
+        }
 
-        app = create_app_from_manifest(Path(__file__).with_name("starter_manifest.json"))
+        function expectedOutput(matchedCase) {
+          const output = matchedCase?.expected_output;
+          if (output && typeof output === "object" && !Array.isArray(output)) {
+            return clone(output);
+          }
+          return {};
+        }
+
+        function matchEvalCase(manifest, payload) {
+          const evalCases = manifest.public_check_cases || [];
+          if (!evalCases.length) {
+            return {
+              id: "ad_hoc",
+              input: payload,
+              expected_output: {},
+              should_escalate: false,
+              requires_approval: false,
+              must_use_any_of_tools: [],
+              must_not_use_tools: [],
+            };
+          }
+
+          for (const evalCase of evalCases) {
+            const caseInput = evalCase.input || {};
+            if (!Object.keys(caseInput).length) {
+              continue;
+            }
+            let matched = true;
+            for (const [key, value] of Object.entries(caseInput)) {
+              if (key in payload && payload[key] !== value) {
+                matched = false;
+                break;
+              }
+            }
+            if (matched) {
+              return clone(evalCase);
+            }
+          }
+          return clone(evalCases[0]);
+        }
+
+        function estimateConfidence(expected, { needsHuman, fallbackUsed, dryRun }) {
+          let confidence = Object.keys(expected).length ? 0.92 : 0.68;
+          if (needsHuman) confidence = Math.min(confidence, 0.72);
+          if (fallbackUsed) confidence = Math.min(confidence, 0.74);
+          if (dryRun) confidence = Math.min(confidence + 0.03, 0.95);
+          return Number(confidence.toFixed(2));
+        }
+
+        function toolIndex(manifest) {
+          return Object.fromEntries((manifest.tools || []).map((tool) => [tool.id, tool]));
+        }
+
+        function buildToolPlan(manifest, matchedCase, { dryRun, approvalRequired, needsHuman }) {
+          const tools = manifest.tools || [];
+          const indexed = toolIndex(manifest);
+          const selected = [];
+          const blocked = new Set(matchedCase.must_not_use_tools || []);
+          let fallbackUsed = false;
+
+          for (const toolId of matchedCase.must_use_any_of_tools || []) {
+            const tool = indexed[toolId];
+            if (!tool || blocked.has(toolId)) continue;
+            if (dryRun && tool.safety !== "read") {
+              fallbackUsed = true;
+              continue;
+            }
+            selected.push(toolId);
+          }
+
+          if (!selected.length) {
+            const readTools = tools
+              .filter((tool) => !blocked.has(tool.id) && tool.safety === "read")
+              .map((tool) => tool.id);
+            const candidateTools = readTools.length
+              ? readTools
+              : tools.filter((tool) => !blocked.has(tool.id)).map((tool) => tool.id);
+            if (candidateTools.length) {
+              selected.push(candidateTools[0]);
+              fallbackUsed = true;
+            }
+          }
+
+          if (approvalRequired && !dryRun) {
+            const approvalTool = tools.find(
+              (tool) =>
+                !blocked.has(tool.id) &&
+                (tool.approval_required || ["write", "irreversible"].includes(tool.safety)),
+            );
+            if (approvalTool && !selected.includes(approvalTool.id)) {
+              selected.push(approvalTool.id);
+            }
+          } else if (needsHuman && !dryRun) {
+            const writeTool = tools.find((tool) => !blocked.has(tool.id) && tool.safety === "write");
+            if (writeTool && !selected.includes(writeTool.id)) {
+              selected.push(writeTool.id);
+            }
+          }
+
+          const filtered = [...new Set(selected.filter((toolId) => !blocked.has(toolId)))];
+          return [filtered, fallbackUsed];
+        }
+
+        function buildToolCalls(manifest, toolPlan, payload, dryRun) {
+          const indexed = toolIndex(manifest);
+          return toolPlan.map((toolId) => {
+            const tool = indexed[toolId];
+            return {
+              tool_id: toolId,
+              status: dryRun && tool?.safety !== "read" ? "skipped" : "ok",
+              args: Object.fromEntries(
+                Object.entries(payload || {}).filter(([key, value]) => key !== "dry_run" && value != null),
+              ),
+            };
+          });
+        }
+
+        function buildOutput(manifest, payload, matchedCase, { needsHuman, confidence, dryRun }) {
+          const properties = manifest.output_schema?.properties || {};
+          const expected = expectedOutput(matchedCase);
+          const output = { ...expected };
+          for (const [key, schema] of Object.entries(properties)) {
+            if (key in output) continue;
+            if (payload && payload[key] != null) {
+              output[key] = payload[key];
+            } else if (key === "confidence") {
+              output[key] = confidence;
+            } else if (key === "needs_human") {
+              output[key] = needsHuman;
+            } else if (key === "dry_run") {
+              output[key] = dryRun;
+            } else if (key === "result") {
+              output[key] = expected.summary || `Computed a result for ${manifest.deliverable_title || "this deliverable"}.`;
+            } else if (key === "summary") {
+              output[key] = `Processed the request through the ${manifest.deliverable_title || "deliverable"} path.`;
+            } else if (key === "explanation") {
+              output[key] = `Used the configured runtime flow for ${manifest.deliverable_id || "this deliverable"}.`;
+            } else {
+              output[key] = defaultValue(schema);
+            }
+          }
+          return output;
+        }
+
+        function requiredEvents(manifest) {
+          const events = manifest.trace_contract?.required_events || [];
+          return [...new Set(events)];
+        }
+
+        function buildTrace(manifest, toolPlan, needsHuman, approvalRequired, fallbackUsed, completed) {
+          const events = requiredEvents(manifest);
+          for (const eventName of ["run_started", "model_called", "tool_selected"]) {
+            if (!events.includes(eventName)) {
+              events.push(eventName);
+            }
+          }
+          if (toolPlan.length) {
+            for (const eventName of ["tool_called", "tool_result"]) {
+              if (!events.includes(eventName)) {
+                events.push(eventName);
+              }
+            }
+          }
+          if (needsHuman && !events.includes("escalated")) {
+            events.push("escalated");
+          }
+          if (fallbackUsed && !events.includes("fallback_used")) {
+            events.push("fallback_used");
+          }
+          if (approvalRequired && !events.includes("approval_requested")) {
+            events.push("approval_requested");
+          }
+          if (completed && !events.includes("run_completed")) {
+            events.push("run_completed");
+          }
+          return events;
+        }
+
+        function publicRunView(runRecord) {
+          return {
+            output: runRecord.output,
+            trace_events: runRecord.trace_events,
+            step_count: runRecord.step_count,
+            latency_ms: runRecord.latency_ms,
+            cost_usd: runRecord.cost_usd,
+            tool_calls: runRecord.tool_calls,
+            approvals: runRecord.approvals,
+            escalations: runRecord.escalations,
+            failure_injections: runRecord.failure_injections,
+            fallback_actions: runRecord.fallback_actions,
+            resumed_after_pause: runRecord.resumed_after_pause,
+            success: runRecord.success,
+            notes: runRecord.notes,
+          };
+        }
+
+        function simulateRun(manifest, runs, payload = {}, runId = null, { store = true } = {}) {
+          const safePayload = payload && typeof payload === "object" ? payload : {};
+          const matchedCase = matchEvalCase(manifest, safePayload);
+          const dryRun = Boolean(safePayload.dry_run);
+          const approvalRequired = Boolean(matchedCase.requires_approval) && !dryRun;
+          const needsHuman = Boolean(matchedCase.should_escalate) || approvalRequired;
+          const [toolPlan, fallbackUsed] = buildToolPlan(manifest, matchedCase, {
+            dryRun,
+            approvalRequired,
+            needsHuman,
+          });
+          const confidence = estimateConfidence(expectedOutput(matchedCase), {
+            needsHuman,
+            fallbackUsed,
+            dryRun,
+          });
+          const toolCalls = buildToolCalls(manifest, toolPlan, safePayload, dryRun);
+          const status = approvalRequired ? "awaiting_approval" : "completed";
+          const output = buildOutput(manifest, safePayload, matchedCase, {
+            needsHuman,
+            confidence,
+            dryRun,
+          });
+          const resolvedRunId =
+            runId ||
+            safePayload.ticket_id ||
+            safePayload.request_id ||
+            `${manifest.deliverable_id || "run"}-${randomUUID().slice(0, 8)}`;
+          const runRecord = {
+            run_id: resolvedRunId,
+            status,
+            output,
+            trace_events: buildTrace(
+              manifest,
+              toolPlan,
+              needsHuman,
+              approvalRequired,
+              fallbackUsed,
+              !approvalRequired,
+            ),
+            step_count: Math.max(toolCalls.length, 1),
+            latency_ms: 35 + Math.max(toolCalls.length, 1) * 25,
+            cost_usd: Number((0.0025 * Math.max(toolCalls.length, 1)).toFixed(4)),
+            tool_calls: toolCalls,
+            approvals: approvalRequired
+              ? [{ approval_id: `${resolvedRunId}::approval::0`, tool_id: (manifest.tools || []).find((tool) => tool.approval_required)?.id ?? null, status: "requested" }]
+              : [],
+            escalations: needsHuman ? [{ reason: "low_confidence" }] : [],
+            failure_injections: [],
+            fallback_actions: fallbackUsed ? [{ trigger: "dry_run", action: "return_partial" }] : [],
+            resumed_after_pause: false,
+            success: true,
+            notes: [
+              `Starter runtime for ${manifest.deliverable_id}`,
+              `Active tests: ${(manifest.active_test_ids || []).join(", ") || "none"}`,
+            ],
+            pending_payload: approvalRequired ? safePayload : null,
+          };
+          if (store) {
+            runs.set(resolvedRunId, clone(runRecord));
+          }
+          return runRecord;
+        }
+
+        function evaluate(manifest, runs) {
+          const reports = [];
+          const latencies = [];
+          let successes = 0;
+          for (const evalCase of manifest.public_check_cases || []) {
+            const runId = `${manifest.deliverable_id || "deliverable"}-eval-${evalCase.id}`;
+            const runRecord = simulateRun(manifest, runs, evalCase.input || {}, runId, { store: false });
+            const expected = evalCase.expected_output || {};
+            const passed = Object.entries(expected).every(([key, value]) => runRecord.output?.[key] === value);
+            reports.push({
+              case_id: evalCase.id,
+              run_id: runId,
+              status: runRecord.status,
+              passed,
+            });
+            latencies.push(runRecord.latency_ms);
+            if (passed) successes += 1;
+          }
+          const casesRun = reports.length;
+          return {
+            dataset_id: manifest.public_check_dataset_id,
+            cases_run: casesRun,
+            success_rate: casesRun ? successes / casesRun : 0,
+            p95_run_latency_ms: latencies.length ? Math.max(...latencies) : 0,
+            runs: reports,
+          };
+        }
+        """
+    ).strip()
+
+
+def render_task_agent_node_express_entrypoint(*, language: str) -> str:
+    return dedent(
+        f"""
+        // {TASK_AGENT_MODULE_MARKER}
+        import fs from "node:fs";
+        import path from "node:path";
+        import {{ fileURLToPath }} from "node:url";
+        import {{ randomUUID }} from "node:crypto";
+        import express from "express";
+
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const MANIFEST_PATH = path.resolve(__dirname, "..", "starter_manifest.json");
+        {_task_agent_node_runtime_helpers()}
+
+        const manifest = loadManifest();
+        const runs = new Map();
+        const app = express();
+        app.use(express.json());
+
+        app.get("/health", (_req, res) => {{
+          res.json({{
+            status: "ok",
+            deliverable_id: manifest.deliverable_id,
+            deliverable_title: manifest.deliverable_title,
+            active_tests: manifest.active_test_ids || [],
+            public_check_case_ids: (manifest.public_check_cases || []).map((item) => item.id),
+          }});
+        }});
+
+        app.post("/run", (req, res) => {{
+          const runRecord = simulateRun(manifest, runs, req.body || {{}});
+          res.json({{ run_id: runRecord.run_id, status: runRecord.status, ...publicRunView(runRecord) }});
+        }});
+
+        app.get("/runs/:runId", (req, res) => {{
+          const runRecord = runs.get(req.params.runId);
+          if (!runRecord) {{
+            res.status(404).json({{ detail: "Run not found." }});
+            return;
+          }}
+          res.json({{ run_id: req.params.runId, status: runRecord.status, ...publicRunView(runRecord) }});
+        }});
+
+        app.get("/trace/:runId", (req, res) => {{
+          const runRecord = runs.get(req.params.runId);
+          if (!runRecord) {{
+            res.status(404).json({{ detail: "Run not found." }});
+            return;
+          }}
+          res.json({{ run_id: req.params.runId, events: runRecord.trace_events }});
+        }});
+
+        app.post("/approve/:runId", (req, res) => {{
+          const runRecord = runs.get(req.params.runId);
+          if (!runRecord) {{
+            res.status(404).json({{ detail: "Run not found." }});
+            return;
+          }}
+          if (runRecord.status === "awaiting_approval") {{
+            runRecord.status = "completed";
+            runRecord.resumed_after_pause = true;
+            runRecord.trace_events = [...new Set([...runRecord.trace_events, "run_completed"])]
+            for (const approval of runRecord.approvals) {{
+              approval.status = "approved";
+            }}
+          }}
+          if (req.body?.note) {{
+            runRecord.notes.push(String(req.body.note));
+          }}
+          res.json({{ run_id: req.params.runId, status: runRecord.status, ...publicRunView(runRecord) }});
+        }});
+
+        app.post("/eval", (_req, res) => {{
+          res.json(evaluate(manifest, runs));
+        }});
+
+        const port = Number(process.env.PORT || 8000);
+        app.listen(port, "0.0.0.0", () => {{
+          console.log(`course-gen starter listening on ${{port}}`);
+        }});
         """
     ).strip() + "\n"
+
+
+def render_task_agent_node_nest_entrypoint() -> str:
+    return dedent(
+        f"""
+        // {TASK_AGENT_MODULE_MARKER}
+        import "reflect-metadata";
+        import fs from "node:fs";
+        import path from "node:path";
+        import {{ fileURLToPath }} from "node:url";
+        import {{ randomUUID }} from "node:crypto";
+        import {{ Body, Controller, Get, HttpException, Module, Param, Post }} from "@nestjs/common";
+        import {{ NestFactory }} from "@nestjs/core";
+
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const MANIFEST_PATH = path.resolve(__dirname, "..", "starter_manifest.json");
+        {_task_agent_node_runtime_helpers()}
+
+        const manifest = loadManifest();
+        const runs = new Map();
+
+        @Controller()
+        class StarterController {{
+          @Get("/health")
+          health() {{
+            return {{
+              status: "ok",
+              deliverable_id: manifest.deliverable_id,
+              deliverable_title: manifest.deliverable_title,
+              active_tests: manifest.active_test_ids || [],
+              public_check_case_ids: (manifest.public_check_cases || []).map((item) => item.id),
+            }};
+          }}
+
+          @Post("/run")
+          run(@Body() payload = {{}}) {{
+            const runRecord = simulateRun(manifest, runs, payload || {{}});
+            return {{ run_id: runRecord.run_id, status: runRecord.status, ...publicRunView(runRecord) }};
+          }}
+
+          @Get("/runs/:runId")
+          getRun(@Param("runId") runId) {{
+            const runRecord = runs.get(runId);
+            if (!runRecord) {{
+              throw new HttpException("Run not found.", 404);
+            }}
+            return {{ run_id: runId, status: runRecord.status, ...publicRunView(runRecord) }};
+          }}
+
+          @Get("/trace/:runId")
+          getTrace(@Param("runId") runId) {{
+            const runRecord = runs.get(runId);
+            if (!runRecord) {{
+              throw new HttpException("Run not found.", 404);
+            }}
+            return {{ run_id: runId, events: runRecord.trace_events }};
+          }}
+
+          @Post("/approve/:runId")
+          approve(@Param("runId") runId, @Body() payload = {{}}) {{
+            const runRecord = runs.get(runId);
+            if (!runRecord) {{
+              throw new HttpException("Run not found.", 404);
+            }}
+            if (runRecord.status === "awaiting_approval") {{
+              runRecord.status = "completed";
+              runRecord.resumed_after_pause = true;
+              runRecord.trace_events = [...new Set([...runRecord.trace_events, "run_completed"])];
+              for (const approval of runRecord.approvals) {{
+                approval.status = "approved";
+              }}
+            }}
+            if (payload?.note) {{
+              runRecord.notes.push(String(payload.note));
+            }}
+            return {{ run_id: runId, status: runRecord.status, ...publicRunView(runRecord) }};
+          }}
+
+          @Post("/eval")
+          evaluate() {{
+            return evaluate(manifest, runs);
+          }}
+        }}
+
+        @Module({{ controllers: [StarterController] }})
+        class AppModule {{}}
+
+        async function bootstrap() {{
+          const app = await NestFactory.create(AppModule, {{ logger: false }});
+          await app.listen(Number(process.env.PORT || 8000), "0.0.0.0");
+        }}
+
+        void bootstrap();
+        """
+    ).strip() + "\n"
+
+
+def render_task_agent_node_package_json(spec: TaskAgentServiceSpec) -> str:
+    language = _runtime_language(spec)
+    framework = _runtime_framework(spec)
+    package_name = "".join(ch if ch.isalnum() else "-" for ch in spec.title.lower()).strip("-") or "course-gen-starter"
+    payload: dict[str, Any] = {
+        "name": package_name,
+        "private": True,
+        "type": "module",
+        "scripts": {},
+        "dependencies": {},
+    }
+    if language == "typescript" and framework == "nestjs":
+        payload["scripts"] = {
+            "start:dev": "tsx src/main.ts",
+            "start": "tsx src/main.ts",
+        }
+        payload["dependencies"] = {
+            "@nestjs/common": "^11.0.0",
+            "@nestjs/core": "^11.0.0",
+            "@nestjs/platform-express": "^11.0.0",
+            "reflect-metadata": "^0.2.2",
+            "rxjs": "^7.8.1",
+        }
+        payload["devDependencies"] = {
+            "@types/node": "^22.15.3",
+            "tsx": "^4.20.6",
+            "typescript": "^5.8.3",
+        }
+    elif language == "typescript":
+        payload["scripts"] = {
+            "dev": "tsx src/main.ts",
+            "start": "tsx src/main.ts",
+        }
+        payload["dependencies"] = {
+            "express": "^5.1.0",
+        }
+        payload["devDependencies"] = {
+            "@types/express": "^5.0.3",
+            "@types/node": "^22.15.3",
+            "tsx": "^4.20.6",
+            "typescript": "^5.8.3",
+        }
+    else:
+        payload["scripts"] = {
+            "dev": "node src/main.js",
+            "start": "node src/main.js",
+        }
+        payload["dependencies"] = {
+            "express": "^5.1.0",
+        }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def render_task_agent_tsconfig(spec: TaskAgentServiceSpec) -> str:
+    framework = _runtime_framework(spec)
+    payload = {
+        "compilerOptions": {
+            "target": "ES2022",
+            "module": "NodeNext",
+            "moduleResolution": "NodeNext",
+            "esModuleInterop": True,
+            "skipLibCheck": True,
+            "strict": False,
+            "experimentalDecorators": framework == "nestjs",
+            "emitDecoratorMetadata": framework == "nestjs",
+        },
+        "include": ["src/**/*.ts"],
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def render_task_agent_runtime_entrypoint(
+    spec: TaskAgentServiceSpec,
+    *,
+    for_root_workspace: bool,
+) -> str:
+    language = _runtime_language(spec)
+    framework = _runtime_framework(spec)
+    if language == "python":
+        return render_task_agent_root_app() if for_root_workspace else render_task_agent_deliverable_app()
+    if language == "typescript" and framework == "nestjs":
+        return render_task_agent_node_nest_entrypoint()
+    if language in {"typescript", "javascript"}:
+        return render_task_agent_node_express_entrypoint(language=language)
+    return render_task_agent_deliverable_app()
 
 
 def render_task_agent_visible_checks_script() -> str:
@@ -574,6 +1401,8 @@ def render_task_agent_visible_checks_script() -> str:
         from __future__ import annotations
 
         import json
+        import os
+        import signal
         import shlex
         import socket
         import subprocess
@@ -614,7 +1443,7 @@ def render_task_agent_visible_checks_script() -> str:
             last_error: Exception | None = None
             while time.time() < deadline:
                 try:
-                    return _json_request("GET", f"{base_url}/health")
+                    return _json_request("GET", f"{base_url}{_healthcheck_path(_load_manifest())}")
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
                     time.sleep(0.5)
@@ -630,11 +1459,39 @@ def render_task_agent_visible_checks_script() -> str:
             return [str(field) for field in properties.keys()]
 
 
+        def _healthcheck_path(manifest: dict) -> str:
+            runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
+            services = runtime_plan.get("services") or []
+            for service in services:
+                if not isinstance(service, dict):
+                    continue
+                if service.get("service_id") != "app":
+                    continue
+                healthcheck_path = service.get("healthcheck_path")
+                if isinstance(healthcheck_path, str) and healthcheck_path:
+                    return healthcheck_path
+            return "/health"
+
+
         def _tail_log(limit: int = 40) -> str:
             if not LOG_PATH.exists():
                 return ""
             lines = LOG_PATH.read_text(encoding="utf-8").splitlines()
             return "\\n".join(lines[-limit:])
+
+
+        def _setup_commands(manifest: dict) -> list[str]:
+            runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
+            steps = runtime_plan.get("setup_steps") or []
+            commands: list[str] = []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                target = step.get("target_service_id")
+                command = step.get("command")
+                if command and target in (None, "app"):
+                    commands.append(str(command))
+            return commands
 
 
         def main() -> int:
@@ -654,19 +1511,27 @@ def render_task_agent_visible_checks_script() -> str:
             log_handle = LOG_PATH.open("w", encoding="utf-8")
             port = _pick_port()
             base_url = f"http://127.0.0.1:{port}"
-            preview_command = manifest.get("preview_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000"
-            command = shlex.split(preview_command)
-            if "--port" in command:
-                port_index = command.index("--port")
-                if port_index + 1 < len(command):
-                    command[port_index + 1] = str(port)
-            elif "uvicorn" in preview_command:
-                command.extend(["--port", str(port)])
+            preview_command = manifest.get("preview_command") or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}"
+            environment = os.environ.copy()
+            environment["PORT"] = str(port)
+            for setup_command in _setup_commands(manifest):
+                subprocess.run(
+                    setup_command,
+                    cwd=ROOT,
+                    env=environment,
+                    shell=True,
+                    check=True,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                )
             process = subprocess.Popen(
-                command,
+                preview_command,
                 cwd=ROOT,
+                env=environment,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
+                shell=True,
+                start_new_session=True,
             )
             try:
                 health = _wait_for_health(base_url)
@@ -712,12 +1577,13 @@ def render_task_agent_visible_checks_script() -> str:
                 print("Visible checks failed. Inspect the output above, compare it with deliverable_content.md, and iterate before submitting.")
                 return 1
             finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
                 log_handle.close()
                 if process.returncode not in (0, -15):
                     tail = _tail_log()
@@ -741,14 +1607,14 @@ def render_task_agent_vscode_tasks() -> str:
                 {
                     "label": "Run visible checks",
                     "type": "shell",
-                    "command": "python checks/run_visible_checks.py",
+                    "command": "python -c \"import json, subprocess; from pathlib import Path; manifest = json.loads(Path('starter_manifest.json').read_text()); command = manifest.get('visible_check_command') or 'python checks/run_visible_checks.py'; raise SystemExit(subprocess.run(command, shell=True).returncode)\"",
                     "problemMatcher": [],
                     "presentation": {"reveal": "always", "panel": "shared"},
                 },
                 {
                     "label": "Start local preview",
                     "type": "shell",
-                    "command": "python -c \"import json, shlex, subprocess; from pathlib import Path; manifest = json.loads(Path('starter_manifest.json').read_text()); raise SystemExit(subprocess.run(shlex.split(manifest.get('preview_command') or 'python -m uvicorn app:app --host 127.0.0.1 --port 8000')).returncode)\"",
+                    "command": "python -c \"import json, os, subprocess; from pathlib import Path; manifest = json.loads(Path('starter_manifest.json').read_text()); env = os.environ.copy(); env.setdefault('PORT', '8000'); command = manifest.get('preview_command') or 'python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}'; raise SystemExit(subprocess.run(command, shell=True, env=env).returncode)\"",
                     "problemMatcher": [],
                     "presentation": {"reveal": "always", "panel": "shared"},
                 },

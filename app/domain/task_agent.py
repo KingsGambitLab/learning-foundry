@@ -329,6 +329,8 @@ class ProjectRuntimeServiceSpec(BaseModel):
     technology: str | None = None
     version_hint: str | None = None
     package_manager: str | None = None
+    entrypoint_path: str | None = None
+    container_image: str | None = None
     learner_managed: bool = False
     run_command: str | None = None
     healthcheck_path: str | None = None
@@ -383,6 +385,7 @@ class AssignmentDesignSpec(BaseModel):
 
 class TaskEvalCase(BaseModel):
     id: str
+    title: str | None = None
     input: JsonObject
     expected_output: JsonObject | None = None
     should_escalate: bool | None = None
@@ -586,6 +589,22 @@ class LearnerDeliverableBrief(BaseModel):
     non_goals: list[str] = Field(default_factory=list)
 
 
+class StarterScenarioSpec(BaseModel):
+    id: str
+    title: str
+    request_summary: str
+    expected_behavior: str
+
+
+class LearnerStarterSurfaceSpec(BaseModel):
+    starter_summary: str
+    primary_editable_paths: list[str] = Field(default_factory=list)
+    support_paths: list[str] = Field(default_factory=list)
+    required_endpoints: list[EndpointSpec] = Field(default_factory=list)
+    implementation_checklist: list[str] = Field(default_factory=list)
+    domain_scenarios: list[StarterScenarioSpec] = Field(default_factory=list)
+
+
 class PublicCheckSpec(BaseModel):
     id: str
     title: str
@@ -604,6 +623,7 @@ class DeliverableSpec(BaseModel):
     starter_type: StarterType
     overlay_ids: list[str] = Field(default_factory=list)
     learning_outcomes: list[str] = Field(default_factory=list)
+    learner_starter_surface: LearnerStarterSurfaceSpec | None = None
     learner_brief: LearnerDeliverableBrief | None = None
     public_checks: list[PublicCheckSpec] = Field(default_factory=list)
 

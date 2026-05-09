@@ -103,6 +103,7 @@
       const materializeButton = document.getElementById("materialize-button");
       const publishButton = document.getElementById("publish-button");
       const createRevisionButton = document.getElementById("create-revision-button");
+      const timelineButton = document.getElementById("timeline-button");
       const resetLocalButton = document.getElementById("reset-local-button");
       const activeDraftStorageKey = "courseGenCurrentDraftId";
       const activeTabStorageKey = "courseGenActiveTab";
@@ -1182,6 +1183,10 @@
         materializeButton.disabled = true;
         publishButton.disabled = true;
         createRevisionButton.disabled = true;
+        if (timelineButton) {
+          timelineButton.href = "/draft-timeline";
+          timelineButton.setAttribute("aria-disabled", "true");
+        }
         renderWorkflowProgress();
         renderDraftSwitcherMenu(recentDraftRuns);
         updateWorkspaceChrome();
@@ -2070,6 +2075,10 @@
         materializeButton.disabled = courseRun.stage === "drafting" || isBusy;
         publishButton.disabled = courseRun.stage !== "ready_to_publish" || isBusy;
         createRevisionButton.disabled = courseRun.status !== "published" || isBusy;
+        if (timelineButton) {
+          timelineButton.href = `/draft-timeline?draft=${encodeURIComponent(courseRun.id)}`;
+          timelineButton.removeAttribute("aria-disabled");
+        }
 
         const isPublished = courseRun.status === "published";
         const isReadyToPublish = courseRun.stage === "ready_to_publish";

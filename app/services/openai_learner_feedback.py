@@ -405,8 +405,17 @@ class OpenAILearnerFeedbackService:
         from openai import OpenAI
 
         if base_url:
-            return OpenAI(api_key=api_key, base_url=base_url)
-        return OpenAI(api_key=api_key)
+            return OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=20.0,
+                max_retries=0,
+            )
+        return OpenAI(
+            api_key=api_key,
+            timeout=20.0,
+            max_retries=0,
+        )
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         if not text:

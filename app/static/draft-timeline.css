@@ -1,0 +1,160 @@
+.timeline-shell {
+  display: grid;
+  gap: 20px;
+  padding-block: 24px 40px;
+}
+
+.timeline-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.timeline-subtitle {
+  max-width: 72ch;
+  color: var(--muted-foreground, #596579);
+}
+
+.timeline-toolbar-body {
+  display: grid;
+  gap: 16px;
+}
+
+.timeline-field {
+  margin: 0;
+}
+
+.timeline-input-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.timeline-input-row input {
+  flex: 1 1 auto;
+}
+
+.timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.timeline-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.timeline-summary-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.timeline-stat {
+  display: grid;
+  gap: 4px;
+}
+
+.timeline-stat-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--muted-foreground, #596579);
+  letter-spacing: 0;
+}
+
+.timeline-stat-value {
+  font-size: 15px;
+  color: var(--foreground, #101828);
+}
+
+.timeline-stream-body {
+  display: grid;
+  gap: 16px;
+  position: relative;
+}
+
+.timeline-card {
+  position: relative;
+  padding-left: 24px;
+  border-left: 2px solid rgba(148, 163, 184, 0.22);
+}
+
+.timeline-card::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 8px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
+
+.timeline-card.workflow-node::before {
+  background: #7c3aed;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+.timeline-card.course-event::before {
+  background: #0f766e;
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+}
+
+.timeline-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.timeline-card-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.timeline-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.timeline-card-detail {
+  margin: 8px 0 0;
+  color: var(--muted-foreground, #596579);
+}
+
+.timeline-card details {
+  margin-top: 10px;
+}
+
+.timeline-card summary {
+  cursor: pointer;
+  color: var(--muted-foreground, #596579);
+}
+
+.timeline-card pre {
+  margin: 10px 0 0;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .timeline-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-hero,
+  .timeline-input-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

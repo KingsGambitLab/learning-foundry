@@ -12,6 +12,7 @@ from app.domain.course import (
     CourseEvent,
     CourseGenerationStatus,
     CreateCourseFromCreatorPlanRequest,
+    DraftTimelineResponse,
     LocalDraftResetResult,
     CourseReviewReport,
     CourseRun,
@@ -545,6 +546,15 @@ def get_course_events(course_run_id: str, request: Request) -> list[CourseEvent]
     if run is None:
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.")
     return service.list_events(course_run_id)
+
+
+@router.get("/v1/course-runs/{course_run_id}/timeline", response_model=DraftTimelineResponse, tags=["course"])
+def get_course_timeline(course_run_id: str, request: Request) -> DraftTimelineResponse:
+    service = _course_workflow_service(request)
+    try:
+        return service.timeline(course_run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
 @router.get("/v1/course-runs/{course_run_id}/review", response_model=CourseReviewReport, tags=["course"])

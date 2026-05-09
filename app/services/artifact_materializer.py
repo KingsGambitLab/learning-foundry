@@ -22,11 +22,11 @@ from app.services.learner_brief_builder import (
 )
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.task_agent_starter_templates import (
-    build_task_agent_starter_manifest,
-    render_task_agent_deliverable_app,
+    build_task_agent_starter_files,
     render_task_agent_runtime_deliverable,
-    render_task_agent_visible_checks_script,
-    render_task_agent_vscode_tasks,
+    task_agent_runtime_base_image,
+    task_agent_runtime_bootstrap_commands,
+    task_agent_runtime_environment_lines,
 )
 
 
@@ -217,7 +217,7 @@ class ArtifactMaterializer:
         )
         self._write_text(
             public_dir / "runtime" / "Dockerfile",
-            self._assignment_runtime_dockerfile(),
+            self._assignment_runtime_dockerfile(spec),
             ArtifactVisibility.public,
             files,
             bundle_root,
@@ -267,14 +267,6 @@ class ArtifactMaterializer:
 
         for deliverable in spec.deliverables:
             deliverable_dir = public_dir / "starter" / deliverable.id
-            manifest_payload = build_task_agent_starter_manifest(spec, deliverable.id)
-            self._write_json(
-                deliverable_dir / "starter_manifest.json",
-                manifest_payload,
-                ArtifactVisibility.public,
-                files,
-                bundle_root,
-            )
             self._write_text(
                 public_dir / "content" / f"{deliverable.id}.md",
                 self._deliverable_content(spec, deliverable.id),
@@ -297,27 +289,15 @@ class ArtifactMaterializer:
                 files,
                 bundle_root,
             )
-            self._write_text(
-                deliverable_dir / "app.py",
-                render_task_agent_deliverable_app(),
-                ArtifactVisibility.public,
-                files,
-                bundle_root,
-            )
-            self._write_text(
-                deliverable_dir / "checks" / "run_visible_checks.py",
-                render_task_agent_visible_checks_script(),
-                ArtifactVisibility.public,
-                files,
-                bundle_root,
-            )
-            self._write_text(
-                deliverable_dir / ".vscode" / "tasks.json",
-                render_task_agent_vscode_tasks(),
-                ArtifactVisibility.public,
-                files,
-                bundle_root,
-            )
+            starter_files = build_task_agent_starter_files(spec, deliverable.id)
+            for relative_path, content in starter_files.items():
+                self._write_text(
+                    deliverable_dir / relative_path,
+                    content,
+                    ArtifactVisibility.public,
+                    files,
+                    bundle_root,
+                )
             self._write_visible_fixture_files(
                 spec=spec,
                 deliverable_dir=deliverable_dir,
@@ -520,34 +500,42 @@ class ArtifactMaterializer:
         return render_learner_starter_readme(
             title=f"Starter for {deliverable.title}",
             brief=brief,
+            visible_check_command=spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
+            preview_command=spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}",
             public_checks=deliverable.public_checks,
         )
 
-    def _assignment_runtime_dockerfile(self) -> str:
-        return "\n".join(
+    def _assignment_runtime_dockerfile(self, spec: TaskAgentServiceSpec) -> str:
+        bootstrap_commands = task_agent_runtime_bootstrap_commands(spec, include_python=True)
+        environment_lines = task_agent_runtime_environment_lines(spec)
+        lines = [
+            f"FROM {task_agent_runtime_base_image(spec)}",
+            "",
+            "ENV PYTHONDONTWRITEBYTECODE=1",
+            "ENV PYTHONUNBUFFERED=1",
+            *environment_lines,
+            "",
+            "WORKDIR /workspace",
+        ]
+        if bootstrap_commands:
+            lines.extend(
+                [
+                    "",
+                    "RUN " + " && \\\n    ".join(bootstrap_commands),
+                ]
+            )
+        lines.extend(
             [
-                "FROM python:3.12-slim",
                 "",
-                "ENV PYTHONDONTWRITEBYTECODE=1",
-                "ENV PYTHONUNBUFFERED=1",
-                "",
-                "WORKDIR /workspace",
-                "COPY runtime/requirements.txt /tmp/requirements.txt",
-                "RUN pip install --no-cache-dir -r /tmp/requirements.txt",
                 "COPY . /workspace",
-                'CMD ["python", "runtime/verify_assignment.py"]',
+                'CMD ["python3", "runtime/verify_assignment.py"]',
                 "",
             ]
         )
+        return "\n".join(lines)
 
     def _assignment_runtime_requirements(self) -> str:
-        return "\n".join(
-            [
-                "fastapi>=0.136.1,<0.137.0",
-                "uvicorn>=0.46.0,<0.47.0",
-                "",
-            ]
-        )
+        return "# Runtime verifier uses only the Python standard library.\n"
 
     def _assignment_runtime_readme(self) -> str:
         return "\n".join(
@@ -573,9 +561,8 @@ class ArtifactMaterializer:
                 "",
                 "import json",
                 "import os",
-                "import py_compile",
+                "import signal",
                 "import subprocess",
-                "import sys",
                 "import time",
                 "from pathlib import Path",
                 "from urllib.error import URLError",
@@ -598,12 +585,12 @@ class ArtifactMaterializer:
                 "        return response.status, json.loads(body) if body else {}",
                 "",
                 "",
-                "def wait_for_health(port: int, timeout_s: float = 12.0):",
+                "def wait_for_health(port: int, path: str, timeout_s: float = 12.0):",
                 "    deadline = time.time() + timeout_s",
                 "    last_error = None",
                 "    while time.time() < deadline:",
                 "        try:",
-                '            status, payload = request_json("GET", f"http://127.0.0.1:{port}/health")',
+                '            status, payload = request_json("GET", f"http://127.0.0.1:{port}{path}")',
                 "            return status, payload",
                 "        except URLError as exc:",
                 "            last_error = str(exc)",
@@ -617,16 +604,55 @@ class ArtifactMaterializer:
                 "def terminate(proc: subprocess.Popen[str]):",
                 "    if proc.poll() is not None:",
                 "        return proc.communicate()",
-                "    proc.terminate()",
                 "    try:",
-                "        return proc.communicate(timeout=5)",
+                "        os.killpg(proc.pid, signal.SIGTERM)",
+                "        proc.wait(timeout=5)",
                 "    except subprocess.TimeoutExpired:",
-                "        proc.kill()",
-                "        return proc.communicate(timeout=5)",
+                "        os.killpg(proc.pid, signal.SIGKILL)",
+                "        proc.wait(timeout=5)",
+                "    return proc.communicate()",
+                "",
+                "",
+                "def setup_commands(manifest: dict[str, object]) -> list[str]:",
+                "    runtime_plan = manifest.get('runtime_plan') or (manifest.get('project_contract') or {}).get('runtime_plan') or {}",
+                "    steps = runtime_plan.get('setup_steps') or []",
+                "    commands: list[str] = []",
+                "    for step in steps:",
+                "        if not isinstance(step, dict):",
+                "            continue",
+                "        target = step.get('target_service_id')",
+                "        command = step.get('command')",
+                "        if command and target in (None, 'app'):",
+                "            commands.append(str(command))",
+                "    return commands",
+                "",
+                "",
+                "def healthcheck_path(manifest: dict[str, object]) -> str:",
+                "    runtime_plan = manifest.get('runtime_plan') or (manifest.get('project_contract') or {}).get('runtime_plan') or {}",
+                "    services = runtime_plan.get('services') or []",
+                "    for service in services:",
+                "        if not isinstance(service, dict):",
+                "            continue",
+                "        if service.get('service_id') != 'app':",
+                "            continue",
+                "        candidate = service.get('healthcheck_path')",
+                "        if isinstance(candidate, str) and candidate:",
+                "            return candidate",
+                "    return '/health'",
+                "",
+                "",
+                "def entrypoint_path(manifest: dict[str, object]) -> Path:",
+                "    candidate = manifest.get('entrypoint_path')",
+                "    if isinstance(candidate, str) and candidate:",
+                "        return Path(candidate)",
+                "    runtime_dependencies = manifest.get('runtime_dependencies') or {}",
+                "    editable_files = runtime_dependencies.get('editable_files') or []",
+                "    if editable_files:",
+                "        return Path(str(editable_files[0]))",
+                "    return Path('app.py')",
                 "",
                 "",
                 "def verify_deliverable(deliverable_dir: Path, port: int):",
-                '    app_path = deliverable_dir / "app.py"',
                 "    report = {",
                 '        "deliverable_id": deliverable_dir.name,',
                 '        "compile_succeeded": False,',
@@ -638,24 +664,43 @@ class ArtifactMaterializer:
                 "    }",
                 "    manifest_path = deliverable_dir / 'starter_manifest.json'",
                 "    try:",
-                "        py_compile.compile(str(app_path), doraise=True)",
+                "        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
+                "        app_path = deliverable_dir / entrypoint_path(manifest)",
+                "        if not app_path.exists():",
+                "            raise FileNotFoundError(f'missing entrypoint {app_path.relative_to(deliverable_dir)}')",
+                "        environment = os.environ.copy()",
+                "        environment['PORT'] = str(port)",
+                "        for command in setup_commands(manifest):",
+                "            subprocess.run(",
+                "                command,",
+                "                cwd=deliverable_dir,",
+                "                env=environment,",
+                "                shell=True,",
+                "                check=True,",
+                "                stdout=subprocess.PIPE,",
+                "                stderr=subprocess.PIPE,",
+                "                text=True,",
+                "            )",
                 '        report["compile_succeeded"] = True',
                 "    except Exception as exc:",
                 '        report["error"] = f"compile failed: {exc}"',
                 "        return report",
                 "",
+                "    preview_command = manifest.get('preview_command') or 'python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}'",
                 "    proc = subprocess.Popen(",
-                "        [sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(port), '--log-level', 'warning'],",
+                "        preview_command,",
                 "        cwd=deliverable_dir,",
+                "        env=environment,",
                 "        stdout=subprocess.PIPE,",
                 "        stderr=subprocess.PIPE,",
                 "        text=True,",
+                "        shell=True,",
+                "        start_new_session=True,",
                 "    )",
                 "    try:",
-                "        status_code, _payload = wait_for_health(port)",
+                "        status_code, _payload = wait_for_health(port, healthcheck_path(manifest))",
                 '        report["runtime_succeeded"] = status_code == 200',
                 '        report["health_status_code"] = status_code',
-                "        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
                 "        sample_input = manifest.get('sample_input') or {}",
                 "        run_status, run_payload = request_json('POST', f'http://127.0.0.1:{port}/run', sample_input)",
                 "        if run_status not in (200, 201, 202):",
@@ -746,4 +791,8 @@ class ArtifactMaterializer:
             return "text/markdown"
         if filename.endswith(".py"):
             return "text/x-python"
+        if filename.endswith(".ts"):
+            return "text/x-typescript"
+        if filename.endswith(".js"):
+            return "application/javascript"
         return "text/plain"

@@ -372,8 +372,17 @@ class OpenAICoursePlanner:
         from openai import OpenAI
 
         if base_url:
-            return OpenAI(api_key=api_key, base_url=base_url)
-        return OpenAI(api_key=api_key)
+            return OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=20.0,
+                max_retries=0,
+            )
+        return OpenAI(
+            api_key=api_key,
+            timeout=20.0,
+            max_retries=0,
+        )
 
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}

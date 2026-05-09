@@ -70,7 +70,17 @@ class TaskAgentRepairService:
             notes.append("Rebuilt learner briefs, public checks, and derived deliverable outcomes from the current spec.")
 
         if "missing_editable_files" in issue_codes and not spec.runtime_dependencies.editable_files:
-            spec.runtime_dependencies.editable_files = ["app.py"]
+            app_service = next(
+                (
+                    service
+                    for service in spec.project_contract.runtime_plan.services
+                    if service.service_id == "app"
+                ),
+                None,
+            )
+            spec.runtime_dependencies.editable_files = [
+                app_service.entrypoint_path if app_service is not None and app_service.entrypoint_path else "app.py"
+            ]
             changed = True
             notes.append("Restored the default editable file list for the learner workspace.")
 

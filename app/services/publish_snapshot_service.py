@@ -21,6 +21,7 @@ from app.services.learner_brief_builder import (
     render_learner_deliverable_markdown,
     render_learner_starter_readme,
 )
+from app.services.task_agent_starter_templates import task_agent_starter_relative_paths
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -129,6 +130,7 @@ class PublishSnapshotService:
                 public_checks=public_checks,
             )
             starter_readme = self._learner_starter_readme(
+                spec=spec,
                 course_deliverable_title=course_deliverable.title,
                 learner_brief=learner_brief,
                 public_checks=public_checks,
@@ -231,6 +233,7 @@ class PublishSnapshotService:
     def _learner_starter_readme(
         self,
         *,
+        spec,
         course_deliverable_title: str,
         learner_brief,
         public_checks,
@@ -238,6 +241,8 @@ class PublishSnapshotService:
         return render_learner_starter_readme(
             title=course_deliverable_title,
             brief=learner_brief,
+            visible_check_command=spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
+            preview_command=spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}",
             public_checks=public_checks,
         )
 
@@ -258,22 +263,12 @@ class PublishSnapshotService:
         if spec_deliverable_id is None:
             return seed_files
         seed_files[:0] = [
-            self._read_seed_file(workflow_run_id, "app.py", f"public/starter/{spec_deliverable_id}/app.py"),
             self._read_seed_file(
                 workflow_run_id,
-                "starter_manifest.json",
-                f"public/starter/{spec_deliverable_id}/starter_manifest.json",
-            ),
-            self._read_seed_file(
-                workflow_run_id,
-                "checks/run_visible_checks.py",
-                f"public/starter/{spec_deliverable_id}/checks/run_visible_checks.py",
-            ),
-            self._read_seed_file(
-                workflow_run_id,
-                ".vscode/tasks.json",
-                f"public/starter/{spec_deliverable_id}/.vscode/tasks.json",
-            ),
+                relative_path,
+                f"public/starter/{spec_deliverable_id}/{relative_path}",
+            )
+            for relative_path in task_agent_starter_relative_paths(spec)
         ]
         seen_paths = {file.relative_path for file in seed_files}
         for relative_path in spec.runtime_dependencies.visible_fixture_files:

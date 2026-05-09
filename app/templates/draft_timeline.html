@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Draft Timeline</title>
+    <link rel="stylesheet" href="/static/app-shell.css?v=__DRAFT_TIMELINE_ASSET_VERSION__" />
+    <link rel="stylesheet" href="/static/draft-timeline.css?v=__DRAFT_TIMELINE_ASSET_VERSION__" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="page-shell">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark">CG</span>
+            <span class="brand-copy">
+              <span class="brand-label">Course generation</span>
+              <span class="brand-title">Course Gen Codex</span>
+            </span>
+          </a>
+          <nav class="topnav" aria-label="Primary">
+            <a class="topnav-link active" href="/create-course">Course builder</a>
+            <a class="topnav-link" href="/">Learner LMS</a>
+            <a class="topnav-link" href="/courses">Courses</a>
+            <a class="topnav-link" href="/docs">API docs</a>
+          </nav>
+        </header>
+
+        <main class="container timeline-shell">
+          <section class="timeline-hero">
+            <div>
+              <p class="eyebrow">Draft timeline</p>
+              <h1 id="timeline-title">Inspect a draft's flow</h1>
+              <p id="timeline-subtitle" class="timeline-subtitle">
+                See the course-level events, linked workflow events, and reviewer nodes in one timeline.
+              </p>
+            </div>
+            <a id="timeline-back-link" class="button subtle" href="/create-course">Back to course builder</a>
+          </section>
+
+          <section class="timeline-toolbar panel">
+            <div class="panel-body timeline-toolbar-body">
+              <label class="field timeline-field">
+                <span>Draft id</span>
+                <div class="timeline-input-row">
+                  <input id="timeline-draft-id" type="text" placeholder="course_..." autocomplete="off" spellcheck="false" />
+                  <button id="timeline-load-button" class="button primary" type="button">Load timeline</button>
+                </div>
+              </label>
+              <div id="timeline-meta" class="timeline-meta"></div>
+            </div>
+          </section>
+
+          <div id="timeline-message" class="message" role="status" aria-live="polite"></div>
+
+          <section class="timeline-layout">
+            <aside class="timeline-summary panel">
+              <div class="panel-header">
+                <div>
+                  <p class="section-kicker">Summary</p>
+                  <h2>Current state</h2>
+                </div>
+              </div>
+              <div class="panel-body">
+                <div id="timeline-summary-grid" class="timeline-summary-grid">
+                  <div class="review-item"><p>Load a draft to see the timeline summary.</p></div>
+                </div>
+              </div>
+            </aside>
+
+            <section class="timeline-stream panel">
+              <div class="panel-header">
+                <div>
+                  <p class="section-kicker">Flow</p>
+                  <h2>Back and forth</h2>
+                </div>
+              </div>
+              <div id="timeline-stream" class="panel-body timeline-stream-body">
+                <div class="review-item"><p>No draft loaded yet.</p></div>
+              </div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script id="draft-timeline-state" type="application/json">__DRAFT_TIMELINE_STATE_JSON__</script>
+    <script src="/static/draft-timeline.js?v=__DRAFT_TIMELINE_ASSET_VERSION__" defer></script>
+  </body>
+</html>

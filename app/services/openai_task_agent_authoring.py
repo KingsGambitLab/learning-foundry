@@ -19,6 +19,8 @@ from app.domain.task_agent import (
     OutputSchemaTestParams,
     P95RunLatencyTestParams,
     QualitySpec,
+    LearnerStarterSurfaceSpec,
+    StarterScenarioSpec,
     TaskAgentServiceSpec,
     TaskEvalCase,
     TaskOutputQualityJudgeTestParams,
@@ -61,6 +63,7 @@ class DeliverableCustomization(BaseModel):
     title: str | None = None
     objective: str | None = None
     overlay_ids: list[str] = Field(default_factory=list)
+    learner_starter_surface: "StarterSurfaceCustomization | None" = None
 
 
 class ToolCustomization(BaseModel):
@@ -68,8 +71,27 @@ class ToolCustomization(BaseModel):
     description: str | None = None
 
 
+class SchemaCustomization(BaseModel):
+    required: list[str] = Field(default_factory=list)
+    properties: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class StarterScenarioCustomization(BaseModel):
+    id: str | None = None
+    title: str | None = None
+    request_summary: str | None = None
+    expected_behavior: str | None = None
+
+
+class StarterSurfaceCustomization(BaseModel):
+    starter_summary: str | None = None
+    implementation_checklist: list[str] = Field(default_factory=list)
+    domain_scenarios: list[StarterScenarioCustomization] = Field(default_factory=list)
+
+
 class EvalCaseCustomization(BaseModel):
     id: str
+    title: str | None = None
     input: dict[str, Any] | None = None
     expected_output: dict[str, Any] | None = None
     should_escalate: bool | None = None
@@ -90,6 +112,8 @@ class QualityTargetCustomization(BaseModel):
 
 class TaskAgentCustomization(BaseModel):
     summary: str | None = None
+    task_schema: SchemaCustomization | None = None
+    output_schema: SchemaCustomization | None = None
     deliverables: list[DeliverableCustomization] = Field(default_factory=list)
     tools: list[ToolCustomization] = Field(default_factory=list)
     eval_cases: list[EvalCaseCustomization] = Field(default_factory=list)
@@ -123,6 +147,72 @@ def _matches_schema_rule(schema: dict[str, Any], value: Any) -> bool:
     if expected_type == "object":
         return isinstance(value, dict)
     return True
+
+
+def _normalize_object_schema(schema: SchemaCustomization | None, fallback: dict[str, Any]) -> dict[str, Any]:
+    if schema is None or not schema.properties:
+        return fallback
+    normalized_properties: dict[str, dict[str, Any]] = {}
+    for name, definition in schema.properties.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        normalized_properties[name.strip()] = dict(definition)
+    if not normalized_properties:
+        return fallback
+    required = [item for item in schema.required if item in normalized_properties]
+    return {
+        "type": "object",
+        "required": required,
+        "properties": normalized_properties,
+    }
+
+
+def _normalize_text_list(items: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if not cleaned or cleaned in normalized:
+            continue
+        normalized.append(cleaned)
+    return normalized
+
+
+def _scenario_identifier(value: str | None, *, fallback_index: int) -> str:
+    if isinstance(value, str):
+        normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
+        normalized = "_".join(part for part in normalized.split("_") if part)
+        if normalized:
+            return normalized
+    return f"starter_scenario_{fallback_index}"
+
+
+def _build_authored_domain_scenarios(
+    scenarios: list[StarterScenarioCustomization],
+) -> list[StarterScenarioSpec]:
+    authored: list[StarterScenarioSpec] = []
+    for index, scenario in enumerate(scenarios, start=1):
+        title = scenario.title.strip() if isinstance(scenario.title, str) else ""
+        request_summary = (
+            scenario.request_summary.strip() if isinstance(scenario.request_summary, str) else ""
+        )
+        expected_behavior = (
+            scenario.expected_behavior.strip() if isinstance(scenario.expected_behavior, str) else ""
+        )
+        if not title or not request_summary or not expected_behavior:
+            continue
+        authored.append(
+            StarterScenarioSpec(
+                id=_scenario_identifier(scenario.id or title, fallback_index=index),
+                title=title,
+                request_summary=request_summary,
+                expected_behavior=expected_behavior,
+            )
+        )
+    return authored
 
 
 class OpenAITaskAgentAuthoringService:
@@ -376,11 +466,15 @@ class OpenAITaskAgentAuthoringService:
                     "role": "system",
                     "content": (
                         "You customize learner-ready backend assignments for software engineering courses. "
-                            "Return JSON only. Do not rename deliverable ids, tool ids, or eval case ids. "
-                            "Keep the assignment production-minded, teachable, and safety-aware. "
-                            "Preserve grounded contracts, citations, abstention behavior, and approval gates whenever they apply. "
-                            "If human review feedback or failure context is provided, revise the current assignment to address it directly."
-                        ),
+                        "Return JSON only. Do not rename deliverable ids, tool ids, or eval case ids. "
+                        "Keep the assignment production-minded, teachable, and safety-aware. "
+                        "Preserve grounded contracts, citations, abstention behavior, and approval gates whenever they apply. "
+                        "Make deliverables, tools, and eval cases domain-specific enough that a learner can tell what real system they are building. "
+                        "For each deliverable, author a concrete learner starter surface with a starter summary, implementation checklist, "
+                        "and domain scenarios that explain the real work in learner-owned files. "
+                        "Avoid placeholder cases like 'routine case' or 'ambiguous or risky case'. "
+                        "If human review feedback or failure context is provided, revise the current assignment to address it directly."
+                    ),
                 },
                 {"role": "user", "content": json.dumps(prompt, indent=2)},
             ],
@@ -395,6 +489,11 @@ class OpenAITaskAgentAuthoringService:
         customization: TaskAgentCustomization,
     ) -> TaskAgentServiceSpec:
         updated = spec.model_copy(deep=True)
+        if customization.task_schema is not None:
+            updated.task_schema = _normalize_object_schema(customization.task_schema, updated.task_schema)
+        if customization.output_schema is not None:
+            updated.output_schema = _normalize_object_schema(customization.output_schema, updated.output_schema)
+
         tool_ids = updated.tool_ids
         allowed_input_keys = set(((updated.task_schema.get("properties") or {}).keys()))
         allowed_output_keys = set(((updated.output_schema.get("properties") or {}).keys()))
@@ -414,6 +513,27 @@ class OpenAITaskAgentAuthoringService:
                 deliverable.objective = patch.objective.strip()
             if patch.overlay_ids:
                 deliverable.overlay_ids = list(dict.fromkeys(patch.overlay_ids))
+            if patch.learner_starter_surface is not None:
+                authored_surface = deliverable.learner_starter_surface or LearnerStarterSurfaceSpec(
+                    starter_summary="",
+                    primary_editable_paths=[],
+                    support_paths=[],
+                    required_endpoints=[],
+                    implementation_checklist=[],
+                    domain_scenarios=[],
+                )
+                if patch.learner_starter_surface.starter_summary:
+                    authored_surface.starter_summary = patch.learner_starter_surface.starter_summary.strip()
+                if patch.learner_starter_surface.implementation_checklist:
+                    authored_surface.implementation_checklist = _normalize_text_list(
+                        patch.learner_starter_surface.implementation_checklist
+                    )
+                authored_scenarios = _build_authored_domain_scenarios(
+                    patch.learner_starter_surface.domain_scenarios
+                )
+                if authored_scenarios:
+                    authored_surface.domain_scenarios = authored_scenarios
+                deliverable.learner_starter_surface = authored_surface
 
         tools_by_id = {tool.id: tool for tool in updated.tool_registry.tools}
         for patch in customization.tools:
@@ -428,6 +548,8 @@ class OpenAITaskAgentAuthoringService:
             case = cases_by_id.get(patch.id)
             if case is None:
                 continue
+            if patch.title:
+                case.title = patch.title.strip()
             if patch.input:
                 filtered_input = {
                     key: value for key, value in patch.input.items() if not allowed_input_keys or key in allowed_input_keys
@@ -607,13 +729,39 @@ class OpenAITaskAgentAuthoringService:
                 "keep_eval_case_ids": [case.id for case in base_spec.eval_dataset.cases],
                 "return_shape": {
                     "summary": "string or null",
+                    "task_schema": {
+                        "required": ["domain_field"],
+                        "properties": {"domain_field": {"type": "string"}},
+                    },
+                    "output_schema": {
+                        "required": ["domain_result"],
+                        "properties": {"domain_result": {"type": "string"}},
+                    },
                     "deliverables": [
-                        {"id": "deliverable id", "title": "new title", "objective": "new objective", "overlay_ids": ["optional overlays"]}
+                        {
+                            "id": "deliverable id",
+                            "title": "new title",
+                            "objective": "new objective",
+                            "overlay_ids": ["optional overlays"],
+                            "learner_starter_surface": {
+                                "starter_summary": "one paragraph on what the learner is extending in their own files",
+                                "implementation_checklist": ["specific implementation checkpoint"],
+                                "domain_scenarios": [
+                                    {
+                                        "id": "optional scenario id",
+                                        "title": "concrete learner-visible scenario",
+                                        "request_summary": "what arrives at the app in this scenario",
+                                        "expected_behavior": "what the implementation should do"
+                                    }
+                                ]
+                            }
+                        }
                     ],
                     "tools": [{"id": "tool id", "description": "updated description"}],
                     "eval_cases": [
                         {
                             "id": "existing case id",
+                            "title": "learner-visible scenario title",
                             "input": {"task-specific": "payload"},
                             "expected_output": example_expected_output,
                             "should_escalate": False,
@@ -634,9 +782,12 @@ class OpenAITaskAgentAuthoringService:
                     "notes": ["short notes"]
                 },
                 "eval_case_tag_rule": "Every eval case should carry one or more review-area deliverable ids so hidden grader feedback can map back to a learner-visible deliverable.",
+                "starter_surface_rule": "Assume the learner should work in real learner-owned files, not thin wrappers around hidden runtime helpers. The platform derives editable file paths and required endpoints. You should author the starter summary, implementation checklist, and concrete domain scenarios so the learner can tell what to build.",
             },
             "base_spec": {
                 "summary": base_spec.summary,
+                "task_schema": base_spec.task_schema,
+                "output_schema": base_spec.output_schema,
                 "deliverables": [
                     {
                         "id": deliverable.id,
@@ -644,6 +795,23 @@ class OpenAITaskAgentAuthoringService:
                         "objective": deliverable.objective,
                         "starter_type": deliverable.starter_type.value,
                         "overlay_ids": deliverable.overlay_ids,
+                        "learner_starter_surface": (
+                            {
+                                "starter_summary": deliverable.learner_starter_surface.starter_summary,
+                                "primary_editable_paths": deliverable.learner_starter_surface.primary_editable_paths,
+                                "required_endpoints": [
+                                    endpoint.model_dump(mode="json")
+                                    for endpoint in deliverable.learner_starter_surface.required_endpoints
+                                ],
+                                "implementation_checklist": deliverable.learner_starter_surface.implementation_checklist,
+                                "domain_scenarios": [
+                                    scenario.model_dump(mode="json")
+                                    for scenario in deliverable.learner_starter_surface.domain_scenarios
+                                ],
+                            }
+                            if deliverable.learner_starter_surface is not None
+                            else None
+                        ),
                     }
                     for deliverable in base_spec.deliverables
                 ],
@@ -659,6 +827,7 @@ class OpenAITaskAgentAuthoringService:
                 "eval_cases": [
                     {
                         "id": case.id,
+                        "title": case.title,
                         "input": case.input,
                         "expected_output": case.expected_output,
                         "should_escalate": case.should_escalate,
@@ -689,8 +858,17 @@ class OpenAITaskAgentAuthoringService:
         from openai import OpenAI
 
         if base_url:
-            return OpenAI(api_key=api_key, base_url=base_url)
-        return OpenAI(api_key=api_key)
+            return OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=20.0,
+                max_retries=0,
+            )
+        return OpenAI(
+            api_key=api_key,
+            timeout=20.0,
+            max_retries=0,
+        )
 
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}

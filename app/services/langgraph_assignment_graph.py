@@ -7,7 +7,7 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.domain.sandbox import SandboxExecutionStatus
+from app.domain.sandbox import SandboxExecutionResult, SandboxExecutionStatus
 from app.domain.workflow import (
     ReviewerFinding,
     ReviewerFindingSeverity,
@@ -28,6 +28,7 @@ from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthor
 
 AuthoringRoute = Literal["authoring_repair", "reviewer_runtime", "end"]
 ReviewerRoute = Literal["reviewer_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
+_UNSET = object()
 
 
 class AssignmentGraphState(TypedDict):
@@ -35,6 +36,7 @@ class AssignmentGraphState(TypedDict):
     node_executions: list[WorkflowNodeExecution]
     authoring_attempt: int
     reviewer_attempt: int
+    cached_sandbox_result: SandboxExecutionResult | None
 
 
 class LangGraphAssignmentGraph:
@@ -71,6 +73,7 @@ class LangGraphAssignmentGraph:
             "node_executions": [],
             "authoring_attempt": 0,
             "reviewer_attempt": 0,
+            "cached_sandbox_result": None,
         }
         result = self.graph.invoke(state)
         updated_run = result["run"]
@@ -179,7 +182,12 @@ class LangGraphAssignmentGraph:
 
     def _authoring_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])
-        sandbox_result = self.sandbox_runner.execute(run)
+        state_with_workspace = {
+            **state,
+            "run": run,
+            "cached_sandbox_result": None,
+        }
+        state_with_sandbox, sandbox_result = self._sandbox_result(state_with_workspace, force=True)
         attempt = state["authoring_attempt"] + 1
         findings: list[ReviewerFinding] = [
             ReviewerFinding(
@@ -214,7 +222,7 @@ class LangGraphAssignmentGraph:
             )
 
         return self._append_node(
-            {**state, "run": run},
+            state_with_sandbox,
             kind=WorkflowNodeKind.authoring_runtime,
             attempt=attempt,
             status=status,
@@ -222,6 +230,7 @@ class LangGraphAssignmentGraph:
             findings=findings,
             sandbox_result=sandbox_result,
             authoring_attempt=attempt,
+            cached_sandbox_result=sandbox_result,
         )
 
     def _authoring_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
@@ -261,10 +270,11 @@ class LangGraphAssignmentGraph:
                 )
             ],
             sandbox_result=latest.sandbox_result,
+            cached_sandbox_result=None,
         )
 
     def _reviewer_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
-        sandbox_result = self.sandbox_runner.execute(state["run"])
+        state, sandbox_result = self._sandbox_result(state)
         attempt = state["reviewer_attempt"] + 1
         findings: list[ReviewerFinding] = []
         status = WorkflowNodeStatus.passed
@@ -300,6 +310,7 @@ class LangGraphAssignmentGraph:
             findings=findings,
             sandbox_result=sandbox_result,
             reviewer_attempt=attempt,
+            cached_sandbox_result=sandbox_result,
         )
 
     def _reviewer_repair_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
@@ -339,37 +350,58 @@ class LangGraphAssignmentGraph:
                 )
             ],
             sandbox_result=latest.sandbox_result,
+            cached_sandbox_result=None,
         )
 
     def _reviewer_code_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
-        sandbox_result = self.sandbox_runner.execute(state["run"])
+        state, sandbox_result = self._sandbox_result(state)
         spec = state["run"].artifacts.task_agent_spec
         assert spec is not None
+        primary_editable_paths = list(spec.runtime_dependencies.editable_files or ["app.py"])
+        entrypoint_path = primary_editable_paths[0]
 
         findings: list[ReviewerFinding] = [
             ReviewerFinding(
                 category="code_review",
                 severity=ReviewerFindingSeverity.info,
-                title="FastAPI starter present",
-                detail="The generated starter surface includes the canonical FastAPI endpoints required by the agent contract.",
+                title="Starter runtime entrypoint present",
+                detail=(
+                    "The generated starter surface includes the canonical endpoints required by the published contract "
+                    f"through `{entrypoint_path}`."
+                ),
             )
         ]
         if state["run"].artifacts.workspace_snapshot is not None:
             placeholder_deliverables = []
+            wrapper_deliverables = []
             for deliverable in spec.deliverables:
-                deliverable_app = (
-                    Path(state["run"].artifacts.workspace_snapshot.public_dir)
-                    / "starter"
-                    / deliverable.id
-                    / "app.py"
+                deliverable_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter" / deliverable.id
+                starter_surface = deliverable.learner_starter_surface
+                editable_paths = (
+                    starter_surface.primary_editable_paths
+                    if starter_surface is not None and starter_surface.primary_editable_paths
+                    else primary_editable_paths
                 )
-                try:
-                    source = deliverable_app.read_text(encoding="utf-8")
-                except OSError:
+                deliverable_has_placeholder = False
+                deliverable_has_wrapper = False
+                for relative_path in editable_paths:
+                    deliverable_app = deliverable_dir / relative_path
+                    try:
+                        source = deliverable_app.read_text(encoding="utf-8")
+                    except OSError:
+                        deliverable_has_placeholder = True
+                        continue
+                    if "Implement /run" in source or "status_code=501" in source:
+                        deliverable_has_placeholder = True
+                    if "from runtime.task_agent_runtime import" in source or (
+                        "app = create_app_from_manifest(" in source
+                        and "def create_app_from_manifest(" not in source
+                    ):
+                        deliverable_has_wrapper = True
+                if deliverable_has_placeholder:
                     placeholder_deliverables.append(deliverable.id)
-                    continue
-                if "Implement /run" in source or "status_code=501" in source:
-                    placeholder_deliverables.append(deliverable.id)
+                if deliverable_has_wrapper:
+                    wrapper_deliverables.append(deliverable.id)
             if placeholder_deliverables:
                 findings.append(
                     ReviewerFinding(
@@ -380,13 +412,25 @@ class LangGraphAssignmentGraph:
                         + ", ".join(placeholder_deliverables),
                     )
                 )
-            else:
+            if wrapper_deliverables:
+                findings.append(
+                    ReviewerFinding(
+                        category="code_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Primary starter surface is still a thin wrapper",
+                        detail=(
+                            "The learner-owned files should contain the real application flow, not just import a generated "
+                            "runtime wrapper. Affected review areas: " + ", ".join(wrapper_deliverables)
+                        ),
+                    )
+                )
+            if not placeholder_deliverables and not wrapper_deliverables:
                 findings.append(
                     ReviewerFinding(
                         category="code_review",
                         severity=ReviewerFindingSeverity.info,
-                        title="Workspace starter apps are runnable",
-                        detail="The workspace starter files expose the runtime-backed wrapper instead of placeholder 501 handlers.",
+                        title="Workspace starter apps expose a learner-owned implementation surface",
+                        detail="The workspace starter files expose substantive learner-owned entrypoints instead of placeholder handlers or thin runtime wrappers.",
                     )
                 )
         if spec.production_contract.supports_dry_run:
@@ -422,10 +466,11 @@ class LangGraphAssignmentGraph:
             summary="Reviewer code node checked starter project shape, safety rails, and Docker execution.",
             findings=findings,
             sandbox_result=sandbox_result,
+            cached_sandbox_result=sandbox_result,
         )
 
     def _reviewer_pedagogy_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
-        sandbox_result = self.sandbox_runner.execute(state["run"])
+        state, sandbox_result = self._sandbox_result(state)
         spec = state["run"].artifacts.task_agent_spec
         assert spec is not None
 
@@ -484,6 +529,44 @@ class LangGraphAssignmentGraph:
                     )
                 )
             brief = deliverable.learner_brief
+            starter_surface = deliverable.learner_starter_surface
+            if starter_surface is None:
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=f"{deliverable.id} is missing a starter surface",
+                        detail="Authoring must describe the real learner-owned files, endpoints, and scenarios before this draft can be reviewed.",
+                    )
+                )
+            elif not starter_surface.primary_editable_paths:
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=f"{deliverable.id} starter surface has no primary files",
+                        detail="Learners need a clear primary implementation surface, not just supporting files.",
+                    )
+                )
+            elif any(
+                phrase in " ".join(
+                    [
+                        scenario.title,
+                        scenario.request_summary,
+                        scenario.expected_behavior,
+                    ]
+                ).lower()
+                for scenario in starter_surface.domain_scenarios
+                for phrase in ["routine case", "ambiguous or risky case", "placeholder"]
+            ):
+                findings.append(
+                    ReviewerFinding(
+                        category="pedagogy_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title=f"{deliverable.id} starter scenarios are still generic",
+                        detail="Replace placeholder scenarios with real domain cases that help the learner connect the prompt to the implementation.",
+                    )
+                )
             if brief is None:
                 findings.append(
                     ReviewerFinding(
@@ -512,6 +595,20 @@ class LangGraphAssignmentGraph:
                         detail="Add at least one learner-facing example so the expected behavior is easier to visualize.",
                     )
                 )
+            elif starter_surface is not None and starter_surface.primary_editable_paths:
+                missing_primary_paths = sorted(
+                    set(starter_surface.primary_editable_paths) - set(brief.files_to_edit)
+                )
+                if missing_primary_paths:
+                    findings.append(
+                        ReviewerFinding(
+                            category="pedagogy_review",
+                            severity=ReviewerFindingSeverity.error,
+                            title=f"{deliverable.id} brief drifts from the starter surface",
+                            detail="The learner brief should point at the primary learner-owned files: "
+                            + ", ".join(missing_primary_paths),
+                        )
+                    )
             brief_text = " ".join(
                 [brief.why_this_deliverable_matters, brief.task_to_build, *brief.example_scenarios]
             ).lower()
@@ -557,10 +654,11 @@ class LangGraphAssignmentGraph:
             summary="Reviewer pedagogy node checked the deliverable plan after verifying the assignment in Docker.",
             findings=findings,
             sandbox_result=sandbox_result,
+            cached_sandbox_result=sandbox_result,
         )
 
     def _reviewer_tests_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
-        sandbox_result = self.sandbox_runner.execute(state["run"])
+        state, sandbox_result = self._sandbox_result(state)
         spec = state["run"].artifacts.task_agent_spec
         assert spec is not None
 
@@ -644,6 +742,7 @@ class LangGraphAssignmentGraph:
                     continue
 
                 manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                starter_surface = manifest_payload.get("learner_starter_surface") or {}
                 public_checks = manifest_payload.get("public_checks") or []
                 public_check_cases = manifest_payload.get("public_check_cases") or []
                 visible_check_command = manifest_payload.get("visible_check_command")
@@ -652,6 +751,8 @@ class LangGraphAssignmentGraph:
                     or not public_check_cases
                     or len(public_checks) != len(public_check_cases)
                     or visible_check_command != "python checks/run_visible_checks.py"
+                    or not starter_surface.get("primary_editable_paths")
+                    or not starter_surface.get("required_endpoints")
                 ):
                     learner_checks_valid = False
                     findings.append(
@@ -661,7 +762,7 @@ class LangGraphAssignmentGraph:
                             title=f"Visible learner checks incomplete for {deliverable.id}",
                             detail=(
                                 "Starter manifest must include reviewed public_checks, matching public_check_cases, "
-                                "and the standard visible_check_command."
+                                "a learner starter surface, and the standard visible_check_command."
                             ),
                         )
                     )
@@ -691,6 +792,28 @@ class LangGraphAssignmentGraph:
                         )
                     )
                     continue
+                placeholder_case = next(
+                    (
+                        case
+                        for case in public_check_cases
+                        if any(
+                            phrase in json.dumps(case).lower()
+                            for phrase in ["routine case", "ambiguous or risky case", "placeholder"]
+                        )
+                    ),
+                    None,
+                )
+                if placeholder_case is not None:
+                    learner_checks_valid = False
+                    findings.append(
+                        ReviewerFinding(
+                            category="tests_review",
+                            severity=ReviewerFindingSeverity.error,
+                            title=f"Visible learner scenarios are still placeholders for {deliverable.id}",
+                            detail="Public check cases should use domain-specific learner scenarios instead of generic placeholder cases.",
+                        )
+                    )
+                    continue
 
                 findings.append(
                     ReviewerFinding(
@@ -716,7 +839,19 @@ class LangGraphAssignmentGraph:
             summary="Reviewer test node verified Docker execution, deterministic spec validation, and grader coverage.",
             findings=findings,
             sandbox_result=sandbox_result,
+            cached_sandbox_result=sandbox_result,
         )
+
+    def _sandbox_result(
+        self,
+        state: AssignmentGraphState,
+        *,
+        force: bool = False,
+    ) -> tuple[AssignmentGraphState, SandboxExecutionResult]:
+        if not force and state.get("cached_sandbox_result") is not None:
+            return state, state["cached_sandbox_result"]
+        sandbox_result = self.sandbox_runner.execute(state["run"])
+        return {**state, "cached_sandbox_result": sandbox_result}, sandbox_result
 
     def _append_node(
         self,
@@ -730,6 +865,7 @@ class LangGraphAssignmentGraph:
         sandbox_result,
         authoring_attempt: int | None = None,
         reviewer_attempt: int | None = None,
+        cached_sandbox_result: SandboxExecutionResult | None | object = _UNSET,
     ) -> AssignmentGraphState:
         executions = list(state["node_executions"])
         executions.append(
@@ -749,4 +885,9 @@ class LangGraphAssignmentGraph:
             "node_executions": executions,
             "authoring_attempt": state["authoring_attempt"] if authoring_attempt is None else authoring_attempt,
             "reviewer_attempt": state["reviewer_attempt"] if reviewer_attempt is None else reviewer_attempt,
+            "cached_sandbox_result": (
+                state.get("cached_sandbox_result")
+                if cached_sandbox_result is _UNSET
+                else cached_sandbox_result
+            ),
         }

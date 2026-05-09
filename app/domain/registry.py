@@ -92,6 +92,11 @@ DESIGN_CATALOG = DesignCatalog(
             risk_class=RiskClass.review_required,
             summary="Clinical-case triage; auto-generation requires manual review before publish.",
         ),
+        DomainPackDefinition(
+            id="customer_support_agent",
+            risk_class=RiskClass.standard,
+            summary="Customer support automation with policy-aware replies, escalation, and approvals.",
+        ),
     ],
     overlays=[
         OverlayDefinition(

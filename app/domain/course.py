@@ -116,6 +116,35 @@ class CourseEvent(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class DraftTimelineSourceKind(str, Enum):
+    course_event = "course_event"
+    workflow_event = "workflow_event"
+    workflow_node = "workflow_node"
+
+
+class DraftTimelineItem(BaseModel):
+    id: str
+    created_at: datetime
+    source_kind: DraftTimelineSourceKind
+    source_id: str
+    source_title: str
+    title: str
+    detail: str | None = None
+    event_type: str
+    stage: str | None = None
+    status: str | None = None
+    sequence_no: int | None = None
+    attempt: int | None = None
+    payload: dict = Field(default_factory=dict)
+
+
+class DraftTimelineResponse(BaseModel):
+    course_run: CourseRunSummary
+    shared_workflow_run_id: str | None = None
+    linked_workflow_run_ids: list[str] = Field(default_factory=list)
+    items: list[DraftTimelineItem] = Field(default_factory=list)
+
+
 class CourseRunList(BaseModel):
     runs: list[CourseRunSummary]
 

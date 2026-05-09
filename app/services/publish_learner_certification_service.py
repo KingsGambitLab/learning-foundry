@@ -125,6 +125,7 @@ class PublishLearnerCertificationService:
                     deliverable_id=primary_deliverable_id,
                     workspace_root=workspace_root,
                     scope=learner_package.workspace_scope,
+                    start_support_services=False,
                 )
             except LearnerStudioError as exc:
                 return self._failed_report(
@@ -250,9 +251,11 @@ class PublishLearnerCertificationService:
             return PublishCertificationFailureOrigin.platform_runtime
         if "could not start learner editor container" in lower:
             return PublishCertificationFailureOrigin.platform_runtime
+        if "could not build learner runtime image" in lower:
+            return PublishCertificationFailureOrigin.repairable_generation
         if "could not start grading container" in lower:
             return PublishCertificationFailureOrigin.ambiguous
-        if "timed out waiting for" in lower and "/health" in lower:
+        if "timed out waiting for" in lower:
             return PublishCertificationFailureOrigin.repairable_generation
         if "workspace seed" in lower or "starter_manifest" in lower or "project_brief" in lower:
             return PublishCertificationFailureOrigin.repairable_generation

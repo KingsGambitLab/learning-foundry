@@ -16,6 +16,7 @@ from app.services.course_generation_service import CourseGenerationService
 from app.services.course_workflow_service import CourseWorkflowService
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.dashboard_page import build_dashboard_state, render_author_dashboard
+from app.services.draft_timeline_page import build_draft_timeline_state, render_draft_timeline_page
 from app.services.docs_page import build_docs_state, render_docs_page
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
@@ -151,6 +152,15 @@ def create_course(request: Request) -> HTMLResponse:
         generation_status=request.app.state.course_generation_service.status(),
     )
     return HTMLResponse(render_author_dashboard(dashboard_state))
+
+
+@app.get("/draft-timeline", tags=["system"], include_in_schema=False)
+def draft_timeline(request: Request, draft: str | None = None) -> HTMLResponse:
+    return HTMLResponse(
+        render_draft_timeline_page(
+            build_draft_timeline_state(draft_id=draft)
+        )
+    )
 
 
 @app.get("/", tags=["system"], include_in_schema=False)

@@ -15,6 +15,9 @@ from app.domain.course import (
     CourseGenerationSource,
     CourseGenerationStatus,
     CreatorCourseSetupChoices,
+    DraftTimelineItem,
+    DraftTimelineResponse,
+    DraftTimelineSourceKind,
     LocalDraftResetResult,
     CourseDeliverableDraft,
     CourseDeliverableReview,
@@ -59,6 +62,7 @@ from app.domain.workflow import (
     WorkflowNodeKind,
     WorkflowNodeStatus,
     WorkflowRun,
+    WorkflowEvent,
     WorkflowStatus,
 )
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
@@ -514,6 +518,34 @@ class CourseWorkflowService:
                 course_run_id,
                 course_run.latest_publish_snapshot_id,
             ),
+        )
+
+    def timeline(self, course_run_id: str) -> DraftTimelineResponse:
+        course_run = self._compute_refreshed_run(self._require_run(course_run_id))
+        self.store.save_course_run(course_run)
+        linked_runs = self._linked_runs_with_shared(course_run)
+        items: list[DraftTimelineItem] = []
+        for event in self.store.list_course_events(course_run_id):
+            items.append(self._timeline_item_from_course_event(course_run, event))
+        for workflow_run in linked_runs.values():
+            for event in self.workflow_service.list_events(workflow_run.id):
+                items.append(self._timeline_item_from_workflow_event(workflow_run, event))
+            for node in workflow_run.artifacts.node_executions:
+                items.append(self._timeline_item_from_workflow_node(workflow_run, node))
+        items.sort(
+            key=lambda item: (
+                item.created_at,
+                item.source_title,
+                item.sequence_no if item.sequence_no is not None else 10_000,
+                item.attempt if item.attempt is not None else 10_000,
+                item.id,
+            )
+        )
+        return DraftTimelineResponse(
+            course_run=CourseRunSummary.from_run(course_run),
+            shared_workflow_run_id=course_run.shared_workflow_run_id,
+            linked_workflow_run_ids=list(linked_runs.keys()),
+            items=items,
         )
 
     def record_creator_feedback(
@@ -2019,6 +2051,170 @@ class CourseWorkflowService:
             if child_run is not None:
                 linked_runs[deliverable.workflow_run_id] = child_run
         return linked_runs
+
+    def _linked_runs_with_shared(self, course_run: CourseRun) -> dict[str, WorkflowRun]:
+        linked_runs = self._linked_runs(course_run)
+        if course_run.shared_workflow_run_id and course_run.shared_workflow_run_id not in linked_runs:
+            shared_run = self.workflow_service.get_run(course_run.shared_workflow_run_id)
+            if shared_run is not None:
+                linked_runs[course_run.shared_workflow_run_id] = shared_run
+        return linked_runs
+
+    def _timeline_item_from_course_event(
+        self,
+        course_run: CourseRun,
+        event,
+    ) -> DraftTimelineItem:
+        return DraftTimelineItem(
+            id=f"course:{course_run.id}:{event.sequence_no}",
+            created_at=event.created_at,
+            source_kind=DraftTimelineSourceKind.course_event,
+            source_id=course_run.id,
+            source_title=course_run.title,
+            title=self._timeline_title_for_event(event.event_type),
+            detail=self._timeline_detail_for_event(event.event_type, event.payload),
+            event_type=event.event_type,
+            stage=course_run.stage.value,
+            status=course_run.status.value,
+            sequence_no=event.sequence_no,
+            payload=event.payload,
+        )
+
+    def _timeline_item_from_workflow_event(
+        self,
+        workflow_run: WorkflowRun,
+        event: WorkflowEvent,
+    ) -> DraftTimelineItem:
+        return DraftTimelineItem(
+            id=f"workflow-event:{workflow_run.id}:{event.sequence_no}",
+            created_at=event.created_at,
+            source_kind=DraftTimelineSourceKind.workflow_event,
+            source_id=workflow_run.id,
+            source_title=workflow_run.title,
+            title=self._timeline_title_for_event(event.event_type),
+            detail=self._timeline_detail_for_event(event.event_type, event.payload),
+            event_type=event.event_type,
+            stage=workflow_run.stage.value,
+            status=workflow_run.status.value,
+            sequence_no=event.sequence_no,
+            payload=event.payload,
+        )
+
+    def _timeline_item_from_workflow_node(
+        self,
+        workflow_run: WorkflowRun,
+        node: WorkflowNodeExecution,
+    ) -> DraftTimelineItem:
+        findings = [
+            finding.title.strip()
+            for finding in node.findings
+            if finding.title.strip()
+        ]
+        detail = node.summary.strip()
+        if findings:
+            detail = f"{detail} Key findings: {', '.join(findings[:3])}."
+        return DraftTimelineItem(
+            id=f"workflow-node:{workflow_run.id}:{node.node_id}",
+            created_at=node.created_at,
+            source_kind=DraftTimelineSourceKind.workflow_node,
+            source_id=workflow_run.id,
+            source_title=workflow_run.title,
+            title=f"{self._timeline_title_for_node_kind(node.kind)} · {node.status.value.replace('_', ' ')}",
+            detail=detail,
+            event_type=node.kind.value,
+            stage=workflow_run.stage.value,
+            status=node.status.value,
+            attempt=node.attempt,
+            payload={
+                "node_id": node.node_id,
+                "kind": node.kind.value,
+                "status": node.status.value,
+                "summary": node.summary,
+                "findings": [finding.model_dump(mode="json") for finding in node.findings],
+            },
+        )
+
+    def _timeline_title_for_event(self, event_type: str) -> str:
+        overrides = {
+            "course_run_created": "Draft created",
+            "course_generation_queued": "Generation queued",
+            "course_brief_generated": "Course brief generated",
+            "course_generation_failed": "Generation failed",
+            "course_run_synced": "Draft synced",
+            "course_publish_requested": "Publish requested",
+            "course_published": "Course published",
+            "course_publish_failed": "Publish failed",
+            "course_materialize_requested": "Review package requested",
+            "course_materialized": "Review package built",
+            "course_materialize_failed": "Review package failed",
+            "course_revision_queued": "Revision queued",
+            "course_revision_started": "Revision started",
+            "course_revision_created": "Revision created",
+            "run_created": "Workflow run created",
+            "run_revision_created": "Workflow revision created",
+            "task_agent_spec_updated": "Assignment spec updated",
+            "task_agent_workspace_materialized": "Workspace materialized",
+            "bundle_materialized": "Bundle materialized",
+            "hil_gate_decision": "Human review decision",
+            "langgraph_nodes_executed": "Reviewer loop finished",
+            "langgraph_nodes_failed": "Reviewer loop failed",
+        }
+        if event_type in overrides:
+            return overrides[event_type]
+        return event_type.replace("_", " ").strip().capitalize()
+
+    def _timeline_title_for_node_kind(self, kind: WorkflowNodeKind) -> str:
+        labels = {
+            WorkflowNodeKind.authoring_runtime: "Authoring runtime",
+            WorkflowNodeKind.authoring_repair: "Authoring repair",
+            WorkflowNodeKind.reviewer_runtime: "Runtime review",
+            WorkflowNodeKind.reviewer_repair: "Reviewer repair",
+            WorkflowNodeKind.reviewer_code: "Code review",
+            WorkflowNodeKind.reviewer_pedagogy: "Pedagogy review",
+            WorkflowNodeKind.reviewer_tests: "Tests review",
+            WorkflowNodeKind.reviewer_learner_runtime: "Learner runtime review",
+        }
+        return labels.get(kind, kind.value.replace("_", " ").title())
+
+    def _timeline_detail_for_event(self, event_type: str, payload: dict) -> str | None:
+        if not payload:
+            return None
+        if isinstance(payload.get("message"), str) and payload["message"].strip():
+            return payload["message"].strip()
+        if isinstance(payload.get("error"), str) and payload["error"].strip():
+            return payload["error"].strip()
+        if event_type == "course_run_created":
+            deliverable_count = payload.get("deliverable_count")
+            return (
+                f"Created a draft with {deliverable_count} deliverable"
+                f"{'' if deliverable_count == 1 else 's'}."
+                if isinstance(deliverable_count, int)
+                else "Created a new course draft."
+            )
+        if event_type == "course_brief_generated":
+            deliverable_count = payload.get("deliverable_count")
+            source = payload.get("source")
+            parts: list[str] = []
+            if isinstance(deliverable_count, int):
+                parts.append(f"Planned {deliverable_count} deliverables")
+            if source:
+                parts.append(f"via {source}")
+            return ". ".join(parts) + ("." if parts else "")
+        if event_type == "run_created":
+            draft_kind = payload.get("draft_kind")
+            design_status = payload.get("design_status")
+            parts = [part for part in [draft_kind, design_status] if part]
+            return f"Initialized workflow run ({', '.join(parts)})." if parts else "Initialized workflow run."
+        if event_type == "hil_gate_decision":
+            gate = payload.get("gate")
+            decision = payload.get("decision")
+            if gate and decision:
+                return f"{decision.capitalize()} on {gate}."
+        summary_keys = ["stage", "status", "pending_gate", "workflow_run_id", "source_run_id"]
+        fragments = [f"{key}: {payload[key]}" for key in summary_keys if payload.get(key) is not None]
+        if fragments:
+            return " · ".join(fragments)
+        return None
 
     def _published_version_changes(
         self,

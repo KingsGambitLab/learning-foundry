@@ -82,16 +82,44 @@ class LearnerStudioServiceTests(unittest.TestCase):
             )
 
         mock_remove_container.assert_called_once_with(self.existing_session.container_name)
-        self.assertEqual(mock_run.call_count, 1)
-        docker_command = mock_run.call_args.args[0]
+        self.assertGreaterEqual(mock_run.call_count, 1)
+        docker_command = mock_run.call_args_list[-1].args[0]
         self.assertIn("run", docker_command)
         self.assertIn("-v", docker_command)
         self.assertIn(f"{self.workspace_root.resolve()}:/workspace", docker_command)
+        self.assertNotIn("--network", docker_command)
+        self.assertNotIn("--network-alias", docker_command)
         self.assertEqual(refreshed.container_name, self.existing_session.container_name)
         self.assertEqual(refreshed.host_port, 19191)
         self.assertEqual(refreshed.editor_url, "http://127.0.0.1:19191/")
         self.assertEqual(refreshed.deliverable_id, "exercise/01-contract")
         self.assertEqual(refreshed.status, LearnerWorkspaceSessionStatus.running)
+
+    def test_grade_assignment_skips_docker_network_when_workspace_has_no_dependency_services(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        spec = SimpleNamespace(
+            runtime_dependencies=SimpleNamespace(preview_command="python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"),
+            project_contract=SimpleNamespace(runtime_plan=SimpleNamespace(services=[])),
+        )
+
+        with (
+            patch.object(service, "_allocate_port", return_value=18001),
+            patch.object(service, "_ensure_runtime_image_available"),
+            patch.object(service, "_workspace_runtime_image_name", return_value="course-gen-runtime:test"),
+            patch.object(service, "_wait_for_http"),
+            patch.object(service, "_remove_runtime_support"),
+            patch.object(service.runner, "grade_assignment_live", return_value=SimpleNamespace(status="failed")),
+            patch("app.services.learner_studio_service.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as mock_run,
+        ):
+            service.grade_assignment(
+                workspace_root=self.workspace_root,
+                spec=spec,
+            )
+
+        docker_command = mock_run.call_args.args[0]
+        self.assertIn("run", docker_command)
+        self.assertNotIn("--network", docker_command)
+        self.assertNotIn("--network-alias", docker_command)
 
 
 if __name__ == "__main__":

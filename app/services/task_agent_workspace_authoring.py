@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.task_agent_starter_templates import (
-    render_task_agent_deliverable_app,
+    build_task_agent_starter_files,
     render_task_agent_runtime_deliverable,
 )
 
@@ -152,15 +152,16 @@ class TaskAgentWorkspaceAuthoringService:
         for deliverable in spec.deliverables:
             if deliverable.id not in allowed_deliverables:
                 continue
-            deliverable_app = Path(workspace.public_dir) / "starter" / deliverable.id / "app.py"
-            updated_files.extend(
-                self._write_if_needed(
-                    deliverable_app,
-                    render_task_agent_deliverable_app(),
-                    workspace.root_dir,
-                    force=force,
+            for relative_path, content in build_task_agent_starter_files(spec, deliverable.id).items():
+                deliverable_file = Path(workspace.public_dir) / "starter" / deliverable.id / relative_path
+                updated_files.extend(
+                    self._write_if_needed(
+                        deliverable_file,
+                        content,
+                        workspace.root_dir,
+                        force=force,
+                    )
                 )
-            )
         return updated_files
 
     def _write_if_needed(

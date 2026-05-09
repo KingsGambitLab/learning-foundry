@@ -57,6 +57,23 @@ SCENARIOS = [
             "tech_stack": [],
         },
     },
+    {
+        "slug": "url-shortener-nest",
+        "goal": "Build a production-ready URL shortener with analytics, expiration, admin APIs, and cache-aware read performance.",
+        "learning_outcomes": [
+            "Keep the public redirect and admin contracts stable while adding operational depth.",
+            "Use MongoDB and Redis intentionally for durability, analytics, and read acceleration.",
+            "Design a service that is observable, expiration-aware, and safe to evolve.",
+        ],
+        "creator_choices": {
+            "starter_type": "working_buggy",
+            "implementation_language": "typescript",
+            "application_framework": "nestjs",
+            "primary_database": "mongodb",
+            "cache_backend": "redis",
+            "tech_stack": ["Node 22", "NestJS 11", "MongoDB 7", "pnpm", "Redis 7"],
+        },
+    },
 ]
 
 

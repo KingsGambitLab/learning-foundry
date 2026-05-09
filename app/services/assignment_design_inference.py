@@ -100,6 +100,18 @@ DOMAIN_PACK_KEYWORDS: dict[str, list[str]] = {
     "qbr_prep": ["qbr", "business review", "account review"],
     "investment_memo": ["investment", "memo", "venture", "vc"],
     "clinical_case_triage": ["clinical", "patient", "diagnosis", "medical"],
+    "customer_support_agent": [
+        "customer support",
+        "support bot",
+        "support ticket",
+        "ticket",
+        "refund",
+        "billing",
+        "outage",
+        "account access",
+        "suspicious login",
+        "customer message",
+    ],
 }
 
 REVIEW_REQUIRED_KEYWORDS = {"clinical", "patient", "medical", "diagnosis"}
@@ -499,13 +511,13 @@ def runtime_target_commands_for_stack(
     normalized_package_manager = (package_manager or "").strip().lower() or None
 
     if normalized_language == "python":
-        install_command = "uv sync" if normalized_package_manager in {None, "uv"} else "pip install -r requirements.txt"
+        install_command = "python -m pip install -r requirements.txt"
         if normalized_framework == "django":
-            run_command = "python manage.py runserver 0.0.0.0:8000"
+            run_command = "python manage.py runserver 0.0.0.0:${PORT:-8000}"
         elif normalized_framework == "flask":
-            run_command = "flask --app app run --host 0.0.0.0 --port 8000"
+            run_command = "flask --app app run --host 0.0.0.0 --port ${PORT:-8000}"
         else:
-            run_command = "uv run uvicorn app:app --host 0.0.0.0 --port 8000"
+            run_command = "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"
         return install_command, run_command, "python checks/run_visible_checks.py"
 
     if normalized_language in {"typescript", "javascript"}:
@@ -514,7 +526,7 @@ def runtime_target_commands_for_stack(
             "npm": "npm install",
             "yarn": "yarn install",
             "bun": "bun install",
-        }.get(package_manager, "pnpm install")
+        }.get(package_manager, "pnpm install --yes --dangerously-allow-all-builds")
         if normalized_framework == "nestjs":
             run_command = {
                 "npm": "npm run start:dev",
@@ -536,6 +548,67 @@ def runtime_target_commands_for_stack(
         return "cargo fetch", "cargo run", "python checks/run_visible_checks.py"
 
     return None, None, "python checks/run_visible_checks.py"
+
+
+def runtime_entrypoint_for_stack(
+    *,
+    implementation_language: str | None,
+    application_framework: str | None,
+) -> str:
+    normalized_language = (implementation_language or "").strip().lower() or None
+    normalized_framework = (application_framework or "").strip().lower() or None
+
+    if normalized_language == "python":
+        if normalized_framework == "django":
+            return "manage.py"
+        return "app.py"
+    if normalized_language == "typescript":
+        return "src/main.ts"
+    if normalized_language == "javascript":
+        return "src/main.js"
+    if normalized_language == "go":
+        return "main.go"
+    if normalized_language == "rust":
+        return "src/main.rs"
+    return "app.py"
+
+
+def runtime_container_image_for_stack(
+    *,
+    implementation_language: str | None,
+    language_version: str | None,
+) -> str | None:
+    normalized_language = (implementation_language or "").strip().lower() or None
+    version = (language_version or "").strip() or None
+    if normalized_language == "python":
+        return f"python:{version or '3.12'}-slim"
+    if normalized_language in {"typescript", "javascript"}:
+        return f"node:{version or '22'}-bookworm-slim"
+    if normalized_language == "go":
+        return f"golang:{version or '1.23'}-bookworm"
+    if normalized_language == "rust":
+        return f"rust:{version or '1.86'}-bookworm"
+    return None
+
+
+def dependency_container_image(
+    *,
+    technology: str | None,
+    version_hint: str | None,
+) -> str | None:
+    normalized = (technology or "").strip().lower()
+    version = (version_hint or "").strip() or None
+    if normalized in {"postgres", "postgresql"}:
+        base_version = version or "16"
+        return base_version if ":" in base_version else f"postgres:{base_version}-alpine"
+    if normalized in {"mongodb", "mongo"}:
+        return f"mongo:{version or '7'}"
+    if normalized == "redis":
+        base_version = version or "7"
+        return base_version if ":" in base_version else f"redis:{base_version}-alpine"
+    if normalized in {"mysql", "mariadb"}:
+        return f"{normalized}:{version or '8'}"
+    return None
 
 
 def build_project_runtime_plan(
@@ -569,6 +642,10 @@ def build_project_runtime_plan(
         application_framework=application_framework,
         package_manager=package_manager,
     )
+    entrypoint_path = runtime_entrypoint_for_stack(
+        implementation_language=implementation_language,
+        application_framework=application_framework,
+    )
 
     services: list[ProjectRuntimeServiceSpec] = [
         ProjectRuntimeServiceSpec(
@@ -577,6 +654,11 @@ def build_project_runtime_plan(
             technology=application_framework or implementation_language,
             version_hint=framework_version or language_version,
             package_manager=package_manager,
+            entrypoint_path=entrypoint_path,
+            container_image=runtime_container_image_for_stack(
+                implementation_language=implementation_language,
+                language_version=language_version,
+            ),
             learner_managed=True,
             run_command=run_command,
             healthcheck_path="/health",
@@ -591,6 +673,10 @@ def build_project_runtime_plan(
                 role="durable state",
                 technology=primary_database,
                 version_hint=_version_hint_for(aliases=[primary_database], tech_stack=tech_stack),
+                container_image=dependency_container_image(
+                    technology=primary_database,
+                    version_hint=_version_hint_for(aliases=[primary_database], tech_stack=tech_stack),
+                ),
                 learner_managed=False,
             )
         )
@@ -601,6 +687,10 @@ def build_project_runtime_plan(
                 role="cache or fast read path",
                 technology=cache_backend,
                 version_hint=_version_hint_for(aliases=[cache_backend], tech_stack=tech_stack),
+                container_image=dependency_container_image(
+                    technology=cache_backend,
+                    version_hint=_version_hint_for(aliases=[cache_backend], tech_stack=tech_stack),
+                ),
                 learner_managed=False,
             )
         )
@@ -742,10 +832,18 @@ def runtime_commands_for_stack(
     implementation_language: str | None,
     application_framework: str | None,
 ) -> tuple[str, str, str]:
-    _ = implementation_language, application_framework
-    preview_command = "python -m uvicorn app:app --host 127.0.0.1 --port 8000"
+    package_manager = infer_package_manager(
+        implementation_language=implementation_language,
+        tech_stack=[],
+    )
+    _install_command, run_command, visible_check_command = runtime_target_commands_for_stack(
+        implementation_language=implementation_language,
+        application_framework=application_framework,
+        package_manager=package_manager,
+    )
+    preview_command = run_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}"
     local_run_command = preview_command
-    visible_check_command = "python checks/run_visible_checks.py"
+    visible_check_command = visible_check_command or "python checks/run_visible_checks.py"
     return local_run_command, visible_check_command, preview_command
 
 
@@ -822,9 +920,33 @@ def build_assignment_design(
 ) -> AssignmentDesignSpec:
     resolved_project_contract = project_contract or default_project_contract()
     source_specs = list(data_sources or [])
-    local_run_command, visible_check_command, preview_command = runtime_commands_for_stack(
+    fallback_local_run_command, fallback_visible_check_command, fallback_preview_command = runtime_commands_for_stack(
         implementation_language=implementation_language,
         application_framework=application_framework,
+    )
+    runtime_plan = resolved_project_contract.runtime_plan
+    app_service = next((service for service in runtime_plan.services if service.service_id == "app"), None)
+    local_run_command = next(
+        (
+            step.command
+            for step in runtime_plan.run_steps
+            if step.target_service_id in {None, "app"}
+        ),
+        None,
+    ) or fallback_local_run_command
+    preview_command = local_run_command or fallback_preview_command
+    visible_check_command = next(
+        (
+            step.command
+            for step in runtime_plan.check_steps
+            if step.target_service_id in {None, "app"}
+        ),
+        None,
+    ) or fallback_visible_check_command
+    editable_files = (
+        [app_service.entrypoint_path]
+        if app_service is not None and app_service.entrypoint_path
+        else ["app.py"]
     )
     visible_fixture_files = [
         source.workspace_path
@@ -850,7 +972,7 @@ def build_assignment_design(
             starter_type=starter_type,
             implementation_language=implementation_language,
             application_framework=application_framework,
-            editable_files=["app.py"],
+            editable_files=editable_files,
             visible_fixture_files=visible_fixture_files,
             data_sources=source_specs,
             primary_database=primary_database,

@@ -240,6 +240,58 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 "Each deliverable needs a learner-facing brief before it can be reviewed or published.",
             )
             continue
+        starter_surface = deliverable.learner_starter_surface
+        if starter_surface is None:
+            add_issue(
+                ValidationLevel.error,
+                "missing_learner_starter_surface",
+                f"deliverables.{deliverable.id}.learner_starter_surface",
+                "Each deliverable needs an authored learner starter surface that explains the real files, endpoints, and scenarios the learner owns.",
+            )
+        else:
+            if not starter_surface.primary_editable_paths:
+                add_issue(
+                    ValidationLevel.error,
+                    "missing_primary_editable_paths",
+                    f"deliverables.{deliverable.id}.learner_starter_surface.primary_editable_paths",
+                    "The learner starter surface must identify at least one primary learner-owned file.",
+                )
+            if not starter_surface.required_endpoints:
+                add_issue(
+                    ValidationLevel.error,
+                    "missing_required_endpoints",
+                    f"deliverables.{deliverable.id}.learner_starter_surface.required_endpoints",
+                    "The learner starter surface must list the required public endpoints or commands it preserves.",
+                )
+            if not starter_surface.domain_scenarios:
+                add_issue(
+                    ValidationLevel.warning,
+                    "missing_domain_scenarios",
+                    f"deliverables.{deliverable.id}.learner_starter_surface.domain_scenarios",
+                    "Add concrete learner-visible scenarios so the learner can connect the brief to real cases.",
+                )
+            else:
+                for index, scenario in enumerate(starter_surface.domain_scenarios):
+                    location = f"deliverables.{deliverable.id}.learner_starter_surface.domain_scenarios[{index}]"
+                    if _looks_like_placeholder_scenario(scenario.title, scenario.request_summary, scenario.expected_behavior):
+                        add_issue(
+                            ValidationLevel.error,
+                            "placeholder_domain_scenario",
+                            location,
+                            "Replace generic placeholder scenarios with domain-specific learner cases.",
+                        )
+            if deliverable.learner_brief.files_to_edit:
+                missing_paths = sorted(
+                    set(starter_surface.primary_editable_paths) - set(deliverable.learner_brief.files_to_edit)
+                )
+                if missing_paths:
+                    add_issue(
+                        ValidationLevel.warning,
+                        "brief_starter_surface_drift",
+                        f"deliverables.{deliverable.id}.learner_brief.files_to_edit",
+                        "The learner brief should point at the same primary files as the starter surface: "
+                        + ", ".join(f"'{path}'" for path in missing_paths),
+                    )
         if not deliverable.learner_brief.files_to_edit:
             add_issue(
                 ValidationLevel.error,
@@ -346,6 +398,13 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                     "internal_jargon_in_public_check",
                     location,
                     "Public checks should describe learner-visible expectations, not hidden grader machinery.",
+                )
+            if _looks_like_placeholder_scenario(public_check.title, public_check.learner_goal, " ".join(public_check.expected_assertions)):
+                add_issue(
+                    ValidationLevel.error,
+                    "placeholder_public_check",
+                    location,
+                    "Replace generic placeholder public checks with domain-specific learner-visible checks.",
                 )
             invalid_behavior_ids = sorted(set(public_check.covers_behavior_ids) - active_behavior_ids)
             if invalid_behavior_ids:
@@ -715,3 +774,18 @@ def _alignment_tokens(outcomes: list[str]) -> set[str]:
                 continue
             tokens.add(cleaned)
     return tokens
+
+
+def _looks_like_placeholder_scenario(*parts: str) -> bool:
+    text = " ".join(part.lower() for part in parts if part).strip()
+    if not text:
+        return True
+    placeholder_phrases = (
+        "routine case",
+        "ambiguous or risky case",
+        "handle the routine case cleanly",
+        "handle the ambiguous or risky case",
+        "generic request",
+        "placeholder",
+    )
+    return any(phrase in text for phrase in placeholder_phrases)

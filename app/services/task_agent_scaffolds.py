@@ -972,6 +972,7 @@ def build_task_agent_scaffold(
     spec.assessment_strategy = design.assessment_strategy
     spec.risk_class = design.risk_class
     spec.domain_pack = design.domain_pack
+    spec.project_contract = design.project_contract
     spec.eval_dataset.id = f"{_slugify(title)}_eval_v1"
 
     for quality in spec.qualities:
@@ -998,6 +999,7 @@ def build_task_agent_scaffold(
             "capabilities": design.capabilities,
             "assessment_strategy": design.assessment_strategy,
             "package_type": design.course_structure.package_type,
+            "project_contract": design.project_contract,
         }
     )
     return ensure_task_agent_deliverable_briefs(spec, overwrite=True), origin_template

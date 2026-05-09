@@ -71,6 +71,7 @@ from app.services.task_agent_grader import grade_assignment_submission, grade_ta
 from app.services.learner_studio_service import LearnerStudioError
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
 from app.services.task_agent_starter_templates import (
+    build_task_agent_starter_files,
     render_legacy_task_agent_root_app,
     render_task_agent_root_app,
 )
@@ -704,6 +705,40 @@ class CourseGenCodexApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.close()
         self.temp_dir.cleanup()
+
+    def test_typescript_runtime_plan_drives_starter_files(self) -> None:
+        inferred = infer_assignment_design(
+            title="Build a feature flag control plane",
+            problem_statement=(
+                "Build a feature flag service using TypeScript, NestJS 11, MongoDB 7, and pnpm. "
+                "Support gradual rollouts, targeting rules, and audit logs."
+            ),
+            learning_outcomes=["Ship a stateful control-plane backend."],
+            implementation_language="typescript",
+            application_framework="nestjs",
+            primary_database="mongodb",
+            tech_stack=["Node 22", "NestJS 11", "MongoDB 7", "pnpm"],
+        )
+        assert inferred.design_spec is not None
+
+        spec, _origin_template = build_task_agent_scaffold(
+            title="Build a feature flag control plane",
+            summary="Feature flag runtime",
+            design_spec=inferred.design_spec,
+        )
+        starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
+        starter_manifest = json.loads(starter_files["starter_manifest.json"])
+        package_json = json.loads(starter_files["package.json"])
+
+        self.assertEqual(spec.runtime_dependencies.editable_files, ["src/main.ts"])
+        self.assertIn("src/main.ts", starter_files)
+        self.assertIn("package.json", starter_files)
+        self.assertIn("tsconfig.json", starter_files)
+        self.assertEqual(starter_manifest["entrypoint_path"], "src/main.ts")
+        self.assertEqual(starter_manifest["preview_command"], "pnpm start:dev")
+        self.assertEqual(starter_manifest["runtime_dependencies"]["editable_files"], ["src/main.ts"])
+        self.assertEqual(package_json["scripts"]["start:dev"], "tsx src/main.ts")
+        self.assertIn("@nestjs/core", package_json["dependencies"])
 
     def _install_mock_blackbox_runner(self) -> None:
         reference_submission = get_generic_project_submission().model_dump(mode="json")

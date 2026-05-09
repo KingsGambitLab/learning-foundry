@@ -4,13 +4,43 @@ from collections.abc import Iterable
 from typing import Any
 
 from app.domain.task_agent import (
+    EndpointSpec,
     LearnerDeliverableBrief,
+    LearnerStarterSurfaceSpec,
     DeliverableSpec,
     PublicCheckSpec,
+    StarterScenarioSpec,
     TaskAgentServiceSpec,
     TaskEvalCase,
 )
 from app.services.review_area_coverage import apply_inferred_review_area_case_tags
+
+
+def _editable_files_for_spec(spec: TaskAgentServiceSpec) -> list[str]:
+    return list(spec.runtime_dependencies.editable_files or ["app.py"])
+
+
+def _primary_editable_file(spec: TaskAgentServiceSpec) -> str:
+    files = _editable_files_for_spec(spec)
+    return files[0] if files else "app.py"
+
+
+def _visible_check_command(spec: TaskAgentServiceSpec) -> str:
+    return spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py"
+
+
+def _preview_command(spec: TaskAgentServiceSpec) -> str:
+    return spec.runtime_dependencies.preview_command or "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}"
+
+
+def _support_paths_for_spec(spec: TaskAgentServiceSpec) -> list[str]:
+    paths = ["starter_manifest.json", "checks/run_visible_checks.py"]
+    paths.extend(
+        source.workspace_path
+        for source in spec.runtime_dependencies.data_sources
+        if source.learner_visible and source.workspace_path
+    )
+    return _dedupe(paths, limit=5)
 
 
 def ensure_task_agent_deliverable_briefs(
@@ -19,6 +49,11 @@ def ensure_task_agent_deliverable_briefs(
     overwrite: bool = False,
 ) -> TaskAgentServiceSpec:
     for deliverable in spec.deliverables:
+        derived_starter_surface = build_task_agent_deliverable_starter_surface(spec, deliverable)
+        deliverable.learner_starter_surface = _merge_learner_starter_surface(
+            derived=derived_starter_surface,
+            authored=deliverable.learner_starter_surface,
+        )
         if overwrite or deliverable.learner_brief is None:
             deliverable.learner_brief = build_task_agent_deliverable_brief(spec, deliverable)
         if overwrite or not deliverable.public_checks:
@@ -29,6 +64,94 @@ def ensure_task_agent_deliverable_briefs(
     return spec
 
 
+def build_task_agent_deliverable_starter_surface(
+    spec: TaskAgentServiceSpec,
+    deliverable: DeliverableSpec,
+) -> LearnerStarterSurfaceSpec:
+    editable_paths = _editable_files_for_spec(spec)
+    support_paths = _support_paths_for_spec(spec)
+    required_endpoints = [
+        endpoint.model_copy(deep=True)
+        for endpoint in spec.production_contract.canonical_endpoints
+        if endpoint.required
+    ]
+    scenarios = [
+        _starter_scenario_from_case(spec, case)
+        for case in _select_public_check_cases(spec, deliverable.id, limit=3)
+    ]
+    endpoint_labels = ", ".join(
+        f"`{endpoint.method} {endpoint.path}`"
+        for endpoint in required_endpoints[:3]
+    )
+    starter_summary = (
+        f"Extend the learner-owned {spec.project_contract.system_kind.lower()} surface so it can "
+        f"{deliverable.objective.rstrip('.').lower()}."
+    )
+    implementation_checklist = _dedupe(
+        [
+            (
+                f"Keep the published endpoints stable: {endpoint_labels}."
+                if endpoint_labels
+                else "Keep the published application contract stable while you implement this deliverable."
+            ),
+            (
+                f"Make the learner-owned files `{', '.join(editable_paths)}` the source of truth for the core behavior."
+                if editable_paths
+                else "Keep the learner-owned application files as the source of truth for the core behavior."
+            ),
+            (
+                "Handle the visible domain scenarios with explicit branching and traceable decisions."
+                if scenarios
+                else "Handle the visible scenarios with explicit branching and traceable decisions."
+            ),
+            (
+                "Preserve approval, trace, and dry-run behavior where the production contract requires them."
+                if spec.production_contract.supports_dry_run
+                or spec.production_contract.supports_resume
+                or spec.capabilities.approval_flow_required
+                else "Keep the public response and health endpoints working while you deepen the internal behavior."
+            ),
+            (
+                f"Use support files like `{support_paths[0]}` to ground the implementation instead of inventing new contracts."
+                if support_paths
+                else "Use the provided support files and visible checks to stay aligned with the published contract."
+            ),
+        ],
+        limit=5,
+    )
+    return LearnerStarterSurfaceSpec(
+        starter_summary=starter_summary,
+        primary_editable_paths=editable_paths,
+        support_paths=support_paths,
+        required_endpoints=required_endpoints,
+        implementation_checklist=implementation_checklist,
+        domain_scenarios=scenarios,
+    )
+
+
+def _merge_learner_starter_surface(
+    *,
+    derived: LearnerStarterSurfaceSpec,
+    authored: LearnerStarterSurfaceSpec | None,
+) -> LearnerStarterSurfaceSpec:
+    if authored is None:
+        return derived
+    authored_domain_scenarios = [
+        scenario for scenario in authored.domain_scenarios if not _starter_scenario_looks_placeholder(scenario)
+    ]
+    return LearnerStarterSurfaceSpec(
+        starter_summary=authored.starter_summary or derived.starter_summary,
+        primary_editable_paths=authored.primary_editable_paths or derived.primary_editable_paths,
+        support_paths=_dedupe([*authored.support_paths, *derived.support_paths], limit=6),
+        required_endpoints=authored.required_endpoints or derived.required_endpoints,
+        implementation_checklist=_dedupe(
+            [*authored.implementation_checklist, *derived.implementation_checklist],
+            limit=6,
+        ),
+        domain_scenarios=authored_domain_scenarios or derived.domain_scenarios,
+    )
+
+
 def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: DeliverableSpec) -> LearnerDeliverableBrief:
     if spec.capabilities.is_grounded_answer_system:
         return build_grounded_rag_deliverable_brief(spec, deliverable)
@@ -36,8 +159,17 @@ def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: 
     deliverable_index = spec.deliverable_order[deliverable.id] + 1
     task_inputs = _schema_fields(spec.task_schema)
     task_outputs = _schema_fields(spec.output_schema)
-    examples = _example_scenarios(spec.eval_dataset.cases)
-    files_to_edit = list(spec.runtime_dependencies.editable_files or ["app.py"])
+    starter_surface = deliverable.learner_starter_surface or build_task_agent_deliverable_starter_surface(spec, deliverable)
+    endpoint_labels = ", ".join(
+        f"`{endpoint.method} {endpoint.path}`"
+        for endpoint in starter_surface.required_endpoints[:3]
+    )
+    scenario_lines = [
+        f"{scenario.title}: {scenario.request_summary} {scenario.expected_behavior}".strip()
+        for scenario in starter_surface.domain_scenarios
+    ]
+    files_to_edit = starter_surface.primary_editable_paths or _editable_files_for_spec(spec)
+    primary_file = files_to_edit[0] if files_to_edit else _primary_editable_file(spec)
     title_lower = deliverable.title.lower()
 
     if deliverable_index == 1:
@@ -51,9 +183,20 @@ def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: 
             "capability without changing the overall contract."
         )
 
-    task_to_build = (
-        f"Edit `app.py` to make the service {deliverable.objective.rstrip('.').lower()}. "
-        f"Keep the public `/run` endpoint stable and return JSON that matches the published output contract."
+    starter_summary = starter_surface.starter_summary.strip()
+    if starter_summary:
+        task_to_build = starter_summary
+        if not task_to_build.endswith("."):
+            task_to_build += "."
+        task_to_build += " "
+    else:
+        task_to_build = (
+            f"Extend the learner-owned service in `{primary_file}` so it can {deliverable.objective.rstrip('.').lower()}. "
+        )
+    task_to_build += (
+        f"Keep the published endpoints {endpoint_labels} stable while you improve the behavior behind them."
+        if endpoint_labels
+        else "Keep the published request and response contract stable while you improve the behavior behind it."
     )
 
     definition_of_done = [
@@ -67,17 +210,24 @@ def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: 
             if task_outputs
             else "The response stays within the published output schema."
         ),
+        *starter_surface.implementation_checklist,
         "The service keeps `/health` working while you extend the deliverable behavior.",
     ]
 
     implementation_hints = [
-        "Start in `app.py`; treat `runtime/` helpers and `starter_manifest.json` as read-only support files.",
+        f"Start in `{primary_file}` and keep the primary application flow readable in learner-owned code.",
         "Make the smallest change that satisfies this deliverable instead of jumping ahead to later production features.",
         "Prefer explicit, predictable branching over magic heuristics so grader feedback is easier to interpret.",
     ]
+    if starter_surface.support_paths:
+        implementation_hints.append(
+            "Use support files like "
+            + ", ".join(f"`{path}`" for path in starter_surface.support_paths[:3])
+            + " to stay aligned with the published contract."
+        )
 
     non_goals = [
-        "Do not redesign the project structure or edit the runtime helpers unless the brief explicitly asks for it.",
+        "Do not hide core deliverable logic behind generated support code or opaque helper wrappers.",
         "Do not optimize for later deliverables before this deliverable works end to end.",
     ]
 
@@ -207,7 +357,7 @@ def build_task_agent_deliverable_brief(spec: TaskAgentServiceSpec, deliverable: 
         task_to_build=task_to_build,
         files_to_edit=files_to_edit,
         definition_of_done=_dedupe(definition_of_done, limit=5),
-        example_scenarios=_dedupe(examples, limit=3),
+        example_scenarios=_dedupe(scenario_lines or _example_scenarios(spec.eval_dataset.cases), limit=3),
         implementation_hints=_dedupe(implementation_hints, limit=4),
         non_goals=_dedupe(non_goals, limit=3),
     )
@@ -219,6 +369,7 @@ def build_grounded_rag_deliverable_brief(spec: TaskAgentServiceSpec, deliverable
     task_outputs = _schema_fields(spec.output_schema)
     examples = _example_scenarios(spec.eval_dataset.cases)
     title_lower = deliverable.title.lower()
+    primary_file = _primary_editable_file(spec)
     visible_sources = _learner_visible_data_sources(spec)
     primary_source = visible_sources[0] if visible_sources else None
     source_title = primary_source.title if primary_source is not None else "the visible corpus"
@@ -236,7 +387,7 @@ def build_grounded_rag_deliverable_brief(spec: TaskAgentServiceSpec, deliverable
         )
 
     task_to_build = (
-        f"Edit `app.py` to answer questions from `{source_path}` and return a grounded response through "
+        f"Edit `{primary_file}` to answer questions from `{source_path}` and return a grounded response through "
         "the public `/run` endpoint. Keep the response schema stable, cite supporting documents, and abstain when "
         f"{source_title} does not support a confident answer."
     )
@@ -258,7 +409,7 @@ def build_grounded_rag_deliverable_brief(spec: TaskAgentServiceSpec, deliverable
     ]
 
     implementation_hints = [
-        "Start in `app.py`; treat `runtime/` helpers and `starter_manifest.json` as read-only support files.",
+        f"Start in `{primary_file}` and keep the primary request path readable in learner-owned code.",
         f"Use `{source_path}` as the learner-visible data source instead of calling external services.",
         "Keep citation ids stable and learner-readable so the grader can verify what evidence you used.",
         f"Prefer explicit abstention rules over guessing when {source_title} does not support the question.",
@@ -357,7 +508,7 @@ def build_grounded_rag_deliverable_brief(spec: TaskAgentServiceSpec, deliverable
     return LearnerDeliverableBrief(
         why_this_deliverable_matters=why_this_deliverable_matters,
         task_to_build=task_to_build,
-        files_to_edit=list(spec.runtime_dependencies.editable_files or ["app.py"]),
+        files_to_edit=_editable_files_for_spec(spec),
         definition_of_done=_dedupe(definition_of_done, limit=6),
         example_scenarios=_dedupe(examples, limit=3),
         implementation_hints=_dedupe(implementation_hints, limit=5),
@@ -456,7 +607,7 @@ def build_task_agent_public_checks(
                 title=_public_check_title(case),
                 learner_goal=_public_check_goal(case),
                 case_id=case.id,
-                files_to_use=["app.py"],
+                files_to_use=[_primary_editable_file(spec)],
                 expected_assertions=assertions,
                 covers_behavior_ids=coverage["behaviors"],
                 covers_quality_ids=coverage["qualities"],
@@ -593,6 +744,8 @@ def render_learner_starter_readme(
     *,
     title: str,
     brief: LearnerDeliverableBrief,
+    visible_check_command: str = "python checks/run_visible_checks.py",
+    preview_command: str = "python -m uvicorn app:app --host 127.0.0.1 --port ${PORT:-8000}",
     public_checks: list[PublicCheckSpec] | None = None,
 ) -> str:
     lines = [
@@ -620,8 +773,8 @@ def render_learner_starter_readme(
         [
             "## Helpful commands",
             "",
-            "- Run visible checks: `python checks/run_visible_checks.py`",
-            "- Start a local preview: `python -m uvicorn app:app --host 127.0.0.1 --port 8000`",
+            f"- Run visible checks: `{visible_check_command}`",
+            f"- Start a local preview: `{preview_command}`",
             "- In VS Code, open **Run Task** and choose `Run visible checks` or `Start local preview`.",
             "",
         ]
@@ -642,19 +795,95 @@ def _schema_fields(schema: dict) -> list[str]:
 def _example_scenarios(cases: Iterable[TaskEvalCase]) -> list[str]:
     examples: list[str] = []
     for case in list(cases)[:3]:
+        label = case.title or case.id
         input_preview = _preview_mapping(case.input)
         if case.expected_output:
             output_preview = _preview_mapping(case.expected_output)
             examples.append(
-                f"`{case.id}`: when the request looks like {input_preview}, respond in a way that reflects {output_preview}."
+                f"`{label}`: when the request looks like {input_preview}, respond in a way that reflects {output_preview}."
             )
         elif case.should_escalate:
             examples.append(
-                f"`{case.id}`: when the request looks like {input_preview}, escalate instead of pretending the agent can safely finish it."
+                f"`{label}`: when the request looks like {input_preview}, escalate instead of pretending the agent can safely finish it."
             )
         else:
-            examples.append(f"`{case.id}`: handle a request shaped like {input_preview}.")
+            examples.append(f"`{label}`: handle a request shaped like {input_preview}.")
     return examples
+
+
+def _starter_scenario_from_case(
+    spec: TaskAgentServiceSpec,
+    case: TaskEvalCase,
+) -> StarterScenarioSpec:
+    request_summary = _starter_request_summary(spec, case)
+    expected_behavior = _starter_expected_behavior(case)
+    return StarterScenarioSpec(
+        id=case.id,
+        title=case.title or _humanize_identifier(case.id),
+        request_summary=request_summary,
+        expected_behavior=expected_behavior,
+    )
+
+
+def _starter_request_summary(spec: TaskAgentServiceSpec, case: TaskEvalCase) -> str:
+    payload = case.input or {}
+    if "customer_message" in payload:
+        issue_type = payload.get("issue_type")
+        tier = payload.get("account_tier")
+        message = str(payload.get("customer_message", "")).strip()
+        parts = []
+        if issue_type:
+            parts.append(f"a `{issue_type}` support ticket")
+        else:
+            parts.append("a customer support ticket")
+        if tier:
+            parts.append(f"from a `{tier}` account")
+        if message:
+            parts.append(f"where the customer says: {message!r}")
+        return "Handle " + " ".join(parts) + "."
+    if "question" in payload:
+        return f"Handle a question like {payload.get('question')!r}."
+    if "task_input" in payload:
+        return f"Handle a workflow request like {payload.get('task_input')!r}."
+    return f"Handle a request shaped like {_preview_mapping(payload)}."
+
+
+def _starter_expected_behavior(case: TaskEvalCase) -> str:
+    if case.should_escalate and case.requires_approval:
+        return "Route it through the safe approval path instead of auto-completing it."
+    if case.should_escalate:
+        return "Escalate or hand it off instead of pretending the system can finish it safely."
+    if case.requires_approval:
+        return "Pause for approval before carrying out the risky or irreversible step."
+    if case.expected_output:
+        return f"Make the response reflect {_preview_mapping(case.expected_output)}."
+    return "Keep the published response contract stable while handling it."
+
+
+def _humanize_identifier(value: str) -> str:
+    cleaned = value.replace("-", " ").replace("_", " ").strip()
+    if not cleaned:
+        return "Scenario"
+    return cleaned[:1].upper() + cleaned[1:]
+
+
+def _starter_scenario_looks_placeholder(scenario: StarterScenarioSpec) -> bool:
+    text = " ".join(
+        [
+            scenario.title.strip().lower(),
+            scenario.request_summary.strip().lower(),
+            scenario.expected_behavior.strip().lower(),
+        ]
+    )
+    placeholder_markers = [
+        "routine case",
+        "ambiguous or risky case",
+        "happy path",
+        "escalation case",
+        "workflow request like",
+        "handle the routine case cleanly",
+    ]
+    return any(marker in text for marker in placeholder_markers)
 
 
 def _preview_mapping(payload: dict) -> str:
@@ -755,6 +984,8 @@ def _public_check_coverage(spec: TaskAgentServiceSpec, deliverable_id: str, case
 
 
 def _public_check_title(case: TaskEvalCase) -> str:
+    if case.title:
+        return case.title.strip()
     words = case.id.replace("-", "_").split("_")
     normalized = " ".join(word for word in words if word)
     return normalized.capitalize() or "Visible check"

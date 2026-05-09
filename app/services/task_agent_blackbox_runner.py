@@ -270,8 +270,20 @@ class TaskAgentBlackBoxRunner:
                 normalized = dict(item)
                 if include_order and "order" not in normalized:
                     normalized["order"] = index
+                normalized = self._normalize_record_payload(normalized, model, index=index)
                 records.append(model.model_validate(normalized))
         return records
+
+    def _normalize_record_payload(self, payload: dict[str, Any], model, *, index: int) -> dict[str, Any]:
+        normalized = dict(payload)
+        if model is ApprovalRecord:
+            if "approved" not in normalized and "status" in normalized:
+                normalized["approved"] = str(normalized["status"]).lower() in {"approved", "accepted", "ok"}
+            if not normalized.get("approval_id"):
+                tool_id = str(normalized.get("tool_id") or "approval")
+                order = normalized.get("order", index)
+                normalized["approval_id"] = f"approval::{tool_id}::{order}"
+        return normalized
 
     def _request_json(self, client: httpx.Client, method: str, path: str, **kwargs) -> dict[str, Any]:
         try:

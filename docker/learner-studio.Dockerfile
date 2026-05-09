@@ -5,7 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl git ca-certificates dumb-init \
+    && apt-get install -y --no-install-recommends curl git ca-certificates dumb-init nodejs npm \
+    && npm install -g pnpm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://code-server.dev/install.sh | sh
