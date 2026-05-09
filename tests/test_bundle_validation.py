@@ -312,6 +312,33 @@ def test_ensure_task_agent_deliverable_briefs_normalizes_stale_required_endpoint
     assert "/inventory-reservations" in rendered_brief.task_to_build
 
 
+def test_ensure_task_agent_deliverable_briefs_falls_back_when_only_health_survives() -> None:
+    design_spec = _inventory_design()
+    spec, _origin_template = build_task_agent_scaffold(
+        title="Inventory Reservation Service",
+        summary="Build a concurrency-safe inventory reservation backend.",
+        design_spec=design_spec,
+    )
+    deliverable = spec.deliverables[0]
+    assert deliverable.learner_starter_surface is not None
+    deliverable.learner_starter_surface.required_endpoints = [
+        EndpointSpec(method="GET", path="/health"),
+        EndpointSpec(method="POST", path="/and-resolutions"),
+    ]
+
+    normalized = ensure_task_agent_deliverable_briefs(spec, overwrite=True)
+    rendered_brief = normalized.deliverables[0].learner_brief
+
+    assert normalized.deliverables[0].learner_starter_surface is not None
+    assert any(
+        endpoint.path.startswith("/inventory-reservations")
+        for endpoint in normalized.deliverables[0].learner_starter_surface.required_endpoints
+    )
+    assert rendered_brief is not None
+    assert "GET /health" not in rendered_brief.task_to_build
+    assert "/inventory-reservations" in rendered_brief.task_to_build
+
+
 def test_validation_rejects_stale_required_endpoint_not_in_public_surface() -> None:
     design_spec = _inventory_design()
     spec, _origin_template = build_task_agent_scaffold(

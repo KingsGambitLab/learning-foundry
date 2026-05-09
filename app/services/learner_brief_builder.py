@@ -67,7 +67,12 @@ def _normalize_required_endpoints(
         normalized.append(published_endpoint.model_copy(deep=True))
         seen.add(identity)
 
-    if normalized:
+    if any(
+        not is_health_path(endpoint.path)
+        and not is_eval_path(endpoint.path)
+        and not is_approval_path(endpoint.path)
+        for endpoint in normalized
+    ):
         return normalized
 
     for endpoint in derived:
