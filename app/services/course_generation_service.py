@@ -148,7 +148,6 @@ class CourseGenerationService:
             request=plan_request,
             design_spec=adjusted_shared_design_spec,
             default_deliverables=normalized_plan.deliverables,
-            creator_summary=normalized_plan.summary,
             creator_choices=resolved_setup,
         )
         normalized_outcomes = self._derive_plan_learning_outcomes(
@@ -1015,89 +1014,21 @@ class CourseGenerationService:
         request: GenerateCourseFromBriefRequest,
         design_spec: AssignmentDesignSpec,
         default_deliverables: list[CreateCourseDeliverableRequest],
-        creator_summary: str,
         creator_choices,
     ) -> list[CreatorCourseDeliverablePlan]:
-        text = " ".join([request.goal, creator_summary]).lower()
         deliverables: list[CreateCourseDeliverableRequest]
-        if (
-            design_spec.capabilities.durable_state_required
-            and any(keyword in text for keyword in ["flight", "booking", "reservation", "inventory"])
+        fallback_deliverables = self._fallback_deliverables(
+            request,
+            design_spec,
+            design_spec.course_structure.package_type,
+        )
+        if fallback_deliverables and (
+            len(default_deliverables) > len(fallback_deliverables)
+            or self._deliverable_plan_needs_override(default_deliverables, design_spec)
         ):
-            cache_label = creator_choices.cache_backend.title() if creator_choices.cache_backend else "Caching"
-            cache_summary = (
-                f"Introduce {creator_choices.cache_backend} caching for availability lookups and protect freshness."
-                if creator_choices.cache_backend
-                else "Improve read-path performance without breaking booking correctness."
-            )
-            db_label = creator_choices.primary_database or "the primary database"
-            deliverables = [
-                CreateCourseDeliverableRequest(
-                    deliverable_slug="exercise/01-core-booking-flow",
-                    title="Core booking contract and seat inventory",
-                    summary="Model the booking flow, inventory records, and baseline invariants before adding concurrency controls.",
-                    learning_outcomes=[
-                        "Define the booking workflow and the invariants that must never break.",
-                        "Model seats, reservations, and booking state transitions clearly.",
-                    ],
-                    design_spec=design_spec,
-                ),
-                CreateCourseDeliverableRequest(
-                    deliverable_slug="exercise/02-pessimistic-locking",
-                    title=f"Pessimistic locking in {db_label}",
-                    summary="Prevent overselling by introducing pessimistic locking around the critical reservation path.",
-                    learning_outcomes=[
-                        "Use pessimistic locking to protect the hot booking path.",
-                        "Explain the tradeoff between safety and throughput under contention.",
-                    ],
-                    design_spec=design_spec,
-                ),
-                CreateCourseDeliverableRequest(
-                    deliverable_slug="exercise/03-optimistic-locking",
-                    title=f"Optimistic locking and retries in {db_label}",
-                    summary="Shift the booking path to optimistic control with version checks, retries, and clear failure responses.",
-                    learning_outcomes=[
-                        "Implement optimistic concurrency control with version-aware writes.",
-                        "Design retry and conflict handling that feels safe in production.",
-                    ],
-                    design_spec=design_spec,
-                ),
-                CreateCourseDeliverableRequest(
-                    deliverable_slug="exercise/04-caching",
-                    title=f"{cache_label} for availability reads",
-                    summary=cache_summary,
-                    learning_outcomes=[
-                        "Use caching to speed up read-heavy traffic without corrupting booking correctness.",
-                        "Explain the freshness and invalidation tradeoffs in the booking workflow.",
-                    ],
-                    design_spec=design_spec,
-                ),
-                CreateCourseDeliverableRequest(
-                    deliverable_slug="final/production-readiness",
-                    title="Production hardening and failure drills",
-                    summary="Pull the booking service together with observability, retries, and realistic operational drills.",
-                    learning_outcomes=[
-                        "Make the service observable and debuggable under failure.",
-                        "Prepare the system for production traffic and operator confidence.",
-                    ],
-                    design_spec=design_spec.model_copy(
-                        update={"overlays": list(dict.fromkeys([*design_spec.overlays, "productionization_overlay"]))}
-                    ),
-                ),
-            ]
+            deliverables = fallback_deliverables
         else:
-            fallback_deliverables = self._fallback_deliverables(
-                request,
-                design_spec,
-                design_spec.course_structure.package_type,
-            )
-            if fallback_deliverables and (
-                len(default_deliverables) > len(fallback_deliverables)
-                or self._deliverable_plan_needs_override(default_deliverables, design_spec)
-            ):
-                deliverables = fallback_deliverables
-            else:
-                deliverables = default_deliverables
+            deliverables = default_deliverables
 
         return [
             CreatorCourseDeliverablePlan(
@@ -1134,12 +1065,7 @@ class CourseGenerationService:
             ]
 
         if design_spec.project_contract.family == ProjectFamily.control_plane_service:
-            return [
-                "Model flags, rollout rules, and evaluation inputs so the service preserves deterministic decisions.",
-                "Implement targeting and rollout logic without breaking the low-latency read path.",
-                "Add safe configuration updates and audit trails that operators can trust.",
-                "Raise the system to a production bar for cache coherence, latency, and rollout safety.",
-            ]
+            return self._contract_learning_outcomes(design_spec)
 
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
             return [
@@ -1158,20 +1084,7 @@ class CourseGenerationService:
             ]
 
         if design_spec.capabilities.durable_state_required and not design_spec.capabilities.tool_use_required:
-            lowered_goal = goal.lower()
-            if any(keyword in lowered_goal for keyword in ["flight", "booking", "reservation", "inventory"]):
-                return [
-                    "Model bookings and seat inventory so the service preserves the right invariants.",
-                    "Use locking and retries to keep concurrent reservations safe under load.",
-                    "Add caching and observability without making availability stale or misleading.",
-                    "Raise the service to a production bar for correctness, latency, and operator trust.",
-                ]
-            return [
-                "Model the core state transitions and the invariants the service must preserve.",
-                "Make duplicate requests and concurrent access safe to handle in production.",
-                "Capture traces or audit records that make stateful failures easier to debug.",
-                    "Raise the system to a production-minded bar for latency, reliability, and correctness.",
-                ]
+            return self._contract_learning_outcomes(design_spec)
 
         return self._contract_learning_outcomes(design_spec)
 
@@ -1218,11 +1131,10 @@ class CourseGenerationService:
             "eval-driven",
             "production final at slo",
         ]
-        if family == ProjectFamily.control_plane_service:
-            specific_markers = ["flag", "rollout", "target", "audit", "cache", "config"]
-            return sum(marker in lowered for marker in specific_markers) < 3 or any(
-                marker in lowered for marker in generic_markers
-            )
+        if any(marker in lowered for marker in generic_markers):
+            return True
+        if family in {ProjectFamily.control_plane_service, ProjectFamily.transactional_stateful_service}:
+            return all(marker not in lowered for marker in ["contract", "state", "read", "write", "runtime", "audit", "recovery"])
         return False
 
     def _title_from_goal(self, goal: str) -> str:
@@ -1334,20 +1246,6 @@ class CourseGenerationService:
             seen_source_keys.add(key)
             data_sources.append(source)
 
-        primary_database = setup.primary_database
-        if primary_database is None and any(
-            keyword in lowered_goal
-            for keyword in ["booking", "reservation", "inventory", "payment", "wallet", "transaction", "order"]
-        ):
-            primary_database = "postgres"
-
-        cache_backend = setup.cache_backend
-        if cache_backend is None and any(
-            keyword in lowered_goal
-            for keyword in ["cache", "caching", "booking", "reservation", "availability", "read-heavy", "latency"]
-        ):
-            cache_backend = "redis"
-
         implementation_language = (setup.implementation_language or "").strip().lower() or None
         application_framework = (setup.application_framework or "").strip().lower() or None
 
@@ -1388,6 +1286,38 @@ class CourseGenerationService:
                 implementation_language = "python"
         if application_framework is None:
             application_framework = default_frameworks.get(implementation_language)
+
+        inferred_design = infer_assignment_design(
+            title=self._title_from_goal(goal),
+            problem_statement=goal,
+            learning_outcomes=[],
+            starter_type=starter_type,
+            implementation_language=implementation_language,
+            application_framework=application_framework,
+            primary_database=setup.primary_database,
+            cache_backend=setup.cache_backend,
+            tech_stack=list(setup.tech_stack),
+            data_sources=data_sources,
+        ).design_spec
+        inferred_family = (
+            inferred_design.project_contract.family
+            if inferred_design is not None
+            else ProjectFamily.generic_backend_service
+        )
+
+        primary_database = setup.primary_database
+        if primary_database is None and inferred_family in {
+            ProjectFamily.transactional_stateful_service,
+            ProjectFamily.control_plane_service,
+        }:
+            primary_database = "postgres"
+
+        cache_backend = setup.cache_backend
+        if cache_backend is None and (
+            inferred_family == ProjectFamily.control_plane_service
+            or any(keyword in lowered_goal for keyword in ["cache", "caching", "read-heavy", "latency"])
+        ):
+            cache_backend = "redis"
 
         return CreatorCourseSetupChoices(
             starter_type=starter_type,

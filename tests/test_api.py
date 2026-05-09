@@ -1152,17 +1152,22 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "Build a flight booking system that is production ready. Mock external dependent services where required.",
         )
         self.assertIn(
-            "Define the booking workflow and the invariants that must never break.",
+            "Model the durable state around the invariant that Concurrent or repeated writes do not corrupt critical state.",
             body["plan"]["learning_outcomes"],
         )
-        self.assertIn(
-            "Use pessimistic locking to protect the hot booking path.",
-            body["plan"]["learning_outcomes"],
-        )
+        self.assertNotIn("Use pessimistic locking to protect the hot booking path.", body["plan"]["learning_outcomes"])
         deliverable_titles = [deliverable["title"] for deliverable in body["plan"]["deliverables"]]
-        self.assertIn("Pessimistic locking in postgres", deliverable_titles)
-        self.assertIn("Optimistic locking and retries in postgres", deliverable_titles)
-        self.assertIn("Redis for availability reads", deliverable_titles)
+        self.assertEqual(
+            deliverable_titles,
+            [
+                "Service contract and durable model",
+                "Read and write path correctness",
+                "Runtime integration and failure recovery",
+                "Operational hardening",
+            ],
+        )
+        self.assertNotIn("Pessimistic locking in postgres", deliverable_titles)
+        self.assertNotIn("Optimistic locking and retries in postgres", deliverable_titles)
         self.assertIn("shared production-ready codebase", body["plan"]["creator_summary"].lower())
 
     def test_create_course_run_from_creator_plan_preserves_creator_choices(self) -> None:
@@ -1198,19 +1203,24 @@ class CourseGenCodexApiTests(unittest.TestCase):
             "Build a flight booking system that is production ready. Mock external dependent services where required.",
         )
         self.assertIn(
-            "Define the booking workflow and the invariants that must never break.",
+            "Model the durable state around the invariant that Concurrent or repeated writes do not corrupt critical state.",
             body["requested_learning_outcomes"],
         )
-        self.assertIn(
-            "Use pessimistic locking to protect the hot booking path.",
-            body["requested_learning_outcomes"],
-        )
+        self.assertNotIn("Use pessimistic locking to protect the hot booking path.", body["requested_learning_outcomes"])
         self.assertEqual(body["generated_plan"]["title"], body["title"])
         creator_view = self.client.get(f"/v1/course-runs/{body['id']}/creator-view")
         self.assertEqual(creator_view.status_code, 200)
         creator_body = creator_view.json()
         creator_deliverable_titles = [deliverable["title"] for deliverable in creator_body["review"]["deliverables"]]
-        self.assertIn("Pessimistic locking in postgres", creator_deliverable_titles)
+        self.assertEqual(
+            creator_deliverable_titles,
+            [
+                "Service contract and durable model",
+                "Read and write path correctness",
+                "Runtime integration and failure recovery",
+                "Operational hardening",
+            ],
+        )
 
     def test_creator_plan_proposes_retrieval_data_source_when_goal_needs_corpus(self) -> None:
         response = self.client.post(
@@ -1373,8 +1383,15 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(creator_view.status_code, 200)
         creator_body = creator_view.json()
         creator_deliverable_titles = [deliverable["title"] for deliverable in creator_body["review"]["deliverables"]]
-        self.assertIn("Optimistic locking and retries in postgres", creator_deliverable_titles)
-        self.assertIn("Redis for availability reads", creator_deliverable_titles)
+        self.assertEqual(
+            creator_deliverable_titles,
+            [
+                "Service contract and durable model",
+                "Read and write path correctness",
+                "Runtime integration and failure recovery",
+                "Operational hardening",
+            ],
+        )
 
     def test_creator_view_does_not_mutate_shared_workflow_when_course_copy_drifts(self) -> None:
         planned = self.client.post(
@@ -2302,7 +2319,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("public/README.md", first_deliverable["linked_workflow"]["bundle"]["public_files"])
         self.assertTrue(first_deliverable["linked_workflow"]["review_summary"]["review_ready"])
 
-    def test_workflow_spec_update_revalidates(self) -> None:
+    def test_workflow_spec_update_repairs_references_even_if_review_blockers_remain(self) -> None:
         created = self.client.post(
             "/v1/workflow-runs",
             json={
@@ -2320,8 +2337,14 @@ class CourseGenCodexApiTests(unittest.TestCase):
         update = self.client.put(f"/v1/workflow-runs/{run_id}/task-agent-spec", json=spec)
         self.assertEqual(update.status_code, 200)
         updated = update.json()
-        self.assertTrue(updated["artifacts"]["validation_summary"]["valid"])
-        self.assertEqual(updated["artifacts"]["validation_summary"]["errors"], [])
+        self.assertFalse(updated["artifacts"]["validation_summary"]["valid"])
+        self.assertTrue(
+            any(error["code"] == "placeholder_domain_scenario" for error in updated["artifacts"]["validation_summary"]["errors"])
+        )
+        self.assertEqual(
+            updated["artifacts"]["task_agent_spec"]["behaviors"][0]["test"]["case_ids"],
+            ["happy_path", "escalation_case"],
+        )
         self.assertIn("reviewer_repair", [node["kind"] for node in updated["artifacts"]["node_executions"]])
 
     def test_workflow_gate_decisions_publish_run(self) -> None:
@@ -2446,8 +2469,9 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         self.assertIn("reviewer_pedagogy", node_kinds)
         self.assertIn("reviewer_repair", node_kinds)
-        self.assertIn("reviewer_tests", node_kinds)
+        self.assertNotIn("reviewer_tests", node_kinds)
         self.assertTrue(updated.artifacts.task_agent_spec.deliverables[0].learning_outcomes)
+        self.assertFalse(updated.artifacts.validation_summary["valid"])
         self.assertTrue(
             any(
                 "Rebuilt learner briefs, public checks, and derived deliverable outcomes"
@@ -2455,6 +2479,48 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 for note in updated.notes
             )
         )
+
+    def test_structural_reviewer_code_failure_bounces_back_to_authoring(self) -> None:
+        run = app.state.workflow_service.create_run_from_explicit_plan(
+            intake=GenerationIntake(
+                title="Structural authoring reroute",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                learning_outcomes=["tool selection"],
+            ),
+            design_spec=_design_spec(
+                title="Structural authoring reroute",
+                problem_statement="Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
+                learning_outcomes=["tool selection"],
+            ),
+            execute_nodes=False,
+        )
+
+        latest = WorkflowNodeExecution(
+            node_id="reviewer_code_1",
+            kind=WorkflowNodeKind.reviewer_code,
+            status=WorkflowNodeStatus.failed,
+            attempt=1,
+            summary="Code review found a thin wrapper starter surface.",
+            created_at=datetime.now(UTC),
+            findings=[
+                ReviewerFinding(
+                    category="code_review",
+                    severity=ReviewerFindingSeverity.error,
+                    title="Primary starter surface is still a thin wrapper",
+                    detail="The learner-owned files should contain the real application flow, not just import a generated runtime wrapper.",
+                )
+            ],
+        )
+        route = app.state.assignment_node_runtime._after_reviewer_code(
+            {
+                "run": run,
+                "node_executions": [latest],
+                "authoring_attempt": 1,
+                "reviewer_attempt": 1,
+                "cached_sandbox_result": None,
+            }
+        )
+        self.assertEqual(route, "authoring_repair")
 
     def test_out_of_scope_workflow_is_blocked_without_review_gate(self) -> None:
         created = self.client.post(
@@ -4134,7 +4200,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(review_summary.status_code, 200)
         self.assertIn("\"review_ready\": true", review_summary.json()["content"])
 
-    def test_invalid_task_agent_spec_is_repaired_before_materialization(self) -> None:
+    def test_invalid_task_agent_spec_repairs_dataset_binding_even_if_review_blockers_remain(self) -> None:
         created = self.client.post(
             "/v1/workflow-runs",
             json={
@@ -4152,15 +4218,15 @@ class CourseGenCodexApiTests(unittest.TestCase):
         update = self.client.put(f"/v1/workflow-runs/{run_id}/task-agent-spec", json=spec)
         self.assertEqual(update.status_code, 200)
         updated = update.json()
-        self.assertTrue(updated["artifacts"]["validation_summary"]["valid"])
+        self.assertFalse(updated["artifacts"]["validation_summary"]["valid"])
+        self.assertEqual(
+            updated["artifacts"]["task_agent_spec"]["qualities"][0]["test"]["dataset_id"],
+            updated["artifacts"]["task_agent_spec"]["eval_dataset"]["id"],
+        )
         self.assertIn("reviewer_repair", [node["kind"] for node in updated["artifacts"]["node_executions"]])
         self.assertTrue(any("Auto-repair" in note for note in updated["artifacts"]["notes"]))
-
-        materialize = self.client.post(
-            f"/v1/workflow-runs/{run_id}/materialize",
-            json={"overwrite": True},
-        )
-        self.assertEqual(materialize.status_code, 200)
+        materialize = self.client.post(f"/v1/workflow-runs/{run_id}/materialize", json={"overwrite": True})
+        self.assertEqual(materialize.status_code, 409)
 
     def test_bundle_file_endpoint_blocks_path_traversal(self) -> None:
         created = self.client.post(

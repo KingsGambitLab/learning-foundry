@@ -53,12 +53,17 @@ class TaskAgentRepairService:
                 "missing_files_to_edit",
                 "missing_definition_of_done",
                 "missing_examples",
+                "placeholder_domain_scenario",
+                "placeholder_public_check",
             }
         ) or any(
             phrase in finding_text
             for phrase in (
                 "learner brief",
                 "learning outcome",
+                "starter scenarios are still generic",
+                "placeholder scenarios",
+                "placeholder public checks",
                 "visible learner checks",
                 "public/basic checks",
                 "public checks",

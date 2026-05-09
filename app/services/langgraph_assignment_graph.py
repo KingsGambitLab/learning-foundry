@@ -27,7 +27,7 @@ from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthor
 
 
 AuthoringRoute = Literal["authoring_repair", "reviewer_runtime", "end"]
-ReviewerRoute = Literal["reviewer_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
+ReviewerRoute = Literal["reviewer_repair", "authoring_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
 _UNSET = object()
 
 
@@ -116,6 +116,7 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_code,
             {
                 "reviewer_repair": "reviewer_repair",
+                "authoring_repair": "authoring_repair",
                 "reviewer_pedagogy": "reviewer_pedagogy",
                 "end": END,
             },
@@ -125,6 +126,7 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_pedagogy,
             {
                 "reviewer_repair": "reviewer_repair",
+                "authoring_repair": "authoring_repair",
                 "reviewer_tests": "reviewer_tests",
                 "end": END,
             },
@@ -134,6 +136,7 @@ class LangGraphAssignmentGraph:
             self._after_reviewer_tests,
             {
                 "reviewer_repair": "reviewer_repair",
+                "authoring_repair": "authoring_repair",
                 "end": END,
             },
         )
@@ -161,7 +164,7 @@ class LangGraphAssignmentGraph:
         if latest.status == WorkflowNodeStatus.passed:
             return "reviewer_pedagogy"
         if state["reviewer_attempt"] < self.max_reviewer_attempts:
-            return "reviewer_repair"
+            return self._reviewer_failure_route(state, latest)
         return "end"
 
     def _after_reviewer_pedagogy(self, state: AssignmentGraphState) -> ReviewerRoute:
@@ -169,7 +172,7 @@ class LangGraphAssignmentGraph:
         if latest.status == WorkflowNodeStatus.passed:
             return "reviewer_tests"
         if state["reviewer_attempt"] < self.max_reviewer_attempts:
-            return "reviewer_repair"
+            return self._reviewer_failure_route(state, latest)
         return "end"
 
     def _after_reviewer_tests(self, state: AssignmentGraphState) -> ReviewerRoute:
@@ -177,8 +180,46 @@ class LangGraphAssignmentGraph:
         if latest.status == WorkflowNodeStatus.passed:
             return "end"
         if state["reviewer_attempt"] < self.max_reviewer_attempts:
-            return "reviewer_repair"
+            return self._reviewer_failure_route(state, latest)
         return "end"
+
+    def _reviewer_failure_route(
+        self,
+        state: AssignmentGraphState,
+        latest: WorkflowNodeExecution,
+    ) -> ReviewerRoute:
+        if self._needs_structural_reauthoring(state, latest):
+            return "authoring_repair"
+        return "reviewer_repair"
+
+    def _needs_structural_reauthoring(
+        self,
+        state: AssignmentGraphState,
+        latest: WorkflowNodeExecution,
+    ) -> bool:
+        failure_context = build_failure_context(state["run"], latest)
+        issue_codes = {issue.code for issue in failure_context.validation_issues}
+        structural_issue_codes = {
+            "missing_learner_starter_surface",
+            "missing_primary_editable_paths",
+            "missing_required_endpoints",
+            "brief_starter_surface_drift",
+        }
+        if issue_codes & structural_issue_codes:
+            return True
+
+        finding_text = " ".join(
+            f"{finding.title} {finding.detail}"
+            for finding in failure_context.findings
+        ).lower()
+        structural_phrases = (
+            "thin wrapper",
+            "placeholder starter endpoints remain",
+            "missing a starter surface",
+            "starter surface has no primary files",
+            "brief drifts from the starter surface",
+        )
+        return any(phrase in finding_text for phrase in structural_phrases)
 
     def _authoring_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])

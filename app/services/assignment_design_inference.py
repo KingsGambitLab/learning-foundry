@@ -288,21 +288,21 @@ def build_project_contract(
         return ProjectContractSpec(
             family=family,
             system_kind="Control-plane backend service",
-            core_entities=["configuration records", "rollout rules", "environment overrides", "audit events"],
+            core_entities=["control definitions", "decision rules", "request context", "audit events"],
             primary_read_paths=[
-                "evaluate the active configuration for a request context",
-                "serve low-latency reads for live traffic decisions",
+                "evaluate the active control definition for a request context",
+                "serve low-latency decisions for live traffic",
             ],
             primary_write_paths=[
-                "create or update configuration safely",
-                "publish rollout and targeting changes with traceable state transitions",
+                "create or update control definitions safely",
+                "publish control changes with traceable state transitions",
             ],
             invariants=[
-                "Evaluation is deterministic for the same context and rollout definition.",
-                "Live reads stay coherent when configuration changes are published.",
+                "Decisions are deterministic for the same context and active definition.",
+                "Live reads stay coherent when control definitions change.",
                 "Every mutation is auditable and attributable.",
             ],
-            operational_concerns=["cache coherence", "safe config updates", "operator-visible audit trails"],
+            operational_concerns=["read-path coherence", "safe control updates", "operator-visible audit trails"],
             runtime_binding=runtime_binding,
             runtime_plan=runtime_plan,
         )
@@ -416,8 +416,8 @@ def build_project_runtime_binding(
     if family == ProjectFamily.control_plane_service:
         integration_points.extend(
             [
-                "Keep read-path evaluation deterministic for the same request context.",
-                "Publish mutations without leaving caches or read replicas stale.",
+                "Keep live decisions deterministic for the same request context.",
+                "Publish mutations without leaving caches or derived read paths stale.",
             ]
         )
     elif family == ProjectFamily.transactional_stateful_service:
@@ -1137,7 +1137,7 @@ def infer_assignment_design(
             data_sources=data_sources,
         )
     elif any(keyword in text for keyword in CONTROL_PLANE_KEYWORDS):
-        reasons.append("The brief describes a control-plane service with low-latency reads, rollout rules, and safe configuration updates.")
+        reasons.append("The brief describes a control-plane service with low-latency decisions, auditable changes, and safe control updates.")
         family = ProjectFamily.control_plane_service
         design_spec = build_assignment_design(
             package_type=package_type,

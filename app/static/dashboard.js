@@ -4,6 +4,7 @@
       let currentCourseRun = null;
       let currentReview = null;
       let currentEvents = [];
+      let currentTimeline = null;
       let currentWorkflowDetails = {};
       let currentLearnerEval = null;
       let currentCreatorFeedback = [];
@@ -98,6 +99,10 @@
       const reviewActions = document.getElementById("review-actions");
       const publishedVersions = document.getElementById("published-versions");
       const draftActivity = document.getElementById("draft-activity");
+      const liveTimelineBadge = document.getElementById("live-timeline-badge");
+      const liveTimelineCopy = document.getElementById("live-timeline-copy");
+      const liveTimelineStream = document.getElementById("live-timeline-stream");
+      const liveTimelineLink = document.getElementById("live-timeline-link");
       const linkedWorkflows = document.getElementById("linked-workflows");
       const recentDrafts = document.getElementById("recent-drafts");
       const materializeButton = document.getElementById("materialize-button");
@@ -477,7 +482,8 @@
           course_run_published: "Course published",
           course_publish_completed: "Publish finished",
           course_publish_failed: "Publish failed",
-          course_run_synced: "Draft updated",
+          workflow_authoring_completed: "Workflow authoring completed",
+          workflow_authoring_revised: "Workflow authoring revised",
         };
         return labels[eventType] || titleCase(eventType);
       }
@@ -1157,6 +1163,7 @@
         currentCourseRun = null;
         currentReview = null;
         currentEvents = [];
+        currentTimeline = null;
         currentWorkflowDetails = {};
         draftLoadInProgress = false;
         pendingDraftId = null;
@@ -1177,6 +1184,20 @@
         reviewActions.innerHTML = "";
         publishedVersions.innerHTML = "";
         draftActivity.innerHTML = "";
+        if (liveTimelineStream) {
+          liveTimelineStream.innerHTML = `<div class="review-item"><p>No draft selected yet.</p></div>`;
+        }
+        if (liveTimelineBadge) {
+          liveTimelineBadge.textContent = "Idle";
+          liveTimelineBadge.className = "badge fallback";
+        }
+        if (liveTimelineCopy) {
+          liveTimelineCopy.textContent = "Open a draft to follow course events, workflow events, and reviewer nodes as they happen.";
+        }
+        if (liveTimelineLink) {
+          liveTimelineLink.href = "/draft-timeline";
+          liveTimelineLink.setAttribute("aria-disabled", "true");
+        }
         linkedWorkflows.innerHTML = "";
         sourceBadge.textContent = "Waiting";
         sourceBadge.className = "badge fallback";
@@ -2076,8 +2097,12 @@
         publishButton.disabled = courseRun.stage !== "ready_to_publish" || isBusy;
         createRevisionButton.disabled = courseRun.status !== "published" || isBusy;
         if (timelineButton) {
-          timelineButton.href = `/draft-timeline?draft=${encodeURIComponent(courseRun.id)}`;
+          timelineButton.href = `/draft-timeline?draft=${encodeURIComponent(courseRun.id)}&live=1`;
           timelineButton.removeAttribute("aria-disabled");
+        }
+        if (liveTimelineLink) {
+          liveTimelineLink.href = `/draft-timeline?draft=${encodeURIComponent(courseRun.id)}&live=1`;
+          liveTimelineLink.removeAttribute("aria-disabled");
         }
 
         const isPublished = courseRun.status === "published";
@@ -2255,6 +2280,41 @@
             </div>
           `;
         }).join("");
+      }
+
+      function renderLiveTimeline(timeline, courseRun) {
+        currentTimeline = timeline;
+        if (!liveTimelineStream || !liveTimelineBadge || !liveTimelineCopy) {
+          return;
+        }
+        const items = timeline?.items || [];
+        const isBusy = Boolean(courseRun?.active_operation) || courseRun?.stage === "drafting";
+        liveTimelineBadge.textContent = isBusy ? "Auto refresh live" : "Latest snapshot";
+        liveTimelineBadge.className = `badge ${isBusy ? "live" : "fallback"}`;
+        liveTimelineCopy.textContent = isBusy
+          ? "Refreshing every 5 seconds while this draft stays open on the Drafts tab."
+          : "Showing the latest merged course and workflow activity for this draft.";
+        if (!items.length) {
+          liveTimelineStream.innerHTML = `<div class="review-item"><p>No timeline activity recorded yet.</p></div>`;
+          return;
+        }
+        liveTimelineStream.innerHTML = [...items].slice(-10).reverse().map((item) => `
+          <div class="review-item live-timeline-item">
+            <div class="live-timeline-item-head">
+              <div>
+                <strong>${escapeHtml(item.title || item.event_type || "Draft activity")}</strong>
+                <div class="live-timeline-item-meta">
+                  ${pill((item.source_kind || "timeline").replaceAll("_", " "))}
+                  ${item.source_title ? pill(item.source_title) : ""}
+                  ${item.stage ? pill(`stage: ${item.stage}`) : ""}
+                  ${item.status ? pill(`status: ${item.status}`) : ""}
+                </div>
+              </div>
+              <span class="status-pill">${escapeHtml(formatDate(item.created_at))}</span>
+            </div>
+            <p class="live-timeline-item-detail">${escapeHtml(item.detail || "No extra detail recorded for this item.")}</p>
+          </div>
+        `).join("");
       }
 
       function shouldPollDraft(courseRun, review) {
@@ -2552,10 +2612,19 @@
       }
 
       async function refreshDraftDetails(courseRunId, options = {}) {
-        const [courseResponse, creatorViewResponse, eventsResponse] = await Promise.all([
+        const timelinePromise = fetch(`/v1/course-runs/${courseRunId}/timeline`)
+          .then(async (response) => {
+            if (!response.ok) {
+              return null;
+            }
+            return response.json();
+          })
+          .catch(() => null);
+        const [courseResponse, creatorViewResponse, eventsResponse, timeline] = await Promise.all([
           fetch(`/v1/course-runs/${courseRunId}/sync`, { method: "POST" }),
           fetch(`/v1/course-runs/${courseRunId}/creator-view`),
           fetch(`/v1/course-runs/${courseRunId}/events`),
+          timelinePromise,
         ]);
         if (!courseResponse.ok) {
           const detail = await extractDetail(courseResponse);
@@ -2588,6 +2657,7 @@
         renderReview(review, courseRun, events, workflowDetails);
         renderPublishedVersions(versions);
         renderActivity(events);
+        renderLiveTimeline(timeline, courseRun);
         renderLearnerEvalSummary(currentLearnerEval);
         if (!options.silent && shouldPollDraft(courseRun, review)) {
           ensureDraftPolling(courseRun.id);
@@ -2595,7 +2665,7 @@
         if (!options.silent && !shouldPollDraft(courseRun, review)) {
           stopDraftPolling();
         }
-        return { courseRun, review, events, versions };
+        return { courseRun, review, events, versions, timeline };
       }
 
       function renderRecentDrafts(runs) {

@@ -7,10 +7,18 @@
   const subtitle = document.getElementById("timeline-subtitle");
   const draftIdInput = document.getElementById("timeline-draft-id");
   const loadButton = document.getElementById("timeline-load-button");
+  const refreshToggle = document.getElementById("timeline-refresh-toggle");
+  const refreshNow = document.getElementById("timeline-refresh-now");
+  const refreshStatus = document.getElementById("timeline-refresh-status");
+  const refreshCopy = document.getElementById("timeline-refresh-copy");
   const meta = document.getElementById("timeline-meta");
   const summaryGrid = document.getElementById("timeline-summary-grid");
   const stream = document.getElementById("timeline-stream");
   const backLink = document.getElementById("timeline-back-link");
+  const autoRefreshIntervalMs = 5000;
+  let autoRefreshHandle = null;
+  let lastLoadedDraftId = null;
+  let loadInFlight = false;
 
   function escapeHtml(value) {
     return String(value)
@@ -65,6 +73,21 @@
       url.searchParams.set("draft", draftId);
     } else {
       url.searchParams.delete("draft");
+    }
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function readLiveFromUrl() {
+    const url = new URL(window.location.href);
+    return url.searchParams.get("live") === "1";
+  }
+
+  function writeLiveToUrl(enabled) {
+    const url = new URL(window.location.href);
+    if (enabled) {
+      url.searchParams.set("live", "1");
+    } else {
+      url.searchParams.delete("live");
     }
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }
@@ -127,14 +150,54 @@
     }).join("");
   }
 
-  async function loadTimeline(draftId) {
+  function setAutoRefreshUi(enabled) {
+    refreshStatus.textContent = enabled ? "Auto refresh on" : "Auto refresh off";
+    refreshToggle.textContent = enabled ? "Pause auto refresh" : "Start auto refresh";
+    refreshCopy.textContent = enabled
+      ? "Refreshing every 5 seconds while this tab is open so you can follow agent progress live."
+      : "Turn on auto refresh to follow agent progress while the draft is building or reviewing.";
+  }
+
+  function stopAutoRefresh() {
+    if (autoRefreshHandle !== null) {
+      window.clearInterval(autoRefreshHandle);
+      autoRefreshHandle = null;
+    }
+    setAutoRefreshUi(false);
+    writeLiveToUrl(false);
+  }
+
+  function startAutoRefresh() {
+    if (!lastLoadedDraftId && !draftIdInput.value.trim()) {
+      setMessage("error", "Load a draft before starting auto refresh.");
+      return;
+    }
+    if (autoRefreshHandle !== null) {
+      window.clearInterval(autoRefreshHandle);
+    }
+    autoRefreshHandle = window.setInterval(() => {
+      if (document.hidden) return;
+      const draftId = lastLoadedDraftId || draftIdInput.value.trim();
+      if (!draftId || loadInFlight) return;
+      loadTimeline(draftId, { background: true });
+    }, autoRefreshIntervalMs);
+    setAutoRefreshUi(true);
+    writeLiveToUrl(true);
+  }
+
+  async function loadTimeline(draftId, options = {}) {
     if (!draftId) {
       setMessage("error", "Enter a draft id first.");
       return;
     }
     const urlTemplate = state.timeline_url_template || "/v1/course-runs/{course_run_id}/timeline";
+    if (loadInFlight) return;
+    loadInFlight = true;
     loadButton.disabled = true;
-    setMessage("info", "Loading draft timeline…");
+    refreshNow.disabled = true;
+    if (!options.background) {
+      setMessage("info", "Loading draft timeline…");
+    }
     try {
       const response = await fetch(urlTemplate.replace("{course_run_id}", encodeURIComponent(draftId)));
       if (!response.ok) {
@@ -142,7 +205,7 @@
       }
       const timeline = await response.json();
       title.textContent = timeline.course_run.title || "Draft timeline";
-      subtitle.textContent = `Showing course events, workflow events, and reviewer node executions for ${timeline.course_run.id}.`;
+      subtitle.textContent = `Showing course events, workflow authoring activity, workflow events, and node executions for ${timeline.course_run.id}.`;
       meta.innerHTML = [
         pill(`updated ${formatDate(timeline.course_run.updated_at)}`),
         pill(`AI spend ${Number(timeline.course_run.ai_usage?.estimated_cost_usd || 0).toFixed(4)} USD`),
@@ -152,14 +215,19 @@
       backLink.href = `${state.dashboard_url || "/create-course"}?draft=${encodeURIComponent(timeline.course_run.id)}&tab=drafts`;
       draftIdInput.value = timeline.course_run.id;
       writeDraftIdToUrl(timeline.course_run.id);
+       lastLoadedDraftId = timeline.course_run.id;
       document.title = `${timeline.course_run.title} · Draft Timeline`;
-      setMessage("success", `Loaded ${timeline.items.length} timeline item${timeline.items.length === 1 ? "" : "s"}.`);
+      if (!options.background) {
+        setMessage("success", `Loaded ${timeline.items.length} timeline item${timeline.items.length === 1 ? "" : "s"}.`);
+      }
     } catch (error) {
       setMessage("error", error instanceof Error ? error.message : "Could not load the draft timeline.");
       summaryGrid.innerHTML = `<div class="review-item"><p>Timeline unavailable.</p></div>`;
       stream.innerHTML = `<div class="review-item"><p>We could not load this draft.</p></div>`;
     } finally {
       loadButton.disabled = false;
+      refreshNow.disabled = false;
+      loadInFlight = false;
     }
   }
 
@@ -174,10 +242,36 @@
     }
   });
 
+  refreshToggle?.addEventListener("click", () => {
+    if (autoRefreshHandle !== null) {
+      stopAutoRefresh();
+      return;
+    }
+    startAutoRefresh();
+  });
+
+  refreshNow?.addEventListener("click", () => {
+    const draftId = draftIdInput.value.trim();
+    loadTimeline(draftId);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && autoRefreshHandle !== null) {
+      const draftId = lastLoadedDraftId || draftIdInput.value.trim();
+      if (draftId && !loadInFlight) {
+        loadTimeline(draftId, { background: true });
+      }
+    }
+  });
+
   const initialDraftId = state.draft_id || readDraftIdFromUrl();
+  setAutoRefreshUi(false);
   if (initialDraftId) {
     draftIdInput.value = initialDraftId;
     loadTimeline(initialDraftId);
+    if (readLiveFromUrl()) {
+      startAutoRefresh();
+    }
   } else {
     setMessage("info", "Paste a draft id to inspect its flow.");
   }

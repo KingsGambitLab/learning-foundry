@@ -54,22 +54,6 @@ Important note on persistence:
   - workspace launch
   - assignment submission and review guidance
 
-## Architecture at a glance
-
-```mermaid
-flowchart LR
-    A["Creator brief + setup choices"] --> B["CourseGenerationService"]
-    B --> C["CourseWorkflowService"]
-    C --> D["WorkflowService"]
-    D --> E["LangGraphAssignmentGraph"]
-    E --> F["PublishSnapshotService"]
-    F --> G["PublishLearnerCertificationService"]
-    G --> H["Published course"]
-    H --> I["LMSService"]
-    I --> J["LearnerStudioService"]
-    J --> K["Assignment grading + learner feedback"]
-```
-
 ## Repository layout
 
 The repo is organized around a few stable layers:
@@ -387,15 +371,18 @@ flowchart TD
     RR -->|"fail + exhausted"| END
 
     RC -->|"pass"| RPED["reviewer_pedagogy"]
-    RC -->|"fail + attempts left"| RP
+    RC -->|"small/local fix"| RP
+    RC -->|"structural fix"| AP
     RC -->|"fail + exhausted"| END
 
     RPED -->|"pass"| RT["reviewer_tests"]
-    RPED -->|"fail + attempts left"| RP
+    RPED -->|"small/local fix"| RP
+    RPED -->|"structural fix"| AP
     RPED -->|"fail + exhausted"| END
 
     RT -->|"pass"| END
-    RT -->|"fail + attempts left"| RP
+    RT -->|"small/local fix"| RP
+    RT -->|"structural fix"| AP
     RT -->|"fail + exhausted"| END
 
     RP --> RR
@@ -417,6 +404,7 @@ flowchart TD
 #### `reviewer_runtime`
 
 - validates the runtime/sandbox path
+- keeps narrow runtime regressions in the reviewer lane
 
 #### `reviewer_code`
 
@@ -433,6 +421,13 @@ flowchart TD
 - validates the hidden/public check relationship
 - validates deliverable coverage
 - validates learner starter surface coverage
+
+### Repair routing
+
+- **small runtime fix** -> `reviewer_repair` -> `reviewer_runtime`
+- **structural assignment fix** -> `authoring_repair` -> `authoring_runtime`
+
+That means runtime breakage and deterministic cleanup stay in the narrow reviewer loop, while genuinely structural starter-surface failures bounce back through authoring before we re-enter reviewer land.
 
 ### Important nuance
 

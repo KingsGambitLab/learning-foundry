@@ -41,6 +41,34 @@
   gap: 8px;
 }
 
+.timeline-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.timeline-controls-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.timeline-controls-copy strong {
+  font-size: 14px;
+}
+
+.timeline-controls-copy .field-hint {
+  margin: 0;
+}
+
+.timeline-controls-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .timeline-layout {
   display: grid;
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
@@ -153,8 +181,13 @@
   }
 
   .timeline-hero,
-  .timeline-input-row {
+  .timeline-input-row,
+  .timeline-controls {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .timeline-controls-actions {
+    justify-content: flex-start;
   }
 }

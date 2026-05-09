@@ -363,6 +363,19 @@ class WorkflowService:
                 ),
             },
         )
+        self.store.append_event(
+            run.id,
+            "workflow_authoring_completed",
+            {
+                "message": (
+                    f"Generated the first learner-ready assignment draft with "
+                    f"{len(task_agent_spec.deliverables)} deliverable"
+                    f"{'' if len(task_agent_spec.deliverables) == 1 else 's'}."
+                ),
+                "origin_template": run.artifacts.origin_template,
+                "deliverable_count": len(task_agent_spec.deliverables),
+            },
+        )
         if execute_nodes and run.artifacts.task_agent_spec is not None and self.node_runtime is not None:
             run = self.execute_langgraph_nodes(run.id)
         return run
@@ -528,6 +541,15 @@ class WorkflowService:
         run.artifacts.ai_usage = merge_ai_usage(run.artifacts.ai_usage, revision.usage)
         if revision.notes:
             run.notes.extend(revision.notes)
+        self.store.append_event(
+            run.id,
+            "workflow_authoring_revised",
+            {
+                "message": "Updated the learner-ready assignment draft after human review feedback.",
+                "deliverable_count": len(revision.spec.deliverables),
+                "origin_template": revision.origin_template,
+            },
+        )
         return run
 
     def _invalidate_generated_artifacts(self, run: WorkflowRun, *, reason: str) -> None:

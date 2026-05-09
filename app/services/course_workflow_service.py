@@ -526,6 +526,8 @@ class CourseWorkflowService:
         linked_runs = self._linked_runs_with_shared(course_run)
         items: list[DraftTimelineItem] = []
         for event in self.store.list_course_events(course_run_id):
+            if event.event_type == "course_run_synced":
+                continue
             items.append(self._timeline_item_from_course_event(course_run, event))
         for workflow_run in linked_runs.values():
             for event in self.workflow_service.list_events(workflow_run.id):
@@ -1714,8 +1716,6 @@ class CourseWorkflowService:
                 outcomes.append("observability")
             if "scale_slo_overlay" in overlays:
                 outcomes.append("latency and cost tuning")
-            if domain_pack == "analyst_sql":
-                outcomes.append("safe SQL execution")
             return outcomes
         if design_spec.capabilities.retrieval_mode == RetrievalMode.grounded_answers:
             outcomes = ["retrieval quality", "citation correctness", "faithfulness"]
@@ -2085,10 +2085,15 @@ class CourseWorkflowService:
         workflow_run: WorkflowRun,
         event: WorkflowEvent,
     ) -> DraftTimelineItem:
+        source_kind = (
+            DraftTimelineSourceKind.workflow_authoring
+            if event.event_type in {"workflow_authoring_completed", "workflow_authoring_revised"}
+            else DraftTimelineSourceKind.workflow_event
+        )
         return DraftTimelineItem(
             id=f"workflow-event:{workflow_run.id}:{event.sequence_no}",
             created_at=event.created_at,
-            source_kind=DraftTimelineSourceKind.workflow_event,
+            source_kind=source_kind,
             source_id=workflow_run.id,
             source_title=workflow_run.title,
             title=self._timeline_title_for_event(event.event_type),
@@ -2140,7 +2145,6 @@ class CourseWorkflowService:
             "course_generation_queued": "Generation queued",
             "course_brief_generated": "Course brief generated",
             "course_generation_failed": "Generation failed",
-            "course_run_synced": "Draft synced",
             "course_publish_requested": "Publish requested",
             "course_published": "Course published",
             "course_publish_failed": "Publish failed",
@@ -2151,6 +2155,8 @@ class CourseWorkflowService:
             "course_revision_started": "Revision started",
             "course_revision_created": "Revision created",
             "run_created": "Workflow run created",
+            "workflow_authoring_completed": "Workflow authoring completed",
+            "workflow_authoring_revised": "Workflow authoring revised",
             "run_revision_created": "Workflow revision created",
             "task_agent_spec_updated": "Assignment spec updated",
             "task_agent_workspace_materialized": "Workspace materialized",

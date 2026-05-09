@@ -118,6 +118,7 @@ class CourseEvent(BaseModel):
 
 class DraftTimelineSourceKind(str, Enum):
     course_event = "course_event"
+    workflow_authoring = "workflow_authoring"
     workflow_event = "workflow_event"
     workflow_node = "workflow_node"
 

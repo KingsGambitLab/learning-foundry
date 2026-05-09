@@ -136,6 +136,8 @@ class DraftTimelineApiTests(unittest.TestCase):
         body = response.text
         self.assertIn("Inspect a draft's flow", body)
         self.assertIn("Back and forth", body)
+        self.assertIn("Live refresh", body)
+        self.assertIn("Start auto refresh", body)
         self.assertIn('/static/draft-timeline.css', body)
         self.assertIn('/static/draft-timeline.js', body)
         self.assertIn('id="draft-timeline-state"', body)
@@ -151,6 +153,9 @@ class DraftTimelineApiTests(unittest.TestCase):
         course_run_id = course_run["id"]
         shared_run_id = course_run["shared_workflow_run_id"]
         self.assertIsNotNone(shared_run_id)
+
+        synced = self.client.post(f"/v1/course-runs/{course_run_id}/sync")
+        self.assertEqual(synced.status_code, 200)
 
         stored_workflow = app.state.workflow_service.store.get_run(shared_run_id)
         assert stored_workflow is not None
@@ -182,8 +187,16 @@ class DraftTimelineApiTests(unittest.TestCase):
         self.assertIn(shared_run_id, body["linked_workflow_run_ids"])
         source_kinds = {item["source_kind"] for item in body["items"]}
         self.assertIn("course_event", source_kinds)
+        self.assertIn("workflow_authoring", source_kinds)
         self.assertIn("workflow_event", source_kinds)
         self.assertIn("workflow_node", source_kinds)
+        self.assertFalse(any(item["event_type"] == "course_run_synced" for item in body["items"]))
+        authoring_item = next(
+            item
+            for item in body["items"]
+            if item["source_kind"] == "workflow_authoring" and item["event_type"] == "workflow_authoring_completed"
+        )
+        self.assertIn("learner-ready assignment draft", authoring_item["detail"])
         node_item = next(
             item
             for item in body["items"]
