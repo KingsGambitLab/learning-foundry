@@ -197,6 +197,19 @@ class LearnerStudioServiceTests(unittest.TestCase):
         self.assertEqual(image_name, "rust:1.82-bookworm")
         mock_build.assert_not_called()
 
+    def test_ephemeral_runtime_workspace_keeps_generated_artifacts_off_host_workspace(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        (self.workspace_root / "src").mkdir(parents=True, exist_ok=True)
+        (self.workspace_root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+
+        with service._ephemeral_runtime_workspace(self.workspace_root) as runtime_workspace:
+            self.assertNotEqual(runtime_workspace, self.workspace_root)
+            self.assertTrue((runtime_workspace / "src" / "main.rs").exists())
+            (runtime_workspace / "target" / "debug").mkdir(parents=True, exist_ok=True)
+            (runtime_workspace / "target" / "debug" / "demo").write_text("compiled\n", encoding="utf-8")
+
+        self.assertFalse((self.workspace_root / "target").exists())
+
     def test_workspace_runtime_image_build_reclaims_managed_space_and_labels_image_when_disk_is_low(self) -> None:
         service = LearnerStudioService(
             image_name="course-gen-learner-studio:test",

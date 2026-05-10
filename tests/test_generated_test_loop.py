@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.domain.registry import PackageType
-from app.domain.sandbox import SandboxExecutionResult, SandboxExecutionStatus
+from app.domain.sandbox import SandboxExecutionResult, SandboxExecutionStatus, SandboxFailureStage
 from app.domain.workflow import MaterializeBundleRequest, WorkflowNodeStatus
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
@@ -225,6 +225,10 @@ class GeneratedTestLoopTests(unittest.TestCase):
         self.assertIn(
             "Dependency contract materialization failed before runtime boot.",
             result.deliverable_reports[0].error or "",
+        )
+        self.assertEqual(
+            result.deliverable_reports[0].failed_stage,
+            SandboxFailureStage.dependency_materialization,
         )
 
 

@@ -12,6 +12,8 @@ from app.domain.workflow import (
     FailureContext,
     FailureContextValidationIssue,
     ReviewerFinding,
+    WorkflowNodeKind,
+    WorkflowNodeStatus,
     WorkflowFailureOwnerHint,
     WorkflowNodeExecution,
     WorkflowRun,
@@ -86,6 +88,20 @@ class TaskAgentRetryService:
             )
 
         if _should_retry_workspace(failure_context, latest_node):
+            if _workspace_blocker_repeated(run, latest_node, failure_context):
+                return run, TaskAgentRetryResult(
+                    action=TaskAgentRetryAction.unresolved_blocker,
+                    applied=False,
+                    should_continue=False,
+                    owner_hint=failure_context.owner_hint,
+                    failure_signature=failure_context.failure_signature,
+                    before_spec_hash=before_spec_hash,
+                    after_spec_hash=before_spec_hash,
+                    summary=(
+                        "Retry stopped because the same workspace blocker survived the previous repair attempt."
+                    ),
+                    detail=_failure_packet_summary(failure_context),
+                )
             run, repaired, repair_detail = self.workspace_authoring_service.repair_workspace(
                 run,
                 latest_node,
@@ -220,6 +236,46 @@ def _should_retry_workspace(
     }
     if any(finding.code in authored_codes for finding in failure_context.findings):
         return True
+    return False
+
+
+def _workspace_blocker_repeated(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+    failure_context: FailureContext,
+) -> bool:
+    if not failure_context.failure_signature:
+        return False
+    history = run.artifacts.node_executions
+    latest_index = next(
+        (
+            index
+            for index, node in reversed(list(enumerate(history)))
+            if node.node_id == latest_node.node_id
+            and node.kind == latest_node.kind
+            and node.attempt == latest_node.attempt
+            and node.created_at == latest_node.created_at
+        ),
+        None,
+    )
+    if latest_index is None:
+        return False
+
+    for prior_index in range(latest_index - 1, -1, -1):
+        prior_node = history[prior_index]
+        if prior_node.kind != latest_node.kind or prior_node.status != latest_node.status:
+            continue
+        prior_context = build_failure_context(run, prior_node)
+        if prior_context.failure_signature != failure_context.failure_signature:
+            continue
+        intervening_repairs = [
+            node
+            for node in history[prior_index + 1 : latest_index]
+            if node.kind in {WorkflowNodeKind.authoring_repair, WorkflowNodeKind.reviewer_repair}
+            and node.status == WorkflowNodeStatus.passed
+        ]
+        if intervening_repairs:
+            return True
     return False
 
 

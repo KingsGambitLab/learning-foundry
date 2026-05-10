@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import shutil
@@ -34,6 +35,7 @@ def default_learner_studio_image() -> str:
 
 class LearnerStudioService:
     _MANAGED_DOCKER_LABELS = {"coursegen.managed": "true"}
+    _RUNTIME_STAGE_MARKER_PREFIX = "[coursegen-stage] "
 
     def __init__(
         self,
@@ -197,72 +199,73 @@ class LearnerStudioService:
         host_port = self._allocate_port()
         container_name = f"course-gen-grade-{uuid4().hex[:12]}"
         network_name = f"{container_name}-net"
-        dependency_services = self._dependency_services(workspace_path)
         try:
-            image_name = self._workspace_runtime_image_name(workspace_path)
-            self._ensure_runtime_image_available(image_name)
-            if dependency_services:
-                self._start_runtime_support_services(
-                    workspace_path,
-                    network_name=network_name,
-                    container_prefix=container_name,
-                )
-            command = [
-                self.docker_binary,
-                "run",
-                "-d",
-                "--name",
-                container_name,
-                "-p",
-                f"{host_port}:8000",
-                "-v",
-                f"{workspace_path}:/workspace",
-                "-w",
-                "/workspace",
-                *(
-                    [
-                        "--network",
-                        network_name,
-                        "--network-alias",
-                        "app",
-                    ]
-                    if dependency_services
-                    else []
-                ),
-                *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-                image_name,
-                *self._runtime_shell_command(
-                    self._runtime_launch_script(
-                        workspace_path=workspace_path,
-                        spec=spec,
-                        include_setup=True,
+            with self._ephemeral_runtime_workspace(workspace_path) as runtime_workspace:
+                image_name = self._workspace_runtime_image_name(runtime_workspace)
+                self._ensure_runtime_image_available(image_name)
+                runtime_dependency_services = self._dependency_services(runtime_workspace)
+                if runtime_dependency_services:
+                    self._start_runtime_support_services(
+                        runtime_workspace,
+                        network_name=network_name,
+                        container_prefix=container_name,
                     )
-                ),
-            ]
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.build_timeout_s,
-            )
-            if result.returncode != 0:
-                raise LearnerStudioError(
-                    (result.stderr or result.stdout).strip() or "Could not start grading container."
+                command = [
+                    self.docker_binary,
+                    "run",
+                    "-d",
+                    "--name",
+                    container_name,
+                    "-p",
+                    f"{host_port}:8000",
+                    "-v",
+                    f"{runtime_workspace}:/workspace",
+                    "-w",
+                    "/workspace",
+                    *(
+                        [
+                            "--network",
+                            network_name,
+                            "--network-alias",
+                            "app",
+                        ]
+                        if runtime_dependency_services
+                        else []
+                    ),
+                    *self._docker_env_args(self._app_runtime_environment(runtime_workspace)),
+                    image_name,
+                    *self._runtime_shell_command(
+                        self._runtime_launch_script(
+                            workspace_path=runtime_workspace,
+                            spec=spec,
+                            include_setup=True,
+                        )
+                    ),
+                ]
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.build_timeout_s,
                 )
+                if result.returncode != 0:
+                    raise LearnerStudioError(
+                        (result.stderr or result.stdout).strip() or "Could not start grading container."
+                    )
 
-            base_url = f"http://{self.host}:{host_port}"
-            self._wait_for_http(
-                f"{base_url}{self._healthcheck_path(workspace_path, spec)}",
-                container_name=container_name,
-            )
-            return self.runner.grade_assignment_live(
-                spec,
-                LiveGradeTaskAgentRequest(
-                    base_url=base_url,
-                    workspace_root=str(workspace_path),
-                ),
-            )
+                base_url = f"http://{self.host}:{host_port}"
+                self._wait_for_http(
+                    f"{base_url}{self._healthcheck_path(runtime_workspace, spec)}",
+                    container_name=container_name,
+                )
+                return self.runner.grade_assignment_live(
+                    spec,
+                    LiveGradeTaskAgentRequest(
+                        base_url=base_url,
+                        workspace_root=str(workspace_path),
+                    ),
+                )
         except TaskAgentRunnerError as exc:
             raise LearnerStudioError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -282,6 +285,13 @@ class LearnerStudioService:
             return json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
+
+    @contextmanager
+    def _ephemeral_runtime_workspace(self, workspace_path: Path):
+        with tempfile.TemporaryDirectory(prefix="course_gen_runtime_workspace_") as temp_dir:
+            temp_root = Path(temp_dir) / "workspace"
+            shutil.copytree(workspace_path, temp_root)
+            yield temp_root
 
     def _runtime_script_command(self, workspace_path: Path, relative_path: str) -> str | None:
         target = workspace_path / relative_path
@@ -312,15 +322,16 @@ class LearnerStudioService:
             "set -e",
             "export PORT=8000",
             *(
-                [f"sh {RUNTIME_INSTALL_SCRIPT_PATH}"]
+                [self._runtime_stage_marker("install"), f"sh {RUNTIME_INSTALL_SCRIPT_PATH}"]
                 if include_setup and self._runtime_script_command(workspace_path, RUNTIME_INSTALL_SCRIPT_PATH)
                 else []
             ),
             *(
-                [f"sh {RUNTIME_VERIFY_SCRIPT_PATH}"]
+                [self._runtime_stage_marker("verify"), f"sh {RUNTIME_VERIFY_SCRIPT_PATH}"]
                 if self._runtime_script_command(workspace_path, RUNTIME_VERIFY_SCRIPT_PATH)
                 else []
             ),
+            self._runtime_stage_marker("boot"),
             f"exec {self._preview_command(workspace_path, spec)}",
         ]
         return "\n".join(lines)
@@ -329,6 +340,34 @@ class LearnerStudioService:
         # Use a non-login shell so the authored runtime inherits the image PATH/env
         # without shell-specific PATH rewrites (for example, Rust's cargo toolchain).
         return ["sh", "-c", launch_script]
+
+    def _runtime_stage_marker(self, stage: str) -> str:
+        return f"echo '{self._RUNTIME_STAGE_MARKER_PREFIX}{stage}'"
+
+    def _runtime_stage_from_logs(self, logs: str | None) -> str | None:
+        if not logs:
+            return None
+        for line in reversed(logs.splitlines()):
+            if not line.startswith(self._RUNTIME_STAGE_MARKER_PREFIX):
+                continue
+            stage = line.removeprefix(self._RUNTIME_STAGE_MARKER_PREFIX).strip()
+            if stage:
+                return stage
+        return None
+
+    def _runtime_stage_command(
+        self,
+        workspace_path: Path,
+        spec: TaskAgentServiceSpec,
+        stage: str | None,
+    ) -> list[str]:
+        if stage == "install" and self._runtime_script_command(workspace_path, RUNTIME_INSTALL_SCRIPT_PATH):
+            return ["sh", RUNTIME_INSTALL_SCRIPT_PATH]
+        if stage == "verify" and self._runtime_script_command(workspace_path, RUNTIME_VERIFY_SCRIPT_PATH):
+            return ["sh", RUNTIME_VERIFY_SCRIPT_PATH]
+        if stage == "boot":
+            return self._runtime_shell_command(f"exec {self._preview_command(workspace_path, spec)}")
+        return []
 
     def _healthcheck_path(self, workspace_path: Path, spec: TaskAgentServiceSpec) -> str:
         manifest = self._runtime_manifest(workspace_path)
@@ -739,20 +778,32 @@ class LearnerStudioService:
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
             if container_name and not self._container_running(container_name):
-                details = (
-                    f"Container '{container_name}' stopped before '{url}' became healthy. "
-                    f"Last error: {last_error}"
-                )
                 logs = self._container_logs(container_name)
+                stage = self._runtime_stage_from_logs(logs)
+                if stage:
+                    details = (
+                        f"Container '{container_name}' stopped during '{stage}' before '{url}' became healthy."
+                    )
+                else:
+                    details = (
+                        f"Container '{container_name}' stopped before '{url}' became healthy. "
+                        f"Last error: {last_error}"
+                    )
                 if logs:
                     details = f"{details}\n\nContainer logs:\n{logs}"
                 raise LearnerStudioError(details)
             time.sleep(1.0)
-        details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
         if container_name:
             logs = self._container_logs(container_name)
+            stage = self._runtime_stage_from_logs(logs)
+            if stage:
+                details = f"Timed out waiting for '{url}' during '{stage}'. Last error: {last_error}"
+            else:
+                details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
             if logs:
                 details = f"{details}\n\nContainer logs:\n{logs}"
+            raise LearnerStudioError(details)
+        details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
         raise LearnerStudioError(details)
 
     def _allocate_port(self) -> int:

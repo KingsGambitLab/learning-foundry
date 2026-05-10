@@ -14,6 +14,7 @@ from app.domain.sandbox import (
     DeliverableSandboxReport,
     SandboxAvailability,
     SandboxExecutionResult,
+    SandboxFailureStage,
     SandboxExecutionStatus,
 )
 from app.domain.task_agent import TaskAgentServiceSpec
@@ -373,6 +374,7 @@ class DockerSandboxRunner:
             base_url = f"http://127.0.0.1:{host_port}"
             logs = ""
             runtime_image_ready = False
+            current_runtime_workspace: Path | None = None
             try:
                 manifest = self.runtime_harness._runtime_manifest(starter_root)
                 materialization = self.dependency_contract_materializer.materialize(
@@ -412,6 +414,9 @@ class DockerSandboxRunner:
                             deliverable_id=deliverable.id,
                             compile_succeeded=False,
                             runtime_succeeded=False,
+                            failed_stage=SandboxFailureStage.dependency_materialization,
+                            stage_command=list(materialization.command),
+                            stage_exit_code=materialization.return_code,
                             stdout=materialization.stdout,
                             stderr=materialization.stderr,
                             error=materialization.error
@@ -419,129 +424,151 @@ class DockerSandboxRunner:
                         )
                     )
                     continue
-                image_name = self.runtime_harness._workspace_runtime_image_name(starter_root)
-                build_command = []
-                build_stdout_parts.append(
-                    f"[{deliverable.id}] Using runtime image {image_name} from the authored runtime plan."
-                )
-                if materialization.synced_paths:
+                with self.runtime_harness._ephemeral_runtime_workspace(starter_root) as runtime_workspace:
+                    current_runtime_workspace = runtime_workspace
+                    image_name = self.runtime_harness._workspace_runtime_image_name(runtime_workspace)
+                    build_command = []
                     build_stdout_parts.append(
-                        f"[{deliverable.id}] Materialized dependency contract paths: {', '.join(materialization.synced_paths)}"
+                        f"[{deliverable.id}] Using runtime image {image_name} from the authored runtime plan."
                     )
-                self.runtime_harness._ensure_runtime_image_available(image_name)
-                runtime_image_ready = True
-                if self.runtime_harness._image_exists(image_name):
-                    any_cached = True
-                log_coursegen_event(
-                    "sandbox_deliverable_support_services_starting",
-                    workflow_run_id=workflow_run_id,
-                    deliverable_id=deliverable.id,
-                    dependency_service_count=len(self.runtime_harness._dependency_services(starter_root)),
-                    network_name=network_name,
-                )
-                self.runtime_harness._start_runtime_support_services(
-                    starter_root,
-                    network_name=network_name,
-                    container_prefix=container_name,
-                )
-                log_coursegen_event(
-                    "sandbox_deliverable_support_services_started",
-                    workflow_run_id=workflow_run_id,
-                    deliverable_id=deliverable.id,
-                    dependency_service_count=len(self.runtime_harness._dependency_services(starter_root)),
-                )
-                local_run_command = [
-                    self.docker_binary,
-                    "run",
-                    "-d",
-                    "--name",
-                    container_name,
-                    "-p",
-                    f"{host_port}:8000",
-                    "-v",
-                    f"{workspace_root}:/workspace",
-                    "-w",
-                    f"/workspace/starter/{deliverable.id}",
-                    *(
-                        [
-                            "--network",
-                            network_name,
-                            "--network-alias",
-                            "app",
-                        ]
-                        if self.runtime_harness._dependency_services(starter_root)
-                        else []
-                    ),
-                    *self.runtime_harness._docker_env_args(
-                        self.runtime_harness._app_runtime_environment(starter_root)
-                    ),
-                    image_name,
-                    *self.runtime_harness._runtime_shell_command(
-                        self.runtime_harness._runtime_launch_script(
-                            workspace_path=starter_root,
-                            spec=spec,
-                            include_setup=True,
+                    if materialization.synced_paths:
+                        build_stdout_parts.append(
+                            f"[{deliverable.id}] Materialized dependency contract paths: {', '.join(materialization.synced_paths)}"
                         )
-                    ),
-                ]
-                run_command = local_run_command
-                log_coursegen_event(
-                    "sandbox_deliverable_runtime_launching",
-                    workflow_run_id=workflow_run_id,
-                    deliverable_id=deliverable.id,
-                    image_name=image_name,
-                    host_port=host_port,
-                    container_name=container_name,
-                )
-                run_result = subprocess.run(
-                    local_run_command,
-                    cwd=starter_root,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.run_timeout_s,
-                )
-                if run_result.returncode != 0:
-                    all_runs_succeeded = False
-                    logs = self.runtime_harness._container_logs(container_name) or ""
+                    self.runtime_harness._ensure_runtime_image_available(image_name)
+                    runtime_image_ready = True
+                    if self.runtime_harness._image_exists(image_name):
+                        any_cached = True
+                    dependency_services = self.runtime_harness._dependency_services(runtime_workspace)
                     log_coursegen_event(
-                        "sandbox_deliverable_runtime_launch_failed",
+                        "sandbox_deliverable_support_services_starting",
                         workflow_run_id=workflow_run_id,
                         deliverable_id=deliverable.id,
-                        return_code=run_result.returncode,
-                        error="Could not start the starter runtime container.",
+                        dependency_service_count=len(dependency_services),
+                        network_name=network_name,
                     )
-                    run_stdout_parts.append(f"[{deliverable.id}] {run_result.stdout}".strip())
-                    run_stderr_parts.append(f"[{deliverable.id}] {run_result.stderr}\n{logs}".strip())
-                    deliverable_reports.append(
-                        DeliverableSandboxReport(
+                    self.runtime_harness._start_runtime_support_services(
+                        runtime_workspace,
+                        network_name=network_name,
+                        container_prefix=container_name,
+                    )
+                    log_coursegen_event(
+                        "sandbox_deliverable_support_services_started",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        dependency_service_count=len(dependency_services),
+                    )
+                    local_run_command = [
+                        self.docker_binary,
+                        "run",
+                        "-d",
+                        "--name",
+                        container_name,
+                        "-p",
+                        f"{host_port}:8000",
+                        "-v",
+                        f"{runtime_workspace}:/workspace",
+                        "-w",
+                        "/workspace",
+                        *(
+                            [
+                                "--network",
+                                network_name,
+                                "--network-alias",
+                                "app",
+                            ]
+                            if dependency_services
+                            else []
+                        ),
+                        *self.runtime_harness._docker_env_args(
+                            self.runtime_harness._app_runtime_environment(runtime_workspace)
+                        ),
+                        image_name,
+                        *self.runtime_harness._runtime_shell_command(
+                            self.runtime_harness._runtime_launch_script(
+                                workspace_path=runtime_workspace,
+                                spec=spec,
+                                include_setup=True,
+                            )
+                        ),
+                    ]
+                    run_command = local_run_command
+                    log_coursegen_event(
+                        "sandbox_deliverable_runtime_launching",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        image_name=image_name,
+                        host_port=host_port,
+                        container_name=container_name,
+                    )
+                    run_result = subprocess.run(
+                        local_run_command,
+                        cwd=starter_root,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.run_timeout_s,
+                    )
+                    if run_result.returncode != 0:
+                        all_runs_succeeded = False
+                        logs = self.runtime_harness._container_logs(container_name) or ""
+                        failed_stage = self._deliverable_runtime_stage(
+                            logs=logs,
+                            error_text="\n".join(part for part in (run_result.stderr, run_result.stdout) if part),
+                            default=SandboxFailureStage.container_launch,
+                        )
+                        log_coursegen_event(
+                            "sandbox_deliverable_runtime_launch_failed",
+                            workflow_run_id=workflow_run_id,
                             deliverable_id=deliverable.id,
-                            compile_succeeded=True,
-                            runtime_succeeded=False,
-                            stdout=run_result.stdout,
-                            stderr="\n".join(part for part in [run_result.stderr, logs] if part),
+                            return_code=run_result.returncode,
                             error="Could not start the starter runtime container.",
                         )
-                    )
-                    continue
+                        run_stdout_parts.append(f"[{deliverable.id}] {run_result.stdout}".strip())
+                        run_stderr_parts.append(f"[{deliverable.id}] {run_result.stderr}\n{logs}".strip())
+                        deliverable_reports.append(
+                            DeliverableSandboxReport(
+                                deliverable_id=deliverable.id,
+                                compile_succeeded=self._compile_succeeded_for_stage(failed_stage),
+                                runtime_succeeded=False,
+                                failed_stage=failed_stage,
+                                stage_command=self._stage_command_for_report(
+                                    workspace_path=runtime_workspace,
+                                    spec=spec,
+                                    failed_stage=failed_stage,
+                                    fallback=local_run_command,
+                                ),
+                                stage_exit_code=run_result.returncode,
+                                stdout=run_result.stdout,
+                                stderr="\n".join(part for part in [run_result.stderr, logs] if part),
+                                error=self._summarize_stage_failure(
+                                    deliverable_id=deliverable.id,
+                                    failed_stage=failed_stage,
+                                    error_text=run_result.stderr,
+                                    logs=logs,
+                                    default="Could not start the starter runtime container.",
+                                ),
+                            )
+                        )
+                        continue
 
-                healthcheck_path = self.runtime_harness._healthcheck_path(starter_root, spec)
-                log_coursegen_event(
-                    "sandbox_deliverable_healthcheck_wait_started",
-                    workflow_run_id=workflow_run_id,
-                    deliverable_id=deliverable.id,
-                    healthcheck_url=f"{base_url}{healthcheck_path}",
-                )
-                self.runtime_harness._wait_for_http(
-                    f"{base_url}{healthcheck_path}",
-                    container_name=container_name,
-                )
-                log_coursegen_event(
-                    "sandbox_deliverable_healthcheck_wait_completed",
-                    workflow_run_id=workflow_run_id,
-                    deliverable_id=deliverable.id,
-                    healthcheck_url=f"{base_url}{healthcheck_path}",
-                )
+                    healthcheck_path = self.runtime_harness._healthcheck_path(runtime_workspace, spec)
+                    log_coursegen_event(
+                        "sandbox_deliverable_healthcheck_wait_started",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        healthcheck_url=f"{base_url}{healthcheck_path}",
+                    )
+                    self.runtime_harness._wait_for_http(
+                        f"{base_url}{healthcheck_path}",
+                        container_name=container_name,
+                    )
+                    log_coursegen_event(
+                        "sandbox_deliverable_healthcheck_wait_completed",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        healthcheck_url=f"{base_url}{healthcheck_path}",
+                    )
                 log_coursegen_event(
                     "sandbox_deliverable_public_checks_started",
                     workflow_run_id=workflow_run_id,
@@ -565,6 +592,11 @@ class DockerSandboxRunner:
                     run_stderr_parts.append(f"[{deliverable.id}] {logs}".strip())
                 if not contract_passed:
                     all_runs_succeeded = False
+                failed_stage: SandboxFailureStage | None = None
+                if not contract_passed:
+                    failed_stage = SandboxFailureStage.contract
+                elif not checks_passed:
+                    failed_stage = SandboxFailureStage.checks
                 log_coursegen_event(
                     "sandbox_deliverable_public_checks_completed",
                     workflow_run_id=workflow_run_id,
@@ -578,6 +610,12 @@ class DockerSandboxRunner:
                             deliverable_id=deliverable.id,
                             compile_succeeded=True,
                             runtime_succeeded=contract_passed,
+                            failed_stage=failed_stage,
+                            stage_command=(
+                                [str(manifest.get("visible_check_command") or "sh .coursegen/runtime/check_visible.sh")]
+                                if failed_stage == SandboxFailureStage.checks
+                                else []
+                            ),
                             public_checks_passed=checks_passed,
                             health_status_code=200,
                             stdout=combined_output,
@@ -597,6 +635,13 @@ class DockerSandboxRunner:
                     all_builds_succeeded = False
                 all_runs_succeeded = False
                 logs = self.runtime_harness._container_logs(container_name) or ""
+                failed_stage = self._deliverable_runtime_stage(
+                    logs=logs,
+                    error_text=str(exc),
+                    default=(
+                        SandboxFailureStage.boot if runtime_image_ready else SandboxFailureStage.runtime
+                    ),
+                )
                 log_coursegen_event(
                     "sandbox_deliverable_completed",
                     workflow_run_id=workflow_run_id,
@@ -608,11 +653,28 @@ class DockerSandboxRunner:
                 deliverable_reports.append(
                     DeliverableSandboxReport(
                         deliverable_id=deliverable.id,
-                        compile_succeeded=runtime_image_ready,
+                        compile_succeeded=self._compile_succeeded_for_stage(failed_stage),
                         runtime_succeeded=False,
+                        failed_stage=failed_stage,
+                        stage_command=self._stage_command_for_report(
+                            workspace_path=(
+                                current_runtime_workspace
+                                if current_runtime_workspace is not None and current_runtime_workspace.exists()
+                                else starter_root
+                            ),
+                            spec=spec,
+                            failed_stage=failed_stage,
+                            fallback=run_command,
+                        ),
                         stdout="",
                         stderr=logs,
-                        error=str(exc),
+                        error=self._summarize_stage_failure(
+                            deliverable_id=deliverable.id,
+                            failed_stage=failed_stage,
+                            error_text=str(exc),
+                            logs=logs,
+                            default=str(exc),
+                        ),
                     )
                 )
             finally:
@@ -641,7 +703,7 @@ class DockerSandboxRunner:
             deliverable_reports=deliverable_reports,
             error=None
             if success
-            else "Starter deliverable verification failed on the authored runtime harness.",
+            else self._summarize_failed_deliverables(deliverable_reports),
         )
         log_coursegen_event(
             "sandbox_starter_harness_completed",
@@ -723,6 +785,105 @@ class DockerSandboxRunner:
         if not report.valid:
             return False, "\n".join(lines), "Visible test script did not emit a valid report."
         return report.passed, "\n".join(lines), None
+
+    def _deliverable_runtime_stage(
+        self,
+        *,
+        logs: str | None,
+        error_text: str | None,
+        default: SandboxFailureStage,
+    ) -> SandboxFailureStage:
+        stage_name = self.runtime_harness._runtime_stage_from_logs(logs or error_text or "")
+        if stage_name == "install":
+            return SandboxFailureStage.install
+        if stage_name == "verify":
+            return SandboxFailureStage.verify
+        if stage_name == "boot":
+            return SandboxFailureStage.boot
+        return default
+
+    def _compile_succeeded_for_stage(self, failed_stage: SandboxFailureStage | None) -> bool:
+        return failed_stage not in {
+            SandboxFailureStage.dependency_materialization,
+            SandboxFailureStage.install,
+            SandboxFailureStage.verify,
+            SandboxFailureStage.container_launch,
+            SandboxFailureStage.missing_workspace,
+            SandboxFailureStage.runtime,
+        }
+
+    def _stage_command_for_report(
+        self,
+        *,
+        workspace_path: Path,
+        spec: TaskAgentServiceSpec,
+        failed_stage: SandboxFailureStage | None,
+        fallback: list[str],
+    ) -> list[str]:
+        if failed_stage in {SandboxFailureStage.install, SandboxFailureStage.verify, SandboxFailureStage.boot}:
+            command = self.runtime_harness._runtime_stage_command(
+                workspace_path,
+                spec,
+                failed_stage.value,
+            )
+            if command:
+                return command
+        return list(fallback)
+
+    def _summarize_stage_failure(
+        self,
+        *,
+        deliverable_id: str,
+        failed_stage: SandboxFailureStage | None,
+        error_text: str | None,
+        logs: str | None,
+        default: str,
+    ) -> str:
+        detail = self._first_useful_line(error_text, logs)
+        if failed_stage is None:
+            return detail or default
+        stage_label = failed_stage.value.replace("_", " ")
+        if detail:
+            return f"{deliverable_id} failed during {stage_label}: {detail}"
+        return f"{deliverable_id} failed during {stage_label}."
+
+    def _summarize_failed_deliverables(
+        self,
+        deliverable_reports: list[DeliverableSandboxReport],
+    ) -> str:
+        failures = [
+            report
+            for report in deliverable_reports
+            if not report.compile_succeeded
+            or not report.runtime_succeeded
+            or report.public_checks_passed is False
+            or report.error
+        ]
+        if not failures:
+            return "Starter deliverable verification failed on the authored runtime harness."
+        primary = failures[0]
+        return self._summarize_stage_failure(
+            deliverable_id=primary.deliverable_id,
+            failed_stage=primary.failed_stage,
+            error_text=primary.error,
+            logs=primary.stderr,
+            default="Starter deliverable verification failed on the authored runtime harness.",
+        )
+
+    def _first_useful_line(self, *texts: str | None) -> str | None:
+        ignored_prefixes = (self.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX,)
+        for text in texts:
+            cleaned = (text or "").strip()
+            if not cleaned:
+                continue
+            for line in cleaned.splitlines():
+                candidate = line.strip()
+                if not candidate:
+                    continue
+                if any(candidate.startswith(prefix) for prefix in ignored_prefixes):
+                    continue
+                return candidate
+        return None
 
     def _json_request(self, method: str, url: str, payload: dict | None = None) -> dict:
         data = None

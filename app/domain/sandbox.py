@@ -16,6 +16,18 @@ class SandboxExecutionStatus(str, Enum):
     unavailable = "unavailable"
 
 
+class SandboxFailureStage(str, Enum):
+    missing_workspace = "missing_workspace"
+    dependency_materialization = "dependency_materialization"
+    install = "install"
+    verify = "verify"
+    boot = "boot"
+    contract = "contract"
+    checks = "checks"
+    container_launch = "container_launch"
+    runtime = "runtime"
+
+
 class SandboxAvailability(BaseModel):
     engine: SandboxEngine = SandboxEngine.docker
     available: bool
@@ -27,6 +39,9 @@ class DeliverableSandboxReport(BaseModel):
     deliverable_id: str
     compile_succeeded: bool
     runtime_succeeded: bool
+    failed_stage: SandboxFailureStage | None = None
+    stage_command: list[str] = Field(default_factory=list)
+    stage_exit_code: int | None = None
     public_checks_passed: bool | None = None
     health_status_code: int | None = None
     stdout: str = ""
