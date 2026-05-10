@@ -163,7 +163,10 @@ class FailureReplaySmokeServiceTests(TestCase):
 
             self.assertTrue(result.replay_run_id.startswith(f"{run.id}-replay-"))
             self.assertEqual(result.selected_node_kind, WorkflowNodeKind.authoring_runtime.value)
-            self.assertEqual(result.target_deliverable_ids, ["deliverable_1"])
+            self.assertEqual(
+                result.target_deliverable_ids,
+                ["deliverable_1", "deliverable_2", "deliverable_3", "deliverable_4"],
+            )
             self.assertFalse(result.repaired)
             self.assertTrue(result.smoke_passed)
             self.assertEqual(fake_service.repair_calls, 0)

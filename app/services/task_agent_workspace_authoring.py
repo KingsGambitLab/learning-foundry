@@ -82,6 +82,7 @@ class TaskAgentWorkspaceAuthoringService:
             return run, False, "The workspace is missing and could not be prepared."
 
         failed_deliverables = self._target_deliverable_ids(
+            run=run,
             latest_node=latest_node,
             failure_context=failure_context,
         )
@@ -156,6 +157,7 @@ class TaskAgentWorkspaceAuthoringService:
             )
 
         target_deliverables = self._target_deliverable_ids(
+            run=run,
             latest_node=latest_node,
             failure_context=failure_context,
         )
@@ -219,11 +221,13 @@ class TaskAgentWorkspaceAuthoringService:
 
     def target_deliverable_ids(
         self,
+        run: WorkflowRun,
         *,
         latest_node: WorkflowNodeExecution,
         failure_context: FailureContext | None = None,
     ) -> set[str]:
         return self._target_deliverable_ids(
+            run=run,
             latest_node=latest_node,
             failure_context=failure_context,
         )
@@ -297,10 +301,12 @@ class TaskAgentWorkspaceAuthoringService:
 
     def _target_deliverable_ids(
         self,
+        run: WorkflowRun,
         *,
         latest_node: WorkflowNodeExecution,
         failure_context: FailureContext | None,
     ) -> set[str]:
+        spec = run.artifacts.task_agent_spec
         failed_deliverables = {
             report.deliverable_id
             for report in (latest_node.sandbox_result.deliverable_reports if latest_node.sandbox_result else [])
@@ -308,4 +314,25 @@ class TaskAgentWorkspaceAuthoringService:
         }
         if failure_context is not None and failure_context.sandbox is not None:
             failed_deliverables.update(failure_context.sandbox.failed_deliverables)
-        return failed_deliverables
+        if spec is None or not spec.course_structure.shared_codebase or not failed_deliverables:
+            return failed_deliverables
+
+        deliverable_order = [deliverable.id for deliverable in spec.deliverables]
+        deliverable_positions = [
+            deliverable_order.index(deliverable_id)
+            for deliverable_id in failed_deliverables
+            if deliverable_id in deliverable_order
+        ]
+        if not deliverable_positions:
+            return set()
+
+        if failure_context is not None and failure_context.phase in {
+            "dependency_materialization",
+            "install",
+            "verify",
+            "container_launch",
+        }:
+            return set(deliverable_order)
+
+        earliest_failed_index = min(deliverable_positions)
+        return set(deliverable_order[earliest_failed_index:])

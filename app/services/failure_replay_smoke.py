@@ -65,6 +65,7 @@ class FailureReplaySmokeService:
             workspace_service = self.workspace_authoring_service_factory(temp_dir)
             target_deliverables = sorted(
                 workspace_service.target_deliverable_ids(
+                    replay_run,
                     latest_node=latest_node,
                     failure_context=failure_context,
                 )

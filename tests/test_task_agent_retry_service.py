@@ -553,6 +553,154 @@ class TaskAgentRetryServiceTests(TestCase):
                 (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
+    def test_workspace_repair_rebuilds_failed_progressive_stage_and_descendants(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Generated assignment failed to boot in Docker.",
+                created_at=datetime.now(UTC),
+                sandbox_result=SandboxExecutionResult(
+                    status=SandboxExecutionStatus.failed,
+                    available=True,
+                    build_succeeded=True,
+                    run_succeeded=False,
+                    generated_at=datetime.now(UTC),
+                    run_stderr="deliverable_2 boot failed",
+                    error="sandbox failed",
+                    deliverable_reports=[
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_1",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_2",
+                            compile_succeeded=False,
+                            runtime_succeeded=False,
+                            error="deliverable_2 boot failed",
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_3",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_4",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                    ],
+                ),
+                findings=[
+                    ReviewerFinding(
+                        category="runtime",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Sandbox verification failed",
+                        detail="deliverable_2 failed to boot in Docker.",
+                    )
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+
+            repaired_run, repaired, message = workspace_authoring.repair_workspace(
+                run,
+                latest_node,
+                failure_context=failure_context,
+            )
+
+            self.assertTrue(repaired)
+            self.assertIn("failed workspace deliverables", message)
+            self.assertEqual(repo_authoring.calls, [["deliverable_2", "deliverable_3", "deliverable_4"]])
+            repaired_workspace = repaired_run.artifacts.workspace_snapshot
+            assert repaired_workspace is not None
+            self.assertFalse(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+            )
+            self.assertTrue(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_2" / "repair_scope_marker.txt").exists()
+            )
+            self.assertTrue(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+            )
+
+    def test_workspace_repair_rebuilds_all_progressive_stages_for_install_failures(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Generated assignment failed during install.",
+                created_at=datetime.now(UTC),
+                sandbox_result=SandboxExecutionResult(
+                    status=SandboxExecutionStatus.failed,
+                    available=True,
+                    build_succeeded=False,
+                    run_succeeded=False,
+                    generated_at=datetime.now(UTC),
+                    build_stderr="mvn is required but not installed",
+                    error="install failed",
+                    deliverable_reports=[
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_1",
+                            compile_succeeded=False,
+                            runtime_succeeded=False,
+                            failed_stage=SandboxFailureStage.install,
+                            error="mvn is required but not installed",
+                        ),
+                    ],
+                ),
+                findings=[
+                    ReviewerFinding(
+                        category="runtime",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Sandbox verification failed",
+                        detail="deliverable_1 failed during install.",
+                    )
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+
+            repaired_run, repaired, _ = workspace_authoring.repair_workspace(
+                run,
+                latest_node,
+                failure_context=failure_context,
+            )
+
+            self.assertTrue(repaired)
+            self.assertEqual(
+                repo_authoring.calls,
+                [["deliverable_1", "deliverable_2", "deliverable_3", "deliverable_4"]],
+            )
+            repaired_workspace = repaired_run.artifacts.workspace_snapshot
+            assert repaired_workspace is not None
+            self.assertTrue(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+            )
+
     def test_retry_service_stops_when_same_workspace_blocker_repeats_after_repair(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)

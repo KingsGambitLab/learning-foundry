@@ -411,7 +411,7 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert dependency_contracts[0]["present_lockfile_paths"] == []
         assert dependency_contracts[0]["runtime_bundle_complete"] is False
 
-    def test_repo_authoring_carries_forward_previous_stage_for_shared_codebase_deliverables(self) -> None:
+    def test_repo_authoring_shared_codebase_uses_single_progressive_bundle_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run = _materialized_run(temp_dir)
             spec = run.artifacts.task_agent_spec
@@ -427,16 +427,19 @@ class AuthoringPayloadTests(unittest.TestCase):
                     "primary_editable_paths": ["src/shared_stage.txt"],
                 }
                 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            (public_root / "starter" / "deliverable_1" / "src").mkdir(parents=True, exist_ok=True)
+            (public_root / "starter" / "deliverable_1" / "src" / "shared_stage.txt").write_text(
+                "stage-one\n",
+                encoding="utf-8",
+            )
 
             queued_client = _QueuedFakeClient(
                 [
                     type(
-                        "RepoBundle",
+                        "ProgressiveRepoBundle",
                         (),
                         {
-                            "files": [
-                                type("RepoFile", (), {"path": "src/shared_stage.txt", "content": "stage-one\n"})(),
-                                type("RepoFile", (), {"path": "mvnw", "content": "#!/usr/bin/env sh\n./mvnw \"$@\"\n"})(),
+                            "runtime_protocol_files": [
                                 type(
                                     "RepoFile",
                                     (),
@@ -470,57 +473,27 @@ class AuthoringPayloadTests(unittest.TestCase):
                                     },
                                 )(),
                             ],
-                            "dependency_contract": _dependency_contract_payload(
-                                build_support_paths=["mvnw"],
-                                reproducibility_mode="locked",
-                            ),
-                            "notes": [],
-                        },
-                    )(),
-                    type(
-                        "RepoBundle",
-                        (),
-                        {
-                            "files": [
-                                type("RepoFile", (), {"path": "src/shared_stage.txt", "content": "stage-two\n"})(),
-                                type("RepoFile", (), {"path": "mvnw", "content": "#!/usr/bin/env sh\n./mvnw \"$@\"\n"})(),
+                            "deliverables": [
                                 type(
-                                    "RepoFile",
+                                    "DeliverableBundle",
                                     (),
                                     {
-                                        "path": "Dockerfile",
-                                        "content": "FROM rust:1.82-bookworm\n",
-                                    },
-                                )(),
-                                type(
-                                    "RepoFile",
-                                    (),
-                                    {
-                                        "path": RUNTIME_INSTALL_SCRIPT_PATH,
-                                        "content": "#!/usr/bin/env sh\nset -eu\n",
-                                    },
-                                )(),
-                                type(
-                                    "RepoFile",
-                                    (),
-                                    {
-                                        "path": RUNTIME_VERIFY_SCRIPT_PATH,
-                                        "content": "#!/usr/bin/env sh\nset -eu\n",
-                                    },
-                                )(),
-                                type(
-                                    "RepoFile",
-                                    (),
-                                    {
-                                        "path": RUNTIME_RUN_SCRIPT_PATH,
-                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                        "deliverable_id": "deliverable_2",
+                                        "files": [
+                                            type(
+                                                "RepoFile",
+                                                (),
+                                                {"path": "src/shared_stage.txt", "content": "stage-two\n"},
+                                            )(),
+                                            type("RepoFile", (), {"path": "pom.xml", "content": "<project/>\n"})(),
+                                        ],
+                                        "dependency_contract": _dependency_contract_payload(
+                                            manifest_paths=["pom.xml"],
+                                            reproducibility_mode="locked",
+                                        ),
                                     },
                                 )(),
                             ],
-                            "dependency_contract": _dependency_contract_payload(
-                                build_support_paths=["mvnw"],
-                                reproducibility_mode="locked",
-                            ),
                             "notes": [],
                         },
                     )(),
@@ -533,15 +506,18 @@ class AuthoringPayloadTests(unittest.TestCase):
 
             run, result = service.author_workspace_repo(
                 run,
-                deliverable_ids=["deliverable_1", "deliverable_2"],
+                deliverable_ids=["deliverable_2"],
             )
 
             assert result.available is True
             parse_calls = queued_client.responses.parse_calls
-            assert len(parse_calls) == 2
-            second_payload = json.loads(parse_calls[1]["input"][1]["content"])
-            assert second_payload["current_files"]["src/shared_stage.txt"] == "stage-one\n"
-            assert second_payload["current_files"]["mvnw"] == "#!/usr/bin/env sh\n./mvnw \"$@\"\n"
+            assert len(parse_calls) == 1
+            assert parse_calls[0]["text_format"].__name__ == "_GeneratedProgressiveRepoBundle"
+            payload = json.loads(parse_calls[0]["input"][1]["content"])
+            assert payload["deliverable_ids"] == ["deliverable_2"]
+            assert payload["lineage_anchor"]["deliverable_id"] == "deliverable_1"
+            assert payload["lineage_anchor"]["current_files"]["src/shared_stage.txt"] == "stage-one\n"
+            assert "Dockerfile" in payload["shared_runtime_protocol_files"]
 
     def test_repo_authoring_payload_excludes_logs_and_build_artifacts_from_authored_surface(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
