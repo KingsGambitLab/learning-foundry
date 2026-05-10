@@ -46,7 +46,7 @@ def _build_spec(
     return spec
 
 
-def test_typescript_runtime_scripts_are_repo_owned_and_pnpm_safe() -> None:
+def test_typescript_runtime_scripts_are_repo_owned_placeholders_until_authored() -> None:
     spec = _build_spec(
         title="Feature Flag Control Plane",
         summary="Build a feature flag control plane service.",
@@ -64,16 +64,21 @@ def test_typescript_runtime_scripts_are_repo_owned_and_pnpm_safe() -> None:
     assert manifest["preview_command"] == f"sh {RUNTIME_RUN_SCRIPT_PATH}"
     assert manifest["visible_check_command"] == f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
     assert manifest["hidden_check_command"] == "sh .coursegen/runtime/check_hidden.sh"
-    assert "pnpm install --no-frozen-lockfile" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
-    assert "--yes" not in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
-    assert "corepack enable" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
-    assert "exec pnpm start:dev" in starter_files[RUNTIME_RUN_SCRIPT_PATH]
-    assert "apt-get install -y --no-install-recommends python3" in starter_files["Dockerfile"]
+    assert "runtime install script has not been authored yet" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
+    assert "runtime run script has not been authored yet" in starter_files[RUNTIME_RUN_SCRIPT_PATH]
+    assert "runtime Dockerfile has not been authored yet" in starter_files["Dockerfile"]
+    assert manifest["dependency_contract"] == {
+        "manifest_paths": [],
+        "lockfile_paths": [],
+        "toolchain_paths": [],
+        "build_support_paths": [],
+        "reproducibility_mode": None,
+    }
     assert "exec python3 checks/run_visible_checks.py" in starter_files[".coursegen/runtime/check_visible.sh"]
     assert "exec python3 .coursegen/grader/run_hidden_checks.py" in starter_files[".coursegen/runtime/check_hidden.sh"]
 
 
-def test_go_runtime_scripts_export_toolchain_path_and_launch_via_repo_scripts() -> None:
+def test_go_runtime_scripts_stay_unauthored_until_repo_authoring_defines_them() -> None:
     spec = _build_spec(
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
@@ -89,13 +94,10 @@ def test_go_runtime_scripts_export_toolchain_path_and_launch_via_repo_scripts() 
     manifest = json.loads(starter_files[HIDDEN_MANIFEST_PATH])
 
     assert manifest["preview_command"] == f"sh {RUNTIME_RUN_SCRIPT_PATH}"
-    assert "export PATH=\"/usr/local/go/bin:$PATH\"" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
-    assert "export PATH=\"/usr/local/go/bin:$PATH\"" in starter_files[RUNTIME_VERIFY_SCRIPT_PATH]
-    assert "export PATH=\"/usr/local/go/bin:$PATH\"" in starter_files[RUNTIME_RUN_SCRIPT_PATH]
-    assert "go mod tidy" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
-    assert "go build ./..." in starter_files[RUNTIME_VERIFY_SCRIPT_PATH]
-    assert "exec go run ." in starter_files[RUNTIME_RUN_SCRIPT_PATH]
-    assert "apt-get install -y --no-install-recommends python3" in starter_files["Dockerfile"]
+    assert "runtime install script has not been authored yet" in starter_files[RUNTIME_INSTALL_SCRIPT_PATH]
+    assert "runtime verify script has not been authored yet" in starter_files[RUNTIME_VERIFY_SCRIPT_PATH]
+    assert "runtime run script has not been authored yet" in starter_files[RUNTIME_RUN_SCRIPT_PATH]
+    assert "runtime Dockerfile has not been authored yet" in starter_files["Dockerfile"]
     assert "go.mod" not in starter_files
     assert "main.go" not in starter_files
     assert manifest["starter_repo_bundle"]["source"] == "starter_default"

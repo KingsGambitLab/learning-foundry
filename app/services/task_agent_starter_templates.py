@@ -144,6 +144,7 @@ def build_task_agent_starter_files(
         "deliverable_id": deliverable.id,
         "deliverable_title": deliverable.title,
         "deliverable_objective": deliverable.objective,
+        "course_structure": spec.course_structure.model_dump(mode="json"),
         "runtime_plan": spec.project_contract.runtime_plan.model_dump(mode="json"),
         "runtime_dependencies": spec.runtime_dependencies.model_dump(mode="json"),
         "public_endpoints": [endpoint.model_dump(mode="json") for endpoint in spec.public_endpoints],
@@ -165,6 +166,13 @@ def build_task_agent_starter_files(
             "source": "starter_default",
             "generated_for_deliverable": deliverable.id,
             "authored_paths": sorted(runtime_protocol_files),
+        },
+        "dependency_contract": {
+            "manifest_paths": [],
+            "lockfile_paths": [],
+            "toolchain_paths": [],
+            "build_support_paths": [],
+            "reproducibility_mode": None,
         },
         "learner_starter_surface": (
             starter_surface.model_dump(mode="json")

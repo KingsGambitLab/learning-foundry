@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+import json
 
 from app.domain.ai import AIUsageSummary
-from app.domain.sandbox import DeliverableSandboxReport, SandboxExecutionResult, SandboxExecutionStatus
+from app.domain.sandbox import DeliverableSandboxReport, SandboxExecutionResult, SandboxExecutionStatus, SandboxFailureStage
 from app.domain.workflow import ReviewerFinding, ReviewerFindingSeverity, WorkflowNodeExecution, WorkflowNodeKind, WorkflowNodeStatus
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
@@ -348,6 +349,9 @@ def _authored_failure_sandbox_result(run_id: str) -> SandboxExecutionResult:
                 deliverable_id="deliverable_1",
                 compile_succeeded=True,
                 runtime_succeeded=False,
+                failed_stage=SandboxFailureStage.verify,
+                stage_command=["sh", ".coursegen/runtime/verify.sh"],
+                stage_exit_code=1,
                 error="FastAPIError: Invalid args for response field!",
                 stderr="fastapi.exceptions.FastAPIError: Invalid args for response field!",
             )
@@ -454,6 +458,21 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertTrue(updated_run.artifacts.task_agent_spec.deliverables[0].title.endswith("Revised"))
             self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
 
+    def test_failure_context_prefers_structured_sandbox_stage_over_string_guessing(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            latest = _authored_failure_node()
+            failure_context = build_failure_context(run, latest)
+
+            self.assertEqual(failure_context.phase, "verify")
+            self.assertEqual(failure_context.sandbox.deliverable_reports[0].failed_stage, "verify")
+            self.assertEqual(
+                failure_context.sandbox.deliverable_reports[0].stage_command,
+                ["sh", ".coursegen/runtime/verify.sh"],
+            )
+            self.assertEqual(failure_context.sandbox.deliverable_reports[0].stage_exit_code, 1)
+
     def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
@@ -533,6 +552,43 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertTrue(
                 (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
+
+    def test_retry_service_stops_when_same_workspace_blocker_repeats_after_repair(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = _RepairingWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            retry_service = TaskAgentRetryService(
+                authoring_service=_RevisingAuthoringService(),
+                workspace_authoring_service=workspace_authoring,
+            )
+
+            prior_runtime = _authored_failure_node()
+            prior_runtime.attempt = 1
+            repair_node = WorkflowNodeExecution(
+                node_id="authoring_repair_1",
+                kind=WorkflowNodeKind.authoring_repair,
+                status=WorkflowNodeStatus.passed,
+                attempt=1,
+                summary="Workspace repair ran.",
+                created_at=datetime.now(UTC),
+            )
+            current_runtime = _authored_failure_node()
+            current_runtime.node_id = "authoring_runtime_2"
+            current_runtime.attempt = 2
+            current_runtime.created_at = datetime.now(UTC)
+            run.artifacts.node_executions = [prior_runtime, repair_node, current_runtime]
+
+            updated_run, result = retry_service.retry(run, current_runtime)
+
+            self.assertIs(updated_run, run)
+            self.assertFalse(result.applied)
+            self.assertFalse(result.should_continue)
+            self.assertEqual(result.action, TaskAgentRetryAction.unresolved_blocker)
+            self.assertEqual(workspace_authoring.repair_calls, 0)
+            self.assertIn("same workspace blocker survived", result.summary.lower())
 
     def test_retry_service_blocks_platform_owned_starter_compiler_failure(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -683,6 +739,16 @@ class TaskAgentRetryServiceTests(TestCase):
             workspace = run.artifacts.workspace_snapshot
             assert workspace is not None
             starter_root = Path(workspace.public_dir) / "starter" / "deliverable_1"
+            manifest_path = starter_root / ".coursegen" / "deliverable.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["dependency_contract"] = {
+                "manifest_paths": ["Cargo.toml"],
+                "lockfile_paths": ["Cargo.lock"],
+                "toolchain_paths": [],
+                "build_support_paths": [],
+                "reproducibility_mode": "locked",
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             (starter_root / "Cargo.toml").write_text(
                 "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2021'\n",
                 encoding="utf-8",
@@ -732,6 +798,8 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(contract.present_manifest_paths, ["Cargo.toml"])
             self.assertEqual(contract.expected_lockfile_paths, ["Cargo.lock"])
             self.assertEqual(contract.present_lockfile_paths, ["Cargo.lock"])
+            self.assertEqual(contract.expected_build_support_paths, [])
+            self.assertEqual(contract.present_build_support_paths, [])
             self.assertIn("Cargo.toml", contract.root_files)
             self.assertNotIn("Cargo.lock", contract.root_files)
             self.assertNotIn("target/debug/demo", contract.root_files)

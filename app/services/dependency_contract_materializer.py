@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from pydantic import BaseModel, Field
 
 from app.domain.task_agent import ProjectRuntimePlanSpec
-from app.services.dependency_contract_facts import expected_dependency_contract_paths
+from app.services.runtime_contract_surface import dependency_contract_from_manifest, load_starter_manifest
 from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH, RUNTIME_INSTALL_SCRIPT_PATH
 
 
@@ -19,6 +19,7 @@ class DependencyContractMaterializationResult(BaseModel):
     succeeded: bool = True
     image_name: str | None = None
     command: list[str] = Field(default_factory=list)
+    return_code: int | None = None
     synced_paths: list[str] = Field(default_factory=list)
     stdout: str = ""
     stderr: str = ""
@@ -46,13 +47,14 @@ class DependencyContractMaterializer:
         if not install_script.exists():
             return DependencyContractMaterializationResult(deliverable_id=deliverable_id)
 
-        package_manager = runtime_plan.package_manager if runtime_plan is not None else None
-        expected = expected_dependency_contract_paths(package_manager)
+        manifest_payload = load_starter_manifest(starter_root) or {}
+        contract = dependency_contract_from_manifest(manifest_payload)
         tracked_paths = sorted(
             {
-                *expected.get("manifests", []),
-                *expected.get("lockfiles", []),
-                *expected.get("toolchains", []),
+                *contract.get("manifest_paths", []),
+                *contract.get("lockfile_paths", []),
+                *contract.get("toolchain_paths", []),
+                *contract.get("build_support_paths", []),
             }
         )
         if not tracked_paths:
@@ -93,6 +95,7 @@ class DependencyContractMaterializer:
                     succeeded=False,
                     image_name=image_name,
                     command=command,
+                    return_code=None,
                     stdout=self._coerce_bytes(getattr(exc, "stdout", b"")),
                     stderr=self._coerce_bytes(getattr(exc, "stderr", b"")),
                     error=f"Dependency contract materialization timed out: {exc}",
@@ -105,6 +108,7 @@ class DependencyContractMaterializer:
                     succeeded=False,
                     image_name=image_name,
                     command=command,
+                    return_code=result.returncode,
                     stdout=result.stdout,
                     stderr=result.stderr,
                     error=(
@@ -124,6 +128,7 @@ class DependencyContractMaterializer:
                 succeeded=True,
                 image_name=image_name,
                 command=command,
+                return_code=result.returncode,
                 synced_paths=synced_paths,
                 stdout=result.stdout,
                 stderr=result.stderr,
@@ -135,12 +140,8 @@ class DependencyContractMaterializer:
         starter_root: Path,
         runtime_plan: ProjectRuntimePlanSpec | None,
     ) -> str | None:
-        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                manifest = {}
+        manifest = load_starter_manifest(starter_root) or {}
+        if manifest:
             runtime_plan_payload = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
             services = runtime_plan_payload.get("services") or []
             for service in services:

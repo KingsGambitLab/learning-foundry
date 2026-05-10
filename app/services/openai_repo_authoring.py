@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.domain.ai import AIUsageSummary, merge_ai_usage
+from app.domain.task_agent import TaskAgentServiceSpec
 from app.domain.workflow import FailureContext, WorkflowRun
 from app.services.coursegen_logging import log_coursegen_event
 from app.services.openai_runtime_support import (
@@ -18,6 +19,10 @@ from app.services.openai_runtime_support import (
     load_openai_env_file,
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
+)
+from app.services.runtime_contract_surface import (
+    dependency_contract_from_manifest,
+    is_repo_contract_path,
 )
 from app.services.starter_authoring_payload import build_starter_authoring_payload
 from app.services.task_agent_contract_surface import learner_editable_paths_for_manifest
@@ -52,8 +57,17 @@ class _RepoFile(BaseModel):
     content: str
 
 
+class _GeneratedDependencyContract(BaseModel):
+    manifest_paths: list[str] = Field(default_factory=list)
+    lockfile_paths: list[str] = Field(default_factory=list)
+    toolchain_paths: list[str] = Field(default_factory=list)
+    build_support_paths: list[str] = Field(default_factory=list)
+    reproducibility_mode: str | None = None
+
+
 class _GeneratedRepoBundle(BaseModel):
     files: list[_RepoFile] = Field(default_factory=list)
+    dependency_contract: _GeneratedDependencyContract
     notes: list[str] = Field(default_factory=list)
 
 
@@ -133,6 +147,7 @@ class OpenAIStarterRepoAuthoringService:
         notes: list[str] = []
         workspace_root = Path(workspace.root_dir)
         public_root = Path(workspace.public_dir)
+        visible_fixture_files = set(spec.runtime_dependencies.visible_fixture_files)
         client = (
             self._client(
                 api_key=config["OPENAI_API_KEY"],
@@ -150,6 +165,16 @@ class OpenAIStarterRepoAuthoringService:
             manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             if not starter_root.exists() or not manifest_path.exists():
                 continue
+            if spec.course_structure.shared_codebase:
+                updated_files.extend(
+                    self._carry_forward_shared_repo_snapshot(
+                        spec=spec,
+                        deliverable_id=deliverable.id,
+                        public_root=public_root,
+                        workspace_root=workspace_root,
+                        visible_fixture_files=visible_fixture_files,
+                    )
+                )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             payload = self._prompt_payload(
                 run,
@@ -168,12 +193,17 @@ class OpenAIStarterRepoAuthoringService:
                 deliverable_id=deliverable.id,
             )
             normalized_files = self._normalize_repo_files(bundle.files)
+            normalized_contract = self._normalize_dependency_contract(
+                bundle.dependency_contract,
+                current_manifest=manifest,
+            )
             updated_files.extend(
                 self._replace_repo_files(
                     starter_root=starter_root,
+                    manifest=manifest,
                     files=normalized_files,
                     workspace_root=workspace_root,
-                    visible_fixture_files=set(spec.runtime_dependencies.visible_fixture_files),
+                    visible_fixture_files=visible_fixture_files,
                 )
             )
             default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
@@ -181,7 +211,8 @@ class OpenAIStarterRepoAuthoringService:
                 starter_root=starter_root,
                 manifest=manifest,
                 default_starter_files=default_starter_files,
-                visible_fixture_files=set(spec.runtime_dependencies.visible_fixture_files),
+                visible_fixture_files=visible_fixture_files,
+                authored_files=normalized_files,
             )
             manifest["starter_repo_bundle"] = {
                 "generated_for_deliverable": deliverable.id,
@@ -191,6 +222,7 @@ class OpenAIStarterRepoAuthoringService:
                 "generated_for_deliverable": deliverable.id,
                 **runtime_protocol_bundle,
             }
+            manifest["dependency_contract"] = normalized_contract
             updated_files.extend(
                 self._write_if_changed(
                     manifest_path,
@@ -218,6 +250,60 @@ class OpenAIStarterRepoAuthoringService:
             available=True,
         )
 
+    def _carry_forward_shared_repo_snapshot(
+        self,
+        *,
+        spec: TaskAgentServiceSpec,
+        deliverable_id: str,
+        public_root: Path,
+        workspace_root: Path,
+        visible_fixture_files: set[str],
+    ) -> list[str]:
+        deliverable_order = [deliverable.id for deliverable in spec.deliverables]
+        try:
+            deliverable_index = deliverable_order.index(deliverable_id)
+        except ValueError:
+            return []
+        if deliverable_index == 0:
+            return []
+
+        previous_root = public_root / "starter" / deliverable_order[deliverable_index - 1]
+        previous_manifest_path = previous_root / HIDDEN_MANIFEST_PATH
+        current_root = public_root / "starter" / deliverable_id
+        if not previous_root.exists() or not previous_manifest_path.exists() or not current_root.exists():
+            return []
+
+        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
+        previous_snapshot_files = self._stage_snapshot_files(
+            starter_root=previous_root,
+            manifest=previous_manifest,
+        )
+        if not previous_snapshot_files:
+            return []
+        return self._replace_repo_files(
+            starter_root=current_root,
+            manifest=previous_manifest,
+            files=previous_snapshot_files,
+            workspace_root=workspace_root,
+            visible_fixture_files=visible_fixture_files,
+        )
+
+    def _stage_snapshot_files(
+        self,
+        *,
+        starter_root: Path,
+        manifest: dict[str, Any],
+    ) -> dict[str, str]:
+        prompt_files = build_starter_authoring_payload(
+            starter_root=starter_root,
+            manifest=manifest,
+        )
+        return {
+            **prompt_files["learner_files"],
+            **prompt_files["dependency_contract_files"],
+            **prompt_files["runtime_protocol_files"],
+        }
+
     def _prompt_payload(
         self,
         run: WorkflowRun,
@@ -244,6 +330,56 @@ class OpenAIStarterRepoAuthoringService:
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
 
+    def _normalize_dependency_contract(
+        self,
+        dependency_contract: _GeneratedDependencyContract | dict[str, Any],
+        *,
+        current_manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        if isinstance(dependency_contract, dict):
+            dependency_contract = _GeneratedDependencyContract.model_validate(dependency_contract)
+        current = dependency_contract_from_manifest(current_manifest)
+        normalized: dict[str, Any] = {
+            "manifest_paths": self._normalize_contract_paths(
+                dependency_contract.manifest_paths,
+            ),
+            "lockfile_paths": self._normalize_contract_paths(
+                dependency_contract.lockfile_paths,
+            ),
+            "toolchain_paths": self._normalize_contract_paths(
+                dependency_contract.toolchain_paths,
+            ),
+            "build_support_paths": self._normalize_contract_paths(
+                dependency_contract.build_support_paths,
+            ),
+            "reproducibility_mode": (
+                dependency_contract.reproducibility_mode.strip()
+                if isinstance(dependency_contract.reproducibility_mode, str)
+                and dependency_contract.reproducibility_mode.strip()
+                else current.get("reproducibility_mode")
+            ),
+        }
+        for key in ("manifest_paths", "lockfile_paths", "toolchain_paths", "build_support_paths"):
+            if not normalized[key]:
+                normalized[key] = list(current.get(key, []))
+        return normalized
+
+    def _normalize_contract_paths(
+        self,
+        paths: list[str],
+    ) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_path in paths:
+            relative_path = self._normalize_relative_path(raw_path)
+            if relative_path is None:
+                continue
+            if relative_path in seen:
+                continue
+            seen.add(relative_path)
+            normalized.append(relative_path)
+        return normalized
+
     def _generate_bundle(
         self,
         client,
@@ -265,8 +401,10 @@ class OpenAIStarterRepoAuthoringService:
                     "role": "system",
                     "content": (
                         "You are authoring the actual learner-owned repo files for one starter workspace. "
-                        "Return JSON only with keys `files` and optional `notes`. "
+                        "Return JSON only with keys `files`, `dependency_contract`, and optional `notes`. "
                         "Each file must have `path` and `content`. "
+                        "The `dependency_contract` must explicitly list the relative paths that define dependency resolution and build invocation for this starter: "
+                        "`manifest_paths`, `lockfile_paths`, `toolchain_paths`, `build_support_paths`, and optional `reproducibility_mode`. "
                         "Return the complete current snapshot for every learner-owned file, dependency-contract file, and runtime protocol file that belongs in the starter workspace, "
                         "not just the files you changed in this attempt. "
                         "Author the real repo files needed to boot under the creator-owned stack contract, including "
@@ -274,6 +412,8 @@ class OpenAIStarterRepoAuthoringService:
                         "Do not write `README.md`, `.coursegen/grader/*`, `checks/*`, or `.vscode/*`; those belong to the harness protocol. "
                         "Use `current_files` as the learner-owned editable baseline, `dependency_contract_files` for manifests/toolchain files, "
                         "and `runtime_protocol_files` for the authored Docker/install/verify/run bundle during retries; preserve or revise them intentionally rather than starting over blindly. "
+                        "Treat the existing manifest `dependency_contract` as the current contract source of truth and update it when the authored repo changes. "
+                        "For shared progressive codebases, treat later deliverables as the next milestone of the same repo lineage rather than a fresh app: preserve package roots, build identity, and core repo structure unless the prompt explicitly changes them. "
                         "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
                         "Write a believable partial implementation, not a hidden simulator. "
                         "Use the exact stack contract and public endpoints from the prompt. "
@@ -330,12 +470,15 @@ class OpenAIStarterRepoAuthoringService:
             return None
         if normalized in _RESERVED_PATHS or normalized.startswith(_RESERVED_PREFIXES):
             return None
+        if not is_repo_contract_path(normalized) and normalized not in _RUNTIME_PROTOCOL_PATHS:
+            return None
         return normalized
 
     def _replace_repo_files(
         self,
         *,
         starter_root: Path,
+        manifest: dict[str, Any],
         files: dict[str, str],
         workspace_root: Path,
         visible_fixture_files: set[str],
@@ -352,7 +495,23 @@ class OpenAIStarterRepoAuthoringService:
                 continue
             existing_paths.add(relative_path)
 
-        for obsolete_path in sorted(existing_paths - set(files)):
+        prompt_files = build_starter_authoring_payload(
+            starter_root=starter_root,
+            manifest=manifest,
+        )
+        managed_paths = {
+            *prompt_files["learner_files"],
+            *prompt_files["dependency_contract_files"],
+            *prompt_files["runtime_protocol_files"],
+        }
+        managed_paths.update(files)
+        obsolete_paths = [
+            path
+            for path in sorted(existing_paths - set(files))
+            if path in managed_paths or not is_repo_contract_path(path)
+        ]
+
+        for obsolete_path in obsolete_paths:
             target = starter_root / obsolete_path
             target.unlink(missing_ok=True)
             updated_files.append(str(target.relative_to(workspace_root)))
@@ -369,16 +528,19 @@ class OpenAIStarterRepoAuthoringService:
         manifest: dict[str, Any],
         default_starter_files: dict[str, str],
         visible_fixture_files: set[str],
+        authored_files: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        prompt_files = build_starter_authoring_payload(
-            starter_root=starter_root,
-            manifest=manifest,
-        )
-        existing_files = {
-            **prompt_files["learner_files"],
-            **prompt_files["dependency_contract_files"],
-            **prompt_files["runtime_protocol_files"],
-        }
+        existing_files = dict(authored_files or {})
+        if not existing_files:
+            prompt_files = build_starter_authoring_payload(
+                starter_root=starter_root,
+                manifest=manifest,
+            )
+            existing_files = {
+                **prompt_files["learner_files"],
+                **prompt_files["dependency_contract_files"],
+                **prompt_files["runtime_protocol_files"],
+            }
         repo_files = sorted(
             relative_path
             for relative_path in existing_files

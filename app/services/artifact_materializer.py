@@ -19,7 +19,15 @@ from app.services.learner_brief_builder import (
     build_task_agent_deliverable_brief,
     render_learner_starter_readme,
 )
-from app.services.task_agent_contract_surface import primary_submit_endpoint_for_spec
+from app.services.runtime_contract_surface import (
+    load_starter_manifest,
+    starter_contract_path_sets_for_manifest,
+    starter_materialization_paths,
+)
+from app.services.task_agent_contract_surface import (
+    learner_editable_paths_for_deliverable,
+    primary_submit_endpoint_for_spec,
+)
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
@@ -33,7 +41,6 @@ from app.services.task_agent_starter_templates import (
     task_agent_runtime_bootstrap_commands,
     task_agent_runtime_environment_lines,
 )
-
 
 def default_generated_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "generated"
@@ -269,14 +276,26 @@ class ArtifactMaterializer:
                 else None
             )
             if workspace_starter_dir is not None and workspace_starter_dir.exists():
-                for source_path in sorted(path for path in workspace_starter_dir.rglob("*") if path.is_file()):
-                    relative_path = source_path.relative_to(workspace_starter_dir).as_posix()
-                    if relative_path == "README.md":
+                workspace_manifest = load_starter_manifest(workspace_starter_dir)
+                for relative_path in self._workspace_starter_paths(
+                    workspace_starter_dir=workspace_starter_dir,
+                    spec=spec,
+                    deliverable_id=deliverable.id,
+                ):
+                    source_path = workspace_starter_dir / relative_path
+                    if not source_path.exists() or not source_path.is_file():
                         continue
-                    role, audience, semantic_source = self._starter_file_metadata(relative_path)
+                    role, audience, semantic_source = self._starter_file_metadata(
+                        relative_path,
+                        manifest_payload=workspace_manifest,
+                    )
+                    try:
+                        content = source_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        continue
                     self._write_text(
                         deliverable_dir / relative_path,
-                        source_path.read_text(encoding="utf-8"),
+                        content,
                         ArtifactVisibility.public,
                         files,
                         bundle_root,
@@ -287,8 +306,12 @@ class ArtifactMaterializer:
                     )
             else:
                 starter_files = build_task_agent_starter_files(spec, deliverable.id)
+                starter_manifest = json.loads(starter_files[HIDDEN_MANIFEST_PATH])
                 for relative_path, content in starter_files.items():
-                    role, audience, semantic_source = self._starter_file_metadata(relative_path)
+                    role, audience, semantic_source = self._starter_file_metadata(
+                        relative_path,
+                        manifest_payload=starter_manifest,
+                    )
                     self._write_text(
                         deliverable_dir / relative_path,
                         content,
@@ -589,7 +612,45 @@ class ArtifactMaterializer:
             ]
         )
 
-    def _starter_file_metadata(self, relative_path: str) -> tuple[str, str, str]:
+    def _workspace_starter_paths(
+        self,
+        *,
+        workspace_starter_dir: Path,
+        spec: TaskAgentServiceSpec,
+        deliverable_id: str,
+    ) -> list[str]:
+        manifest_path = workspace_starter_dir / HIDDEN_MANIFEST_PATH
+        manifest_payload: dict[str, Any] | None = None
+        if manifest_path.exists():
+            try:
+                manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest_payload = None
+        deliverable = next(
+            (candidate for candidate in spec.deliverables if candidate.id == deliverable_id),
+            None,
+        )
+        return starter_materialization_paths(
+            manifest=manifest_payload,
+            editable_paths=(
+                learner_editable_paths_for_deliverable(spec, deliverable)
+                if deliverable is not None and manifest_payload is None
+                else None
+            ),
+            visible_fixture_paths=(
+                list(spec.runtime_dependencies.visible_fixture_files)
+                if manifest_payload is None
+                else None
+            ),
+        )
+
+    def _starter_file_metadata(
+        self,
+        relative_path: str,
+        *,
+        manifest_payload: dict[str, Any] | None,
+    ) -> tuple[str, str, str]:
+        dependency_paths = starter_contract_path_sets_for_manifest(manifest_payload)
         if relative_path == HIDDEN_MANIFEST_PATH:
             return "starter_manifest", "operator", "starter_compiler"
         if relative_path == "Dockerfile":
@@ -608,14 +669,14 @@ class ArtifactMaterializer:
             return "visible_check_runner", "learner", "starter_compiler"
         if relative_path == ".vscode/tasks.json":
             return "vscode_tasks", "learner", "starter_compiler"
-        if (
-            relative_path.endswith("requirements.txt")
-            or relative_path.endswith("package.json")
-            or relative_path.endswith("go.mod")
-        ):
+        if relative_path in dependency_paths["manifests"]:
             return "starter_dependency_manifest", "learner", "starter_compiler"
-        if relative_path.endswith("tsconfig.json"):
-            return "starter_typescript_config", "learner", "starter_compiler"
+        if relative_path in dependency_paths["lockfiles"]:
+            return "starter_dependency_lockfile", "learner", "starter_compiler"
+        if relative_path in dependency_paths["toolchains"]:
+            return "starter_toolchain_config", "learner", "starter_compiler"
+        if relative_path in dependency_paths["build_support"]:
+            return "starter_build_support", "learner", "starter_compiler"
         return "starter_entrypoint", "learner", "starter_compiler"
 
     def _write_text(

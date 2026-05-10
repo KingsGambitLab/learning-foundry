@@ -102,6 +102,9 @@ class FailureContextDeliverableReport(BaseModel):
     deliverable_id: str
     compile_succeeded: bool
     runtime_succeeded: bool
+    failed_stage: str | None = None
+    stage_command: list[str] = Field(default_factory=list)
+    stage_exit_code: int | None = None
     error: str | None = None
     stderr_excerpt: str | None = None
 
@@ -122,6 +125,8 @@ class FailureContextDependencyContract(BaseModel):
     present_lockfile_paths: list[str] = Field(default_factory=list)
     expected_toolchain_paths: list[str] = Field(default_factory=list)
     present_toolchain_paths: list[str] = Field(default_factory=list)
+    expected_build_support_paths: list[str] = Field(default_factory=list)
+    present_build_support_paths: list[str] = Field(default_factory=list)
     runtime_protocol_paths_present: list[str] = Field(default_factory=list)
     runtime_bundle_complete: bool = False
 

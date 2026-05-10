@@ -28,7 +28,12 @@ class DependencyContractMaterializerTests(unittest.TestCase):
             (starter_root / HIDDEN_MANIFEST_PATH).write_text(
                 (
                     '{"runtime_plan": {"services": [{"service_id": "app", '
-                    '"container_image": "rust:1.82-bookworm"}]}}'
+                    '"container_image": "rust:1.82-bookworm"}]}, '
+                    '"dependency_contract": {"manifest_paths": ["Cargo.toml"], '
+                    '"lockfile_paths": ["Cargo.lock"], '
+                    '"toolchain_paths": ["rust-toolchain.toml"], '
+                    '"build_support_paths": [], '
+                    '"reproducibility_mode": "locked"}}'
                 ),
                 encoding="utf-8",
             )
@@ -82,6 +87,16 @@ class DependencyContractMaterializerTests(unittest.TestCase):
             )
             (starter_root / RUNTIME_INSTALL_SCRIPT_PATH).write_text(
                 "#!/usr/bin/env sh\nset -eu\ncargo generate-lockfile\n",
+                encoding="utf-8",
+            )
+            (starter_root / HIDDEN_MANIFEST_PATH).write_text(
+                (
+                    '{"dependency_contract": {"manifest_paths": ["Cargo.toml"], '
+                    '"lockfile_paths": ["Cargo.lock"], '
+                    '"toolchain_paths": [], '
+                    '"build_support_paths": [], '
+                    '"reproducibility_mode": "locked"}}'
+                ),
                 encoding="utf-8",
             )
             runtime_plan = ProjectRuntimePlanSpec(

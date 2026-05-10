@@ -23,6 +23,7 @@ from app.services.openai_task_agent_authoring import (
     TaskAgentCustomization,
 )
 from app.services.openai_runtime_support import parse_structured_openai_response_with_hard_timeout
+from app.services.starter_authoring_payload import build_starter_authoring_payload
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_INSTALL_SCRIPT_PATH,
@@ -62,6 +63,35 @@ class _FakeResponsesAPI:
 class _FakeClient:
     def __init__(self, parsed_response):
         self.responses = _FakeResponsesAPI(parsed_response)
+
+
+class _QueuedFakeResponsesAPI:
+    def __init__(self, parsed_responses):
+        self.parsed_responses = list(parsed_responses)
+        self.parse_calls: list[dict[str, object]] = []
+
+    def parse(self, **kwargs):
+        self.parse_calls.append(kwargs)
+        if not self.parsed_responses:
+            raise AssertionError("No queued parsed response left for this test.")
+        return _FakeParsedResponse(parsed=self.parsed_responses.pop(0))
+
+
+class _QueuedFakeClient:
+    def __init__(self, parsed_responses):
+        self.responses = _QueuedFakeResponsesAPI(parsed_responses)
+
+
+def _dependency_contract_payload(**overrides):
+    payload = {
+        "manifest_paths": [],
+        "lockfile_paths": [],
+        "toolchain_paths": [],
+        "build_support_paths": [],
+        "reproducibility_mode": None,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _materialized_run(temp_dir: str):
@@ -105,6 +135,10 @@ class AuthoringPayloadTests(unittest.TestCase):
                     (),
                     {
                         "files": [type("RepoFile", (), {"path": "src/main.rs", "content": "fn main() {}\n"})()],
+                        "dependency_contract": _dependency_contract_payload(
+                            manifest_paths=["Cargo.toml"],
+                            lockfile_paths=["Cargo.lock"],
+                        ),
                         "notes": ["ok"],
                     },
                 )()
@@ -200,6 +234,7 @@ class AuthoringPayloadTests(unittest.TestCase):
                     (),
                     {
                         "files": [type("RepoFile", (), {"path": "src/main.rs", "content": "fn main() {}\n"})()],
+                        "dependency_contract": _dependency_contract_payload(),
                         "notes": [],
                     },
                 )()
@@ -267,6 +302,10 @@ class AuthoringPayloadTests(unittest.TestCase):
                 **(manifest.get("runtime_plan") or {}),
                 "package_manager": "cargo",
             }
+            manifest["dependency_contract"] = _dependency_contract_payload(
+                manifest_paths=["Cargo.toml"],
+                lockfile_paths=["Cargo.lock"],
+            )
 
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
@@ -349,6 +388,8 @@ class AuthoringPayloadTests(unittest.TestCase):
                         present_lockfile_paths=[],
                         expected_toolchain_paths=["rust-toolchain.toml", "rust-toolchain"],
                         present_toolchain_paths=[],
+                        expected_build_support_paths=[],
+                        present_build_support_paths=[],
                         runtime_protocol_paths_present=["Dockerfile", RUNTIME_INSTALL_SCRIPT_PATH],
                         runtime_bundle_complete=False,
                     )
@@ -370,6 +411,271 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert dependency_contracts[0]["present_lockfile_paths"] == []
         assert dependency_contracts[0]["runtime_bundle_complete"] is False
 
+    def test_repo_authoring_carries_forward_previous_stage_for_shared_codebase_deliverables(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            public_root = Path(workspace.public_dir)
+            for deliverable_id in ["deliverable_1", "deliverable_2"]:
+                manifest_path = public_root / "starter" / deliverable_id / HIDDEN_MANIFEST_PATH
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["learner_starter_surface"] = {
+                    **(manifest.get("learner_starter_surface") or {}),
+                    "primary_editable_paths": ["src/shared_stage.txt"],
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+            queued_client = _QueuedFakeClient(
+                [
+                    type(
+                        "RepoBundle",
+                        (),
+                        {
+                            "files": [
+                                type("RepoFile", (), {"path": "src/shared_stage.txt", "content": "stage-one\n"})(),
+                                type("RepoFile", (), {"path": "mvnw", "content": "#!/usr/bin/env sh\n./mvnw \"$@\"\n"})(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": "Dockerfile",
+                                        "content": "FROM rust:1.82-bookworm\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_INSTALL_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_VERIFY_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_RUN_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                            ],
+                            "dependency_contract": _dependency_contract_payload(
+                                build_support_paths=["mvnw"],
+                                reproducibility_mode="locked",
+                            ),
+                            "notes": [],
+                        },
+                    )(),
+                    type(
+                        "RepoBundle",
+                        (),
+                        {
+                            "files": [
+                                type("RepoFile", (), {"path": "src/shared_stage.txt", "content": "stage-two\n"})(),
+                                type("RepoFile", (), {"path": "mvnw", "content": "#!/usr/bin/env sh\n./mvnw \"$@\"\n"})(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": "Dockerfile",
+                                        "content": "FROM rust:1.82-bookworm\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_INSTALL_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_VERIFY_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                                type(
+                                    "RepoFile",
+                                    (),
+                                    {
+                                        "path": RUNTIME_RUN_SCRIPT_PATH,
+                                        "content": "#!/usr/bin/env sh\nset -eu\n",
+                                    },
+                                )(),
+                            ],
+                            "dependency_contract": _dependency_contract_payload(
+                                build_support_paths=["mvnw"],
+                                reproducibility_mode="locked",
+                            ),
+                            "notes": [],
+                        },
+                    )(),
+                ]
+            )
+            service = OpenAIStarterRepoAuthoringService(
+                enabled=True,
+                client_factory=lambda **_: queued_client,
+            )
+
+            run, result = service.author_workspace_repo(
+                run,
+                deliverable_ids=["deliverable_1", "deliverable_2"],
+            )
+
+            assert result.available is True
+            parse_calls = queued_client.responses.parse_calls
+            assert len(parse_calls) == 2
+            second_payload = json.loads(parse_calls[1]["input"][1]["content"])
+            assert second_payload["current_files"]["src/shared_stage.txt"] == "stage-one\n"
+            assert second_payload["current_files"]["mvnw"] == "#!/usr/bin/env sh\n./mvnw \"$@\"\n"
+
+    def test_repo_authoring_payload_excludes_logs_and_build_artifacts_from_authored_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            deliverable = spec.deliverables[0]
+            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["starter_repo_bundle"] = {
+                "source": "openai_live",
+                "authored_paths": [
+                    "src/main.rs",
+                    "mvnw",
+                    "logs/build.log",
+                    "target/debug/demo",
+                ],
+            }
+            manifest["dependency_contract"] = _dependency_contract_payload(
+                build_support_paths=["mvnw"],
+            )
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+            (starter_root / "src").mkdir(parents=True, exist_ok=True)
+            (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
+            (starter_root / "mvnw").write_text("#!/usr/bin/env sh\n./mvnw \"$@\"\n", encoding="utf-8")
+            (starter_root / "logs").mkdir(parents=True, exist_ok=True)
+            (starter_root / "logs" / "build.log").write_text("build log\n", encoding="utf-8")
+            (starter_root / "target" / "debug").mkdir(parents=True, exist_ok=True)
+            (starter_root / "target" / "debug" / "demo").write_text("binary\n", encoding="utf-8")
+
+            service_payload = build_starter_authoring_payload(
+                starter_root=starter_root,
+                manifest=manifest,
+            )
+
+            assert service_payload["learner_files"] == {
+                "src/main.rs": "// learner repo file\n",
+                "mvnw": "#!/usr/bin/env sh\n./mvnw \"$@\"\n",
+            }
+
+    def test_artifact_materializer_excludes_generated_build_artifacts_from_workspace_starter_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            spec.project_contract.runtime_plan.package_manager = "cargo"
+            deliverable = spec.deliverables[0]
+            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["learner_starter_surface"] = {
+                **(manifest.get("learner_starter_surface") or {}),
+                "primary_editable_paths": ["src/main.rs"],
+            }
+            manifest["runtime_plan"] = {
+                **(manifest.get("runtime_plan") or {}),
+                "package_manager": "cargo",
+            }
+            manifest["dependency_contract"] = _dependency_contract_payload(
+                manifest_paths=["Cargo.toml"],
+                lockfile_paths=["Cargo.lock"],
+            )
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+            (starter_root / "src").mkdir(parents=True, exist_ok=True)
+            (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
+            (starter_root / "Cargo.toml").write_text(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                encoding="utf-8",
+            )
+            (starter_root / "Cargo.lock").write_text("# lockfile\n", encoding="utf-8")
+            (starter_root / "target" / "debug" / ".fingerprint").mkdir(parents=True, exist_ok=True)
+            (starter_root / "target" / "debug" / ".fingerprint" / "dep-lib-demo").write_bytes(
+                b"\x01\x00\x00\x00\xff\x01\x00\x00"
+            )
+
+            bundle = ArtifactMaterializer(base_dir=f"{temp_dir}/generated").materialize_run(run, overwrite=True)
+            deliverable_dir = Path(bundle.public_dir) / "starter" / deliverable.id
+
+            assert (deliverable_dir / "src" / "main.rs").exists()
+            assert (deliverable_dir / "Cargo.toml").exists()
+            assert (deliverable_dir / "Cargo.lock").exists()
+            assert not (deliverable_dir / "target").exists()
+
+    def test_repo_replace_preserves_binary_wrapper_support_files_while_cleaning_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            deliverable = spec.deliverables[0]
+            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["starter_repo_bundle"] = {
+                "source": "openai_live",
+                "authored_paths": ["src/main.rs", "mvnw"],
+            }
+            manifest["dependency_contract"] = _dependency_contract_payload(
+                build_support_paths=["mvnw", ".mvn/wrapper/maven-wrapper.jar"],
+            )
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+            (starter_root / "src").mkdir(parents=True, exist_ok=True)
+            (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
+            (starter_root / "mvnw").write_text("#!/usr/bin/env sh\n./mvnw \"$@\"\n", encoding="utf-8")
+            (starter_root / ".mvn" / "wrapper").mkdir(parents=True, exist_ok=True)
+            (starter_root / ".mvn" / "wrapper" / "maven-wrapper.jar").write_bytes(b"\x50\x4b\x03\x04")
+            (starter_root / "logs").mkdir(parents=True, exist_ok=True)
+            (starter_root / "logs" / "build.log").write_text("build log\n", encoding="utf-8")
+
+            service = OpenAIStarterRepoAuthoringService(enabled=False)
+            updated = service._replace_repo_files(
+                starter_root=starter_root,
+                manifest=manifest,
+                files={
+                    "src/main.rs": "// learner repo file\n",
+                    "mvnw": "#!/usr/bin/env sh\n./mvnw \"$@\"\n",
+                },
+                workspace_root=Path(workspace.root_dir),
+                visible_fixture_files=set(spec.runtime_dependencies.visible_fixture_files),
+            )
+
+            assert not (starter_root / "logs" / "build.log").exists()
+            assert (starter_root / ".mvn" / "wrapper" / "maven-wrapper.jar").exists()
+            assert any(path.endswith("logs/build.log") for path in updated)
+
     def test_test_authoring_prompt_payload_includes_current_repo_and_runtime_protocol_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run = _materialized_run(temp_dir)
@@ -388,6 +694,10 @@ class AuthoringPayloadTests(unittest.TestCase):
                 **(manifest.get("runtime_plan") or {}),
                 "package_manager": "cargo",
             }
+            manifest["dependency_contract"] = _dependency_contract_payload(
+                manifest_paths=["Cargo.toml"],
+                lockfile_paths=["Cargo.lock"],
+            )
 
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")

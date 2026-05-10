@@ -15,7 +15,7 @@ from app.domain.workflow import (
     WorkflowNodeKind,
     WorkflowRun,
 )
-from app.services.dependency_contract_facts import dependency_contract_facts_for_deliverables
+from app.services.runtime_contract_surface import dependency_contract_facts_for_deliverables
 
 _REVIEWER_KINDS = {
     WorkflowNodeKind.reviewer_runtime,
@@ -149,6 +149,9 @@ def _sandbox_summary(
                 deliverable_id=report.deliverable_id,
                 compile_succeeded=report.compile_succeeded,
                 runtime_succeeded=report.runtime_succeeded,
+                failed_stage=(report.failed_stage.value if report.failed_stage is not None else None),
+                stage_command=list(report.stage_command),
+                stage_exit_code=report.stage_exit_code,
                 error=report.error,
                 stderr_excerpt=_excerpt(report.stderr),
             )
@@ -221,6 +224,23 @@ def _owner_hint(
     } and latest_node.findings:
         return WorkflowFailureOwnerHint.authored_artifact
 
+    structured_stage = _structured_failed_stage(sandbox)
+    if latest_node.kind in {
+        WorkflowNodeKind.authoring_runtime,
+        WorkflowNodeKind.reviewer_runtime,
+    } and structured_stage in {
+        "missing_workspace",
+        "dependency_materialization",
+        "install",
+        "verify",
+        "boot",
+        "contract",
+        "checks",
+        "runtime",
+        "container_launch",
+    }:
+        return WorkflowFailureOwnerHint.authored_artifact
+
     authored_markers = (
         "traceback (most recent call last)",
         "fastapierror",
@@ -258,6 +278,9 @@ def _phase(
         return "validation"
     if sandbox is None:
         return None
+    structured_stage = _structured_failed_stage(sandbox)
+    if structured_stage:
+        return structured_stage
     text = _combined_failure_text(latest_node, sandbox)
     if "[coursegen] verify step" in text:
         return "verify"
@@ -281,8 +304,10 @@ def _failure_signature(
         if sandbox.error:
             parts.append(_normalize_for_signature(sandbox.error))
         for report in sandbox.deliverable_reports:
-            status = "compile" if not report.compile_succeeded else "runtime"
-            parts.append(f"{report.deliverable_id}:{status}:{_normalize_for_signature(report.error or report.stderr_excerpt or '')}")
+            status = report.failed_stage or ("compile" if not report.compile_succeeded else "runtime")
+            parts.append(
+                f"{report.deliverable_id}:{status}:{report.stage_exit_code or ''}:{_normalize_for_signature(report.error or report.stderr_excerpt or '')}"
+            )
     payload = "|".join(part for part in parts if part)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
@@ -317,3 +342,14 @@ def _normalize_for_signature(text: str) -> str:
     normalized = re.sub(r"0x[0-9a-f]+", "0xaddr", normalized)
     normalized = re.sub(r"\b\d+\b", "#", normalized)
     return normalized[:240]
+
+
+def _structured_failed_stage(
+    sandbox: FailureContextSandboxSummary | None,
+) -> str | None:
+    if sandbox is None:
+        return None
+    for report in sandbox.deliverable_reports:
+        if report.failed_stage:
+            return report.failed_stage
+    return None
