@@ -70,19 +70,10 @@ class _GeneratedRepoBundle(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-class _GeneratedDeliverableSnapshot(BaseModel):
-    deliverable_id: str
-    changed_files: list[_RepoFile] = Field(default_factory=list)
-    removed_paths: list[str] = Field(default_factory=list)
-    dependency_contract: _GeneratedDependencyContract
-
-
-class _GeneratedProgressiveRepoBundle(BaseModel):
+class _GeneratedSharedRepoBundle(BaseModel):
     runtime_protocol_files: list[_RepoFile] = Field(default_factory=list)
-    base_deliverable_id: str
-    base_files: list[_RepoFile] = Field(default_factory=list)
-    base_dependency_contract: _GeneratedDependencyContract
-    deliverables: list[_GeneratedDeliverableSnapshot] = Field(default_factory=list)
+    files: list[_RepoFile] = Field(default_factory=list)
+    dependency_contract: _GeneratedDependencyContract
     notes: list[str] = Field(default_factory=list)
 
 
@@ -298,45 +289,17 @@ class OpenAIStarterRepoAuthoringService:
         spec = run.artifacts.task_agent_spec
         if spec is None:
             raise ValueError("Task-agent spec is required for progressive repo authoring.")
-        deliverable_order = [deliverable.id for deliverable in spec.deliverables]
-        target_deliverables = [deliverable for deliverable in spec.deliverables if deliverable.id in set(deliverable_ids)]
-        if not target_deliverables:
+        if not spec.deliverables:
             raise ValueError("At least one deliverable is required for progressive repo authoring.")
-
-        first_target_id = target_deliverables[0].id
-        first_target_index = deliverable_order.index(first_target_id)
-        first_target_root = public_root / "starter" / first_target_id
-        first_manifest = json.loads((first_target_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
-        shared_runtime_protocol_files = build_starter_authoring_payload(
-            starter_root=first_target_root,
-            manifest=first_manifest,
-        )["runtime_protocol_files"]
-
-        lineage_anchor: dict[str, Any] | None = None
-        if first_target_index > 0:
-            anchor_id = deliverable_order[first_target_index - 1]
-            anchor_root = public_root / "starter" / anchor_id
-            anchor_manifest = json.loads((anchor_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
-            anchor_payload = build_starter_authoring_payload(
-                starter_root=anchor_root,
-                manifest=anchor_manifest,
-            )
-            lineage_anchor = {
-                "deliverable_id": anchor_id,
-                "manifest": anchor_manifest,
-                "current_files": anchor_payload["learner_files"],
-                "dependency_contract_files": anchor_payload["dependency_contract_files"],
-                "public_endpoints": anchor_payload["public_endpoints"],
-            }
-
+        shared_root_id = spec.deliverables[0].id
+        shared_root = public_root / "starter" / shared_root_id
+        shared_manifest = json.loads((shared_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+        prompt_files = build_starter_authoring_payload(
+            starter_root=shared_root,
+            manifest=shared_manifest,
+        )
         deliverable_payloads: list[dict[str, Any]] = []
-        for deliverable in target_deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
-            prompt_files = build_starter_authoring_payload(
-                starter_root=starter_root,
-                manifest=manifest,
-            )
+        for deliverable in spec.deliverables:
             deliverable_payloads.append(
                 {
                     "deliverable_id": deliverable.id,
@@ -349,10 +312,6 @@ class OpenAIStarterRepoAuthoringService:
                         else None
                     ),
                     "public_checks": [check.model_dump(mode="json") for check in deliverable.public_checks],
-                    "manifest": manifest,
-                    "current_files": prompt_files["learner_files"],
-                    "dependency_contract_files": prompt_files["dependency_contract_files"],
-                    "public_endpoints": prompt_files["public_endpoints"],
                 }
             )
 
@@ -360,9 +319,13 @@ class OpenAIStarterRepoAuthoringService:
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "shared_codebase": True,
-            "deliverable_ids": [deliverable["deliverable_id"] for deliverable in deliverable_payloads],
-            "lineage_anchor": lineage_anchor,
-            "shared_runtime_protocol_files": shared_runtime_protocol_files,
+            "repair_scope_deliverable_ids": deliverable_ids,
+            "shared_repo_root": shared_root.name,
+            "manifest": shared_manifest,
+            "current_files": prompt_files["learner_files"],
+            "dependency_contract_files": prompt_files["dependency_contract_files"],
+            "shared_runtime_protocol_files": prompt_files["runtime_protocol_files"],
+            "public_endpoints": prompt_files["public_endpoints"],
             "deliverables": deliverable_payloads,
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
@@ -451,19 +414,6 @@ class OpenAIStarterRepoAuthoringService:
             if relative_path in _RUNTIME_PROTOCOL_PATHS
         }
 
-    def _normalize_removed_paths(self, paths: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for raw_path in paths:
-            relative_path = self._normalize_relative_path(raw_path)
-            if relative_path is None or relative_path in _RUNTIME_PROTOCOL_PATHS:
-                continue
-            if relative_path in seen:
-                continue
-            seen.add(relative_path)
-            normalized.append(relative_path)
-        return normalized
-
     def _generate_progressive_bundle(
         self,
         client,
@@ -474,8 +424,12 @@ class OpenAIStarterRepoAuthoringService:
         payload: dict[str, Any],
         workflow_run_id: str,
         deliverable_ids: list[str],
-    ) -> tuple[_GeneratedProgressiveRepoBundle, AIUsageSummary | None]:
-        deliverable_label = f"{deliverable_ids[0]}..{deliverable_ids[-1]}"
+    ) -> tuple[_GeneratedSharedRepoBundle, AIUsageSummary | None]:
+        deliverable_label = (
+            f"{deliverable_ids[0]}..{deliverable_ids[-1]}"
+            if deliverable_ids
+            else "shared_course_repo"
+        )
         response = self._create_response_with_retries(
             client,
             model=model_id,
@@ -485,23 +439,20 @@ class OpenAIStarterRepoAuthoringService:
                 {
                     "role": "system",
                     "content": (
-                        "You are authoring the repo lineage for a progressive shared-codebase course. "
-                        "Return JSON only with keys `runtime_protocol_files`, `base_deliverable_id`, `base_files`, `base_dependency_contract`, `deliverables`, and optional `notes`. "
+                        "You are authoring the single shared repo for a progressive shared-codebase course. "
+                        "Return JSON only with keys `runtime_protocol_files`, `files`, `dependency_contract`, and optional `notes`. "
                         "`runtime_protocol_files` must contain the complete shared course-level runtime bundle with "
                         "`Dockerfile`, `.coursegen/runtime/install.sh`, `.coursegen/runtime/verify.sh`, and `.coursegen/runtime/run.sh`. "
-                        "`base_deliverable_id` must be the first deliverable in the requested target range. "
-                        "`base_files` must be the complete learner-owned repo and dependency-contract snapshot for that base deliverable, "
+                        "`files` must contain the complete learner-owned repo and dependency-contract snapshot for the shared course repo, "
                         "but must not repeat the shared runtime protocol files. "
-                        "`base_dependency_contract` must describe the dependency/build contract for the base deliverable. "
-                        "Each later deliverable entry must contain `deliverable_id`, `changed_files`, `removed_paths`, and `dependency_contract`. "
-                        "For those later deliverables, `changed_files` are only the files that differ from the immediately previous stage, and `removed_paths` are files to delete from the immediately previous stage snapshot. "
-                        "Treat deliverables as milestones of one evolving app, not separate repos: preserve package roots, build identity, and shared module structure across stages. "
-                        "Use `lineage_anchor` when present as the frozen previous stage that later stages build on top of. "
+                        "`dependency_contract` must describe the dependency/build contract for that shared repo. "
+                        "Treat deliverables only as milestone briefs/tests/gates over the same app, not as separate repo states. "
+                        "Preserve one package root, one build identity, and one shared module structure across the whole course. "
                         "Do not write `README.md`, `.coursegen/grader/*`, `checks/*`, or `.vscode/*`; those belong to the harness protocol. "
                         "Lockfiles, build artifacts, logs, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
-                        "Treat the manifest `dependency_contract` for each stage as the current contract source of truth and update it when the authored repo changes. "
-                        "The shared runtime bundle must stay coherent with the creator-owned stack contract and with every stage snapshot you return. "
-                        "When `failure_context.dependency_contracts` is present, treat those repo/runtime facts as authoritative for the failed stages and repair the dependency contract coherently instead of guessing from stderr alone. "
+                        "Treat the manifest `dependency_contract` as the current contract source of truth and update it when the authored repo changes. "
+                        "The shared runtime bundle must stay coherent with the creator-owned stack contract and with the shared repo you return. "
+                        "When `failure_context.dependency_contracts` is present, treat those repo/runtime facts as authoritative for the failing deliverables and repair the shared dependency contract coherently instead of guessing from stderr alone. "
                         "Dependency manifests must be coherent with the chosen language, framework, package manager, and versions. "
                         "Do not rely on unbounded latest dependency resolution; pin dependency versions and editions that the chosen toolchain can build today. "
                         "When the ecosystem supports a lockfile, author the install script so it can generate or refresh that lockfile deterministically inside the creator-selected base image, "
@@ -516,17 +467,17 @@ class OpenAIStarterRepoAuthoringService:
             temperature=0.1,
             workflow_run_id=workflow_run_id,
             deliverable_id=deliverable_label,
-            text_format=_GeneratedProgressiveRepoBundle,
+            text_format=_GeneratedSharedRepoBundle,
         )
         bundle = response.output_parsed
         if bundle is None:
-            raise ValueError("OpenAI progressive repo authoring returned no parsed bundle.")
+            raise ValueError("OpenAI shared repo authoring returned no parsed bundle.")
         log_coursegen_event(
-            "workspace_repo_authoring_progressive_completed",
+            "workspace_repo_authoring_shared_completed",
             workflow_run_id=workflow_run_id,
             deliverable_id=deliverable_label,
             model_id=model_id,
-            deliverable_count=1 + len(bundle.deliverables),
+            repo_file_count=len(bundle.files),
             runtime_file_count=len(bundle.runtime_protocol_files),
         )
         return bundle, extract_openai_usage(response, model_id)
@@ -539,83 +490,20 @@ class OpenAIStarterRepoAuthoringService:
         workspace_root: Path,
         visible_fixture_files: set[str],
         deliverable_ids: list[str],
-        bundle: _GeneratedProgressiveRepoBundle,
+        bundle: _GeneratedSharedRepoBundle,
     ) -> tuple[list[str], list[str]]:
         spec = run.artifacts.task_agent_spec
         if spec is None:
             raise ValueError("Task-agent spec is required for progressive repo authoring.")
 
-        target_ids = set(deliverable_ids)
         normalized_runtime_files = self._normalize_runtime_protocol_files(bundle.runtime_protocol_files)
-        updated_files: list[str] = []
-        notes = list(bundle.notes)
-        ordered_target_ids = [
-            deliverable.id
-            for deliverable in spec.deliverables
-            if deliverable.id in target_ids
-        ]
-        if not ordered_target_ids:
-            return updated_files, notes
-
-        base_deliverable_id = (
-            bundle.base_deliverable_id
-            if bundle.base_deliverable_id in target_ids
-            else ordered_target_ids[0]
-        )
-        if bundle.base_deliverable_id != base_deliverable_id:
-            notes.append(
-                f"Progressive repo authoring returned base_deliverable_id={bundle.base_deliverable_id!r}; "
-                f"using {base_deliverable_id!r} instead."
-            )
-
-        deliverable_bundles = {entry.deliverable_id: entry for entry in bundle.deliverables}
-        stage_snapshots: dict[str, tuple[dict[str, str], dict[str, Any]]] = {}
-        base_manifest_path = public_root / "starter" / base_deliverable_id / HIDDEN_MANIFEST_PATH
-        base_manifest = json.loads(base_manifest_path.read_text(encoding="utf-8"))
-        current_stage_files = {
+        normalized_repo_files = {
             relative_path: content
-            for relative_path, content in self._normalize_repo_files(bundle.base_files).items()
+            for relative_path, content in self._normalize_repo_files(bundle.files).items()
             if relative_path not in _RUNTIME_PROTOCOL_PATHS
         }
-        current_dependency_contract = self._normalize_dependency_contract(
-            bundle.base_dependency_contract,
-            current_manifest=base_manifest,
-        )
-        stage_snapshots[base_deliverable_id] = (
-            dict(current_stage_files),
-            current_dependency_contract,
-        )
-
-        start_index = ordered_target_ids.index(base_deliverable_id)
-        for deliverable_id in ordered_target_ids[start_index + 1 :]:
-            stage_bundle = deliverable_bundles.get(deliverable_id)
-            if stage_bundle is None:
-                notes.append(
-                    f"Progressive repo authoring omitted {deliverable_id}; carrying forward the previous stage snapshot."
-                )
-                stage_snapshots[deliverable_id] = (
-                    dict(current_stage_files),
-                    current_dependency_contract,
-                )
-                continue
-            next_stage_files = dict(current_stage_files)
-            for relative_path in self._normalize_removed_paths(stage_bundle.removed_paths):
-                next_stage_files.pop(relative_path, None)
-            for relative_path, content in self._normalize_repo_files(stage_bundle.changed_files).items():
-                if relative_path in _RUNTIME_PROTOCOL_PATHS:
-                    continue
-                next_stage_files[relative_path] = content
-            manifest_path = public_root / "starter" / deliverable_id / HIDDEN_MANIFEST_PATH
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            current_stage_files = next_stage_files
-            current_dependency_contract = self._normalize_dependency_contract(
-                stage_bundle.dependency_contract,
-                current_manifest=manifest,
-            )
-            stage_snapshots[deliverable_id] = (
-                dict(current_stage_files),
-                current_dependency_contract,
-            )
+        updated_files: list[str] = []
+        notes = list(bundle.notes)
 
         for deliverable in spec.deliverables:
             starter_root = public_root / "starter" / deliverable.id
@@ -624,37 +512,34 @@ class OpenAIStarterRepoAuthoringService:
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
-
-            if deliverable.id in target_ids:
-                stage_snapshot = stage_snapshots.get(deliverable.id)
-                if stage_snapshot is None:
-                    notes.append(f"Progressive repo authoring omitted {deliverable.id}; existing stage snapshot was preserved.")
-                    continue
-                normalized_stage_files, normalized_contract = stage_snapshot
-                files_to_apply = {
-                    **normalized_stage_files,
-                    **normalized_runtime_files,
-                }
-                updated_files.extend(
-                    self._replace_repo_files(
-                        starter_root=starter_root,
-                        manifest=manifest,
-                        files=files_to_apply,
-                        workspace_root=workspace_root,
-                        visible_fixture_files=visible_fixture_files,
-                    )
-                )
-                starter_repo_bundle, _ = self._bundle_state(
+            files_to_apply = {
+                **normalized_repo_files,
+                **normalized_runtime_files,
+            }
+            updated_files.extend(
+                self._replace_repo_files(
                     starter_root=starter_root,
                     manifest=manifest,
-                    default_starter_files=default_starter_files,
+                    files=files_to_apply,
+                    workspace_root=workspace_root,
                     visible_fixture_files=visible_fixture_files,
                 )
-                manifest["starter_repo_bundle"] = {
-                    "generated_for_deliverable": deliverable.id,
-                    **starter_repo_bundle,
-                }
-                manifest["dependency_contract"] = normalized_contract
+            )
+            normalized_contract = self._normalize_dependency_contract(
+                bundle.dependency_contract,
+                current_manifest=manifest,
+            )
+            starter_repo_bundle, _ = self._bundle_state(
+                starter_root=starter_root,
+                manifest=manifest,
+                default_starter_files=default_starter_files,
+                visible_fixture_files=visible_fixture_files,
+            )
+            manifest["starter_repo_bundle"] = {
+                "generated_for_deliverable": deliverable.id,
+                **starter_repo_bundle,
+            }
+            manifest["dependency_contract"] = normalized_contract
             if normalized_runtime_files:
                 for relative_path, content in normalized_runtime_files.items():
                     target = starter_root / relative_path

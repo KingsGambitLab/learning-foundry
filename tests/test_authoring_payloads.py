@@ -411,7 +411,7 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert dependency_contracts[0]["present_lockfile_paths"] == []
         assert dependency_contracts[0]["runtime_bundle_complete"] is False
 
-    def test_repo_authoring_shared_codebase_uses_single_progressive_bundle_call(self) -> None:
+    def test_repo_authoring_shared_codebase_uses_single_shared_repo_bundle_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run = _materialized_run(temp_dir)
             spec = run.artifacts.task_agent_spec
@@ -436,7 +436,7 @@ class AuthoringPayloadTests(unittest.TestCase):
             queued_client = _QueuedFakeClient(
                 [
                     type(
-                        "ProgressiveRepoBundle",
+                        "SharedRepoBundle",
                         (),
                         {
                             "runtime_protocol_files": [
@@ -473,8 +473,7 @@ class AuthoringPayloadTests(unittest.TestCase):
                                     },
                                 )(),
                             ],
-                            "base_deliverable_id": "deliverable_2",
-                            "base_files": [
+                            "files": [
                                 type(
                                     "RepoFile",
                                     (),
@@ -482,11 +481,10 @@ class AuthoringPayloadTests(unittest.TestCase):
                                 )(),
                                 type("RepoFile", (), {"path": "pom.xml", "content": "<project/>\n"})(),
                             ],
-                            "base_dependency_contract": _dependency_contract_payload(
+                            "dependency_contract": _dependency_contract_payload(
                                 manifest_paths=["pom.xml"],
                                 reproducibility_mode="locked",
                             ),
-                            "deliverables": [],
                             "notes": [],
                         },
                     )(),
@@ -505,13 +503,21 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert result.available is True
             parse_calls = queued_client.responses.parse_calls
             assert len(parse_calls) == 1
-            assert parse_calls[0]["text_format"].__name__ == "_GeneratedProgressiveRepoBundle"
+            assert parse_calls[0]["text_format"].__name__ == "_GeneratedSharedRepoBundle"
             payload = json.loads(parse_calls[0]["input"][1]["content"])
-            assert payload["deliverable_ids"] == ["deliverable_2"]
-            assert payload["lineage_anchor"]["deliverable_id"] == "deliverable_1"
-            assert payload["lineage_anchor"]["current_files"]["src/shared_stage.txt"] == "stage-one\n"
+            assert payload["repair_scope_deliverable_ids"] == ["deliverable_2"]
+            assert payload["shared_repo_root"] == "deliverable_1"
+            assert payload["current_files"]["src/shared_stage.txt"] == "stage-one\n"
             assert "Dockerfile" in payload["shared_runtime_protocol_files"]
+            assert {deliverable["deliverable_id"] for deliverable in payload["deliverables"]} == {
+                "deliverable_1",
+                "deliverable_2",
+                "deliverable_3",
+                "deliverable_4",
+            }
+            deliverable_1_root = public_root / "starter" / "deliverable_1"
             deliverable_2_root = public_root / "starter" / "deliverable_2"
+            assert (deliverable_1_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
             assert (deliverable_2_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
             assert (deliverable_2_root / "pom.xml").read_text(encoding="utf-8") == "<project/>\n"
 
