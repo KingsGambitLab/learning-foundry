@@ -473,27 +473,20 @@ class AuthoringPayloadTests(unittest.TestCase):
                                     },
                                 )(),
                             ],
-                            "deliverables": [
+                            "base_deliverable_id": "deliverable_2",
+                            "base_files": [
                                 type(
-                                    "DeliverableBundle",
+                                    "RepoFile",
                                     (),
-                                    {
-                                        "deliverable_id": "deliverable_2",
-                                        "files": [
-                                            type(
-                                                "RepoFile",
-                                                (),
-                                                {"path": "src/shared_stage.txt", "content": "stage-two\n"},
-                                            )(),
-                                            type("RepoFile", (), {"path": "pom.xml", "content": "<project/>\n"})(),
-                                        ],
-                                        "dependency_contract": _dependency_contract_payload(
-                                            manifest_paths=["pom.xml"],
-                                            reproducibility_mode="locked",
-                                        ),
-                                    },
+                                    {"path": "src/shared_stage.txt", "content": "stage-two\n"},
                                 )(),
+                                type("RepoFile", (), {"path": "pom.xml", "content": "<project/>\n"})(),
                             ],
+                            "base_dependency_contract": _dependency_contract_payload(
+                                manifest_paths=["pom.xml"],
+                                reproducibility_mode="locked",
+                            ),
+                            "deliverables": [],
                             "notes": [],
                         },
                     )(),
@@ -518,6 +511,9 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert payload["lineage_anchor"]["deliverable_id"] == "deliverable_1"
             assert payload["lineage_anchor"]["current_files"]["src/shared_stage.txt"] == "stage-one\n"
             assert "Dockerfile" in payload["shared_runtime_protocol_files"]
+            deliverable_2_root = public_root / "starter" / "deliverable_2"
+            assert (deliverable_2_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
+            assert (deliverable_2_root / "pom.xml").read_text(encoding="utf-8") == "<project/>\n"
 
     def test_repo_authoring_payload_excludes_logs_and_build_artifacts_from_authored_surface(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -306,6 +306,15 @@ class TaskAgentServiceSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> "TaskAgentServiceSpec":
+        if self.package_type == PackageType.progressive_codebase_course:
+            if not self.course_structure.shared_codebase:
+                self.course_structure = self.course_structure.model_copy(
+                    update={"shared_codebase": True}
+                )
+            if self.course_structure.workspace_scope != WorkspaceScope.shared_course_workspace:
+                self.course_structure = self.course_structure.model_copy(
+                    update={"workspace_scope": WorkspaceScope.shared_course_workspace}
+                )
         deliverable_ids = [deliverable.id for deliverable in self.deliverables]
         if len(deliverable_ids) != len(set(deliverable_ids)):
             raise ValueError("deliverable ids must be unique")

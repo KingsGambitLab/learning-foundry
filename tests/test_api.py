@@ -3590,6 +3590,39 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("course_action_failed", diagnostic_codes)
         self.assertIn("review_blocked", diagnostic_codes)
 
+    def test_creator_view_handles_legacy_progressive_spec_without_shared_codebase_flag(self) -> None:
+        created = self.client.post(
+            "/v1/course-runs",
+            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
+        )
+        self.assertEqual(created.status_code, 200)
+        course_body = created.json()
+        course_run_id = course_body["id"]
+        shared_run_id = course_body["shared_workflow_run_id"]
+        self.assertIsNotNone(shared_run_id)
+
+        with app.state.workflow_service.store._session() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM workflow_runs WHERE run_id = ?",
+                (shared_run_id,),
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row["payload_json"])
+            course_structure = payload["artifacts"]["task_agent_spec"]["course_structure"]
+            course_structure["shared_codebase"] = False
+            course_structure["workspace_scope"] = "per_deliverable_workspace"
+            connection.execute(
+                "UPDATE workflow_runs SET payload_json = ? WHERE run_id = ?",
+                (json.dumps(payload), shared_run_id),
+            )
+            connection.commit()
+
+        creator_view = self.client.get(f"/v1/course-runs/{course_run_id}/creator-view")
+        self.assertEqual(creator_view.status_code, 200)
+        body = creator_view.json()
+        self.assertEqual(body["course_run"]["id"], course_run_id)
+        self.assertEqual(body["review"]["shared_workflow_run_id"], shared_run_id)
+
     def test_creator_view_and_draft_list_include_ai_spend(self) -> None:
         app.state.course_generation_service = CourseGenerationService(
             app.state.course_workflow_service,

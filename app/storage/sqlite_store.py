@@ -985,6 +985,12 @@ class SQLiteWorkflowStore:
             }
 
         deliverables = payload.get("deliverables")
+        if isinstance(course_structure, dict) and package_type == "progressive_codebase_course":
+            course_structure = {
+                **course_structure,
+                "shared_codebase": True,
+                "workspace_scope": "shared_course_workspace",
+            }
 
         normalized = {
             **payload,
