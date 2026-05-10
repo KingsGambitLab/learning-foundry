@@ -22,6 +22,11 @@ from app.services.learner_brief_builder import (
 from app.services.task_agent_contract_surface import primary_submit_endpoint_for_spec
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
+    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VERIFY_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
     build_task_agent_starter_files,
     default_preview_command,
     task_agent_runtime_base_image,
@@ -257,27 +262,51 @@ class ArtifactMaterializer:
                 deliverable_id=deliverable.id,
                 semantic_source="spec_rendered",
             )
-            starter_files = build_task_agent_starter_files(spec, deliverable.id)
-            for relative_path, content in starter_files.items():
-                role, audience, semantic_source = self._starter_file_metadata(relative_path)
-                self._write_text(
-                    deliverable_dir / relative_path,
-                    content,
-                    ArtifactVisibility.public,
-                    files,
-                    bundle_root,
-                    role=role,
-                    audience=audience,
-                    deliverable_id=deliverable.id,
-                    semantic_source=semantic_source,
-                )
-            self._write_visible_fixture_files(
-                spec=spec,
-                deliverable_dir=deliverable_dir,
-                deliverable_id=deliverable.id,
-                files=files,
-                bundle_root=bundle_root,
+            workspace_starter_dir = (
+                Path(run.artifacts.workspace_snapshot.public_dir) / "starter" / deliverable.id
+                if run.artifacts.workspace_snapshot is not None
+                and Path(run.artifacts.workspace_snapshot.root_dir).resolve() != bundle_root.resolve()
+                else None
             )
+            if workspace_starter_dir is not None and workspace_starter_dir.exists():
+                for source_path in sorted(path for path in workspace_starter_dir.rglob("*") if path.is_file()):
+                    relative_path = source_path.relative_to(workspace_starter_dir).as_posix()
+                    if relative_path == "README.md":
+                        continue
+                    role, audience, semantic_source = self._starter_file_metadata(relative_path)
+                    self._write_text(
+                        deliverable_dir / relative_path,
+                        source_path.read_text(encoding="utf-8"),
+                        ArtifactVisibility.public,
+                        files,
+                        bundle_root,
+                        role=role,
+                        audience=audience,
+                        deliverable_id=deliverable.id,
+                        semantic_source=semantic_source,
+                    )
+            else:
+                starter_files = build_task_agent_starter_files(spec, deliverable.id)
+                for relative_path, content in starter_files.items():
+                    role, audience, semantic_source = self._starter_file_metadata(relative_path)
+                    self._write_text(
+                        deliverable_dir / relative_path,
+                        content,
+                        ArtifactVisibility.public,
+                        files,
+                        bundle_root,
+                        role=role,
+                        audience=audience,
+                        deliverable_id=deliverable.id,
+                        semantic_source=semantic_source,
+                    )
+                self._write_visible_fixture_files(
+                    spec=spec,
+                    deliverable_dir=deliverable_dir,
+                    deliverable_id=deliverable.id,
+                    files=files,
+                    bundle_root=bundle_root,
+                )
 
     def _task_agent_readme(self, spec: TaskAgentServiceSpec) -> str:
         runtime_plan = spec.project_contract.runtime_plan
@@ -392,7 +421,7 @@ class ArtifactMaterializer:
             brief=brief,
             summary=deliverable.objective,
             learning_outcomes=list(deliverable.learning_outcomes),
-            visible_check_command=spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
+            visible_check_command=spec.runtime_dependencies.visible_check_command or "sh .coursegen/runtime/check_visible.sh",
             preview_command=spec.runtime_dependencies.preview_command or default_preview_command(spec, host="127.0.0.1"),
             public_checks=deliverable.public_checks,
         )
@@ -497,24 +526,12 @@ class ArtifactMaterializer:
                 "    return '/health'",
                 "",
                 "",
-                "def entrypoint_path(manifest_payload: dict[str, object]) -> Path:",
-                "    return Path(str(manifest_payload.get('entrypoint_path') or 'app.py'))",
-                "",
-                "",
-                "def setup_commands(manifest_payload: dict[str, object]) -> list[str]:",
-                "    runtime_plan = manifest_payload.get('runtime_plan') or {}",
-                "    steps = runtime_plan.get('setup_steps') or []",
-                "    commands = []",
-                "    for step in steps:",
-                "        if not isinstance(step, dict):",
-                "            continue",
-                "        if step.get('target_service_id') in (None, 'app') and step.get('command'):",
-                "            commands.append(str(step['command']))",
-                "    return commands",
+                "def runtime_script(deliverable_dir: Path, relative_path: str) -> Path:",
+                "    return deliverable_dir / relative_path",
                 "",
                 "",
                 "def preview_command(manifest_payload: dict[str, object]) -> str:",
-                "    return str(manifest_payload.get('preview_command') or 'python .coursegen/preview_app.py --host 0.0.0.0')",
+                "    return str(manifest_payload.get('preview_command') or 'sh .coursegen/runtime/run.sh')",
                 "",
                 "",
                 "def primary_check(manifest_payload: dict[str, object]) -> dict[str, object] | None:",
@@ -528,11 +545,14 @@ class ArtifactMaterializer:
                 "    environment['PORT'] = str(port)",
                 "    try:",
                 "        manifest_payload = manifest(deliverable_dir)",
-                "        app_path = deliverable_dir / entrypoint_path(manifest_payload)",
-                "        if not app_path.exists():",
-                "            raise FileNotFoundError(f'missing entrypoint {app_path.relative_to(deliverable_dir)}')",
-                "        for command in setup_commands(manifest_payload):",
-                "            subprocess.run(command, cwd=deliverable_dir, env=environment, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)",
+                f"        install_script = runtime_script(deliverable_dir, '{RUNTIME_INSTALL_SCRIPT_PATH}')",
+                f"        verify_script = runtime_script(deliverable_dir, '{RUNTIME_VERIFY_SCRIPT_PATH}')",
+                "        if not install_script.exists():",
+                "            raise FileNotFoundError(f'missing runtime install script {install_script.relative_to(deliverable_dir)}')",
+                "        if not verify_script.exists():",
+                "            raise FileNotFoundError(f'missing runtime verify script {verify_script.relative_to(deliverable_dir)}')",
+                f"        subprocess.run('sh {RUNTIME_INSTALL_SCRIPT_PATH}', cwd=deliverable_dir, env=environment, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)",
+                f"        subprocess.run('sh {RUNTIME_VERIFY_SCRIPT_PATH}', cwd=deliverable_dir, env=environment, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)",
                 "        report['compile_succeeded'] = True",
                 "    except Exception as exc:",
                 "        report['error'] = f'compile failed: {exc}'",
@@ -574,11 +594,25 @@ class ArtifactMaterializer:
             return "starter_manifest", "operator", "starter_compiler"
         if relative_path == "Dockerfile":
             return "starter_dockerfile", "operator", "starter_compiler"
+        if relative_path == RUNTIME_INSTALL_SCRIPT_PATH:
+            return "runtime_install_script", "operator", "starter_compiler"
+        if relative_path == RUNTIME_VERIFY_SCRIPT_PATH:
+            return "runtime_verify_script", "operator", "starter_compiler"
+        if relative_path == RUNTIME_RUN_SCRIPT_PATH:
+            return "runtime_run_script", "operator", "starter_compiler"
+        if relative_path == RUNTIME_VISIBLE_CHECK_SCRIPT_PATH:
+            return "runtime_visible_check_script", "operator", "starter_compiler"
+        if relative_path == RUNTIME_HIDDEN_CHECK_SCRIPT_PATH:
+            return "runtime_hidden_check_script", "operator", "starter_compiler"
         if relative_path == "checks/run_visible_checks.py":
             return "visible_check_runner", "learner", "starter_compiler"
         if relative_path == ".vscode/tasks.json":
             return "vscode_tasks", "learner", "starter_compiler"
-        if relative_path.endswith("requirements.txt") or relative_path.endswith("package.json"):
+        if (
+            relative_path.endswith("requirements.txt")
+            or relative_path.endswith("package.json")
+            or relative_path.endswith("go.mod")
+        ):
             return "starter_dependency_manifest", "learner", "starter_compiler"
         if relative_path.endswith("tsconfig.json"):
             return "starter_typescript_config", "learner", "starter_compiler"

@@ -899,15 +899,43 @@ class SQLiteWorkflowStore:
         capabilities = payload.get("capabilities")
         assessment_strategy = payload.get("assessment_strategy")
         project_contract = payload.get("project_contract")
+        runtime_plan = payload.get("runtime_plan") or ((project_contract or {}).get("runtime_plan") or {})
+        runtime_binding = ((project_contract or {}).get("runtime_binding") or {})
         legacy_production_contract = payload.get("production_contract") or {}
         editable_files = (
             (runtime_dependencies or {}).get("editable_files")
             or self._infer_editable_files(payload)
-            or ["app.py"]
+            or []
         )
         visible_fixture_files = (runtime_dependencies or {}).get("visible_fixture_files")
         if visible_fixture_files is None:
             visible_fixture_files = []
+        resolved_language = (
+            (runtime_dependencies or {}).get("implementation_language")
+            or runtime_plan.get("implementation_language")
+            or runtime_binding.get("implementation_language")
+        )
+        resolved_language_version = (
+            (runtime_dependencies or {}).get("language_version")
+            or runtime_plan.get("language_version")
+        )
+        resolved_framework = (
+            (runtime_dependencies or {}).get("application_framework")
+            or runtime_plan.get("application_framework")
+            or runtime_binding.get("application_framework")
+        )
+        resolved_framework_version = (
+            (runtime_dependencies or {}).get("framework_version")
+            or runtime_plan.get("framework_version")
+        )
+        resolved_package_manager = (
+            (runtime_dependencies or {}).get("package_manager")
+            or runtime_plan.get("package_manager")
+        )
+        resolved_primary_database = (runtime_dependencies or {}).get("primary_database")
+        resolved_primary_database_version = (runtime_dependencies or {}).get("primary_database_version")
+        resolved_cache_backend = (runtime_dependencies or {}).get("cache_backend")
+        resolved_cache_backend_version = (runtime_dependencies or {}).get("cache_backend_version")
 
         public_endpoints = payload.get("public_endpoints")
         if not isinstance(public_endpoints, list) or not public_endpoints:
@@ -947,13 +975,13 @@ class SQLiteWorkflowStore:
                 "invariants": ["The service keeps a stable public contract while learners implement the internals."],
                 "operational_concerns": ["The generated bundle must boot, expose health, and pass visible checks."],
                 "runtime_binding": {
-                    "implementation_language": (runtime_dependencies or {}).get("implementation_language") or "python",
-                    "application_framework": (runtime_dependencies or {}).get("application_framework") or "fastapi",
+                    "implementation_language": resolved_language,
+                    "application_framework": resolved_framework,
                     "backing_services": [],
                     "seed_artifacts": [],
                     "integration_points": [],
                 },
-                "runtime_plan": payload.get("runtime_plan") or {},
+                "runtime_plan": runtime_plan,
             }
 
         deliverables = payload.get("deliverables")
@@ -971,31 +999,41 @@ class SQLiteWorkflowStore:
                 {
                     "execution_surface": "http_service",
                     "starter_type": StarterType.partial_implementation.value,
-                    "implementation_language": "python",
-                    "application_framework": "fastapi",
+                    "implementation_language": resolved_language,
+                    "language_version": resolved_language_version,
+                    "application_framework": resolved_framework,
+                    "framework_version": resolved_framework_version,
+                    "package_manager": resolved_package_manager,
                     "editable_files": editable_files,
                     "visible_fixture_files": visible_fixture_files,
-                    "primary_database": None,
-                    "cache_backend": None,
+                    "primary_database": resolved_primary_database,
+                    "primary_database_version": resolved_primary_database_version,
+                    "cache_backend": resolved_cache_backend,
+                    "cache_backend_version": resolved_cache_backend_version,
                     "tech_stack": [],
-                    "local_run_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
-                    "visible_check_command": "python checks/run_visible_checks.py",
-                    "preview_command": "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                    "local_run_command": "sh .coursegen/runtime/run.sh",
+                    "visible_check_command": "sh .coursegen/runtime/check_visible.sh",
+                    "preview_command": "sh .coursegen/runtime/run.sh",
                 }
                 if runtime_dependencies is None
                 else {
                     **runtime_dependencies,
                     "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial_implementation.value,
-                    "implementation_language": runtime_dependencies.get("implementation_language") or "python",
-                    "application_framework": runtime_dependencies.get("application_framework") or "fastapi",
+                    "implementation_language": runtime_dependencies.get("implementation_language") or resolved_language,
+                    "language_version": runtime_dependencies.get("language_version") or resolved_language_version,
+                    "application_framework": runtime_dependencies.get("application_framework") or resolved_framework,
+                    "framework_version": runtime_dependencies.get("framework_version") or resolved_framework_version,
+                    "package_manager": runtime_dependencies.get("package_manager") or resolved_package_manager,
                     "editable_files": runtime_dependencies.get("editable_files") or editable_files,
                     "visible_fixture_files": runtime_dependencies.get("visible_fixture_files") or visible_fixture_files,
-                    "primary_database": runtime_dependencies.get("primary_database"),
-                    "cache_backend": runtime_dependencies.get("cache_backend"),
+                    "primary_database": runtime_dependencies.get("primary_database") or resolved_primary_database,
+                    "primary_database_version": runtime_dependencies.get("primary_database_version") or resolved_primary_database_version,
+                    "cache_backend": runtime_dependencies.get("cache_backend") or resolved_cache_backend,
+                    "cache_backend_version": runtime_dependencies.get("cache_backend_version") or resolved_cache_backend_version,
                     "tech_stack": runtime_dependencies.get("tech_stack") or [],
-                    "local_run_command": runtime_dependencies.get("local_run_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
-                    "visible_check_command": runtime_dependencies.get("visible_check_command") or "python checks/run_visible_checks.py",
-                    "preview_command": runtime_dependencies.get("preview_command") or "python -m uvicorn app:app --host 127.0.0.1 --port 8000",
+                    "local_run_command": runtime_dependencies.get("local_run_command") or "sh .coursegen/runtime/run.sh",
+                    "visible_check_command": runtime_dependencies.get("visible_check_command") or "sh .coursegen/runtime/check_visible.sh",
+                    "preview_command": runtime_dependencies.get("preview_command") or "sh .coursegen/runtime/run.sh",
                 }
             ),
             "capabilities": capabilities
@@ -1006,7 +1044,7 @@ class SQLiteWorkflowStore:
                 "abstention_required": False,
                 "tool_use_required": False,
                 "traceability_required": False,
-                "durable_state_required": bool((runtime_dependencies or {}).get("primary_database")),
+                "durable_state_required": bool(resolved_primary_database),
                 "approval_flow_required": False,
             },
             "assessment_strategy": assessment_strategy
@@ -1029,6 +1067,9 @@ class SQLiteWorkflowStore:
         for deliverable in deliverables:
             if not isinstance(deliverable, dict):
                 continue
+            starter_surface = deliverable.get("learner_starter_surface")
+            if isinstance(starter_surface, dict) and starter_surface.get("primary_editable_paths"):
+                return list(starter_surface["primary_editable_paths"])
             brief = deliverable.get("learner_brief")
             if isinstance(brief, dict) and brief.get("files_to_edit"):
                 return list(brief["files_to_edit"])

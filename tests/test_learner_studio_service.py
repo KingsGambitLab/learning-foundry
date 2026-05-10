@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
+from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH
 from app.services.learner_studio_service import LearnerStudioError, LearnerStudioService
 
 
@@ -122,6 +123,162 @@ class LearnerStudioServiceTests(unittest.TestCase):
         self.assertNotIn("--rm", docker_command)
         self.assertNotIn("--network", docker_command)
         self.assertNotIn("--network-alias", docker_command)
+
+    def test_grade_assignment_uses_non_login_shell_for_runtime_protocol(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        spec = SimpleNamespace(
+            runtime_dependencies=SimpleNamespace(preview_command="sh .coursegen/runtime/run.sh"),
+            project_contract=SimpleNamespace(runtime_plan=SimpleNamespace(services=[])),
+        )
+
+        with (
+            patch.object(service, "_allocate_port", return_value=18001),
+            patch.object(service, "_ensure_runtime_image_available"),
+            patch.object(service, "_workspace_runtime_image_name", return_value="course-gen-runtime:test"),
+            patch.object(service, "_wait_for_http"),
+            patch.object(service, "_remove_runtime_support"),
+            patch.object(service.runner, "grade_assignment_live", return_value=SimpleNamespace(status="failed")),
+            patch("app.services.learner_studio_service.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as mock_run,
+        ):
+            service.grade_assignment(
+                workspace_root=self.workspace_root,
+                spec=spec,
+            )
+
+        docker_command = mock_run.call_args.args[0]
+        self.assertIn("sh", docker_command)
+        self.assertIn("-c", docker_command)
+        self.assertNotIn("-lc", docker_command)
+
+    def test_workspace_runtime_image_name_builds_workspace_image_when_dockerfile_exists(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        manifest_path = self.workspace_root / HIDDEN_MANIFEST_PATH
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            '{"runtime_plan": {"services": [{"service_id": "app", "container_image": null}]}}',
+            encoding="utf-8",
+        )
+        (self.workspace_root / "Dockerfile").write_text("FROM rust:1.82-bookworm\n", encoding="utf-8")
+
+        with patch.object(service, "_ensure_workspace_runtime_image", return_value="course-gen-runtime:workspace") as mock_build:
+            image_name = service._workspace_runtime_image_name(self.workspace_root)
+
+        self.assertEqual(image_name, "course-gen-runtime:workspace")
+        mock_build.assert_called_once_with(self.workspace_root)
+
+    def test_workspace_runtime_image_name_prefers_authored_dockerfile_over_manifest_image(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        manifest_path = self.workspace_root / HIDDEN_MANIFEST_PATH
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            '{"runtime_plan": {"services": [{"service_id": "app", "container_image": "rust:1.82-bookworm"}]}}',
+            encoding="utf-8",
+        )
+        (self.workspace_root / "Dockerfile").write_text("FROM rust:1.82-bookworm\n", encoding="utf-8")
+
+        with patch.object(service, "_ensure_workspace_runtime_image", return_value="course-gen-runtime:workspace") as mock_build:
+            image_name = service._workspace_runtime_image_name(self.workspace_root)
+
+        self.assertEqual(image_name, "course-gen-runtime:workspace")
+        mock_build.assert_called_once_with(self.workspace_root)
+
+    def test_workspace_runtime_image_name_uses_manifest_image_when_no_authored_dockerfile_exists(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        manifest_path = self.workspace_root / HIDDEN_MANIFEST_PATH
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            '{"runtime_plan": {"services": [{"service_id": "app", "container_image": "rust:1.82-bookworm"}]}}',
+            encoding="utf-8",
+        )
+
+        with patch.object(service, "_ensure_workspace_runtime_image") as mock_build:
+            image_name = service._workspace_runtime_image_name(self.workspace_root)
+
+        self.assertEqual(image_name, "rust:1.82-bookworm")
+        mock_build.assert_not_called()
+
+    def test_workspace_runtime_image_build_reclaims_managed_space_and_labels_image_when_disk_is_low(self) -> None:
+        service = LearnerStudioService(
+            image_name="course-gen-learner-studio:test",
+            minimum_free_disk_bytes=3 * 1024 * 1024 * 1024,
+        )
+        (self.workspace_root / "Dockerfile").write_text("FROM rust:1.82-bookworm\n", encoding="utf-8")
+
+        with (
+            patch.object(service, "_image_exists", return_value=False),
+            patch(
+                "app.services.learner_studio_service.shutil.disk_usage",
+                side_effect=[
+                    SimpleNamespace(total=10, used=9, free=512 * 1024 * 1024),
+                    SimpleNamespace(total=10, used=4, free=6 * 1024 * 1024 * 1024),
+                ],
+            ),
+            patch(
+                "app.services.learner_studio_service.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ],
+            ) as mock_run,
+        ):
+            image_name = service._ensure_workspace_runtime_image(self.workspace_root)
+
+        self.assertTrue(image_name.startswith("course-gen-runtime:"))
+        prune_commands = [call.args[0] for call in mock_run.call_args_list[:2]]
+        self.assertEqual(prune_commands[0][:4], ["docker", "builder", "prune", "-af"])
+        self.assertEqual(prune_commands[1][:4], ["docker", "image", "prune", "-af"])
+        build_command = mock_run.call_args_list[-1].args[0]
+        self.assertIn("--label", build_command)
+        self.assertIn("coursegen.managed=true", build_command)
+        self.assertIn("coursegen.kind=runtime", build_command)
+
+    def test_workspace_editor_image_build_labels_image(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        with (
+            patch.object(service, "_image_exists", return_value=False),
+            patch.object(service, "_ensure_docker_build_capacity"),
+            patch(
+                "app.services.learner_studio_service.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as mock_run,
+        ):
+            image_name = service._ensure_workspace_editor_image("course-gen-runtime:test")
+
+        self.assertTrue(image_name.startswith("course-gen-editor:"))
+        build_command = mock_run.call_args.args[0]
+        self.assertIn("--label", build_command)
+        self.assertIn("coursegen.managed=true", build_command)
+        self.assertIn("coursegen.kind=editor", build_command)
+
+    def test_workspace_runtime_image_build_fails_loudly_when_disk_stays_full_after_cleanup(self) -> None:
+        service = LearnerStudioService(
+            image_name="course-gen-learner-studio:test",
+            minimum_free_disk_bytes=3 * 1024 * 1024 * 1024,
+        )
+        (self.workspace_root / "Dockerfile").write_text("FROM rust:1.82-bookworm\n", encoding="utf-8")
+
+        with (
+            patch.object(service, "_image_exists", return_value=False),
+            patch(
+                "app.services.learner_studio_service.shutil.disk_usage",
+                side_effect=[
+                    SimpleNamespace(total=10, used=9, free=512 * 1024 * 1024),
+                    SimpleNamespace(total=10, used=9, free=512 * 1024 * 1024),
+                    SimpleNamespace(total=10, used=9, free=512 * 1024 * 1024),
+                ],
+            ),
+            patch(
+                "app.services.learner_studio_service.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(LearnerStudioError, "Insufficient free disk space for Docker builds"):
+                service._ensure_workspace_runtime_image(self.workspace_root)
 
     def test_wait_for_http_fails_fast_when_container_exits_before_healthcheck(self) -> None:
         service = LearnerStudioService(image_name="course-gen-learner-studio:test", start_timeout_s=90)

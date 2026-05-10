@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from app.domain.grading import (
     AssignmentGradeReport,
     GradeStatus,
@@ -14,7 +16,21 @@ from app.domain.grading import (
 )
 from app.domain.publish import LearnerCoursePackage, LearnerDeliverablePackage
 from app.domain.task_agent import TaskAgentServiceSpec
-from app.services.openai_runtime_support import load_openai_env_file, resolve_openai_env_file, strip_quotes
+from app.services.openai_runtime_support import (
+    load_openai_env_file,
+    parse_structured_openai_response_with_hard_timeout,
+    resolve_openai_env_file,
+    strip_quotes,
+)
+
+
+class _LearnerFeedbackPayload(BaseModel):
+    strengths: list[str] = Field(default_factory=list)
+    fundamental_gap: str | None = None
+    why_it_matters: list[str] = Field(default_factory=list)
+    likely_root_cause: list[str] = Field(default_factory=list)
+    investigation_steps: list[str] = Field(default_factory=list)
+    learner_feedback: str | None = None
 
 
 class OpenAILearnerFeedbackService:
@@ -26,12 +42,14 @@ class OpenAILearnerFeedbackService:
         model: str | None = None,
         client_factory=None,
         max_editable_file_chars: int = 12_000,
+        request_timeout_s: float = 180.0,
     ) -> None:
         self.enabled = enabled
         self.env_file = resolve_openai_env_file(env_file)
         self.model = model
         self.client_factory = client_factory
         self.max_editable_file_chars = max_editable_file_chars
+        self.request_timeout_s = request_timeout_s
 
     def available(self) -> bool:
         config = self._config()
@@ -55,9 +73,13 @@ class OpenAILearnerFeedbackService:
             return assignment_report
 
         config = self._config()
-        client = self._client(
-            api_key=config.get("OPENAI_API_KEY", ""),
-            base_url=config.get("OPENAI_BASE_URL"),
+        client = (
+            self._client(
+                api_key=config.get("OPENAI_API_KEY", ""),
+                base_url=config.get("OPENAI_BASE_URL"),
+            )
+            if self.client_factory is not None
+            else None
         )
         editable_files = self._editable_file_context(workspace_root, spec.runtime_dependencies.editable_files)
         updated_review_areas = []
@@ -87,31 +109,49 @@ class OpenAILearnerFeedbackService:
                     editable_files=editable_files,
                     deliverable=deliverable,
                 )
-                response = client.responses.create(
-                    model=config.get("OPENAI_MODEL") or self.model or "gpt-5.4",
-                    input=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a thoughtful tech lead reviewing a learner submission for a backend project. "
-                                "Use only the provided project brief, learner-visible expectations, code, and grader results. "
-                                "Explain the fundamental gap without spoon-feeding implementation. "
-                                "Be concrete about what already looks strong, what is weak, and where the learner should investigate next. "
-                                "Talk like a calm, technically sharp tech lead. Do not write code. "
-                                "Do not mention hidden tests, graders, or internal tooling. "
-                                "Return JSON only with non-empty keys: strengths, fundamental_gap, why_it_matters, likely_root_cause, investigation_steps, learner_feedback."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": json.dumps(prompt_payload, indent=2),
-                        },
-                    ],
-                    temperature=0.2,
-                )
+                model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
+                input_payload = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a thoughtful tech lead reviewing a learner submission for a backend project. "
+                            "Use only the provided project brief, learner-visible expectations, code, and grader results. "
+                            "Explain the fundamental gap without spoon-feeding implementation. "
+                            "Be concrete about what already looks strong, what is weak, and where the learner should investigate next. "
+                            "Talk like a calm, technically sharp tech lead. Do not write code. "
+                            "Do not mention hidden tests, graders, or internal tooling. "
+                            "Return JSON only with non-empty keys: strengths, fundamental_gap, why_it_matters, likely_root_cause, investigation_steps, learner_feedback."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(prompt_payload, indent=2),
+                    },
+                ]
+                if self.client_factory is not None:
+                    response = client.responses.parse(
+                        model=model_id,
+                        input=input_payload,
+                        temperature=0.2,
+                        text_format=_LearnerFeedbackPayload,
+                        timeout=self.request_timeout_s,
+                    )
+                else:
+                    response = parse_structured_openai_response_with_hard_timeout(
+                        api_key=config.get("OPENAI_API_KEY", "") or "",
+                        base_url=config.get("OPENAI_BASE_URL"),
+                        model=model_id,
+                        input=input_payload,
+                        text_format=_LearnerFeedbackPayload,
+                        request_timeout_s=self.request_timeout_s,
+                        extra_request_kwargs={"temperature": 0.2},
+                    )
+                feedback_payload = response.output_parsed
+                if feedback_payload is None:
+                    raise ValueError("OpenAI learner feedback returned no parsed payload.")
                 feedback = LearnerReviewGuidance.model_validate(
                     self._normalize_feedback_payload(
-                        self._extract_json(getattr(response, "output_text", "")),
+                        feedback_payload.model_dump(mode="json"),
                         failed_review_area=review_area,
                         passed_review_areas=[
                             passed_area
@@ -141,7 +181,7 @@ class OpenAILearnerFeedbackService:
         learner_visible_expectations = {
             "deliverable_title": deliverable.title,
             "deliverable_objective": deliverable.objective,
-            "editable_files": [path for path in deliverable.visible_files if path in editable_files] or ["app.py"],
+            "editable_files": [path for path in deliverable.visible_files if path in editable_files],
             "public_checks": [
                 {
                     "title": check.title,
@@ -417,15 +457,6 @@ class OpenAILearnerFeedbackService:
             timeout=20.0,
             max_retries=0,
         )
-
-    def _extract_json(self, text: str) -> dict[str, Any]:
-        if not text:
-            raise ValueError("The OpenAI response did not contain text output.")
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            raise ValueError("The OpenAI response did not contain a JSON object.")
-        return json.loads(text[start : end + 1])
 
     def _load_env_file(self, path: str) -> dict[str, str]:
         return load_openai_env_file(path)

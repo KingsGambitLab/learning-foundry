@@ -25,6 +25,8 @@ from app.domain.course import (
     QueueCourseGenerationResponse,
     SuggestLearningOutcomesRequest,
     SuggestLearningOutcomesResponse,
+    RecommendCreatorStackContractRequest,
+    RecommendCreatorStackContractResponse,
 )
 from app.domain.registry import PackageType, RiskClass, StarterType
 from app.domain.task_agent import (
@@ -37,7 +39,12 @@ from app.domain.task_agent import (
     RetrievalMode,
     WorkspaceScope,
 )
-from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
+from app.services.assignment_design_inference import (
+    GenerationIntake,
+    build_project_runtime_binding,
+    build_project_runtime_plan,
+    infer_assignment_design,
+)
 from app.services.coursegen_logging import coursegen_log_path, log_coursegen_event
 from app.services.course_workflow_service import CourseWorkflowService
 from app.services.openai_course_planner import (
@@ -45,6 +52,7 @@ from app.services.openai_course_planner import (
     OpenAICoursePlanner,
     OpenAICoursePlannerUnavailable,
 )
+from app.services.stack_catalog_service import StackCatalogService
 
 
 class CourseGenerationService:
@@ -53,10 +61,12 @@ class CourseGenerationService:
         course_workflow_service: CourseWorkflowService,
         *,
         live_planner: OpenAICoursePlanner | None = None,
+        stack_catalog_service: StackCatalogService | None = None,
         job_runner: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self.course_workflow_service = course_workflow_service
         self.live_planner = live_planner or OpenAICoursePlanner()
+        self.stack_catalog_service = stack_catalog_service or StackCatalogService()
         self.job_runner = job_runner or self._run_job_in_background
 
     def status(self) -> CourseGenerationStatus:
@@ -181,6 +191,13 @@ class CourseGenerationService:
             plan=creator_plan,
         )
 
+    def recommend_creator_stack_contract(
+        self,
+        request: RecommendCreatorStackContractRequest,
+    ) -> RecommendCreatorStackContractResponse:
+        resolved_setup = self._resolve_creator_setup(request.goal, request.creator_setup)
+        return self.stack_catalog_service.describe_choices(resolved_setup)
+
     def create_course_run_from_creator_plan(
         self,
         request: CreateCourseFromCreatorPlanRequest,
@@ -192,6 +209,7 @@ class CourseGenerationService:
                 title=generated_plan.title,
                 summary=generated_plan.summary,
                 package_type=generated_plan.package_type,
+                creator_choices=plan.creator_choices,
                 shared_design_spec=generated_plan.shared_design_spec,
                 deliverables=generated_plan.deliverables,
             )
@@ -669,9 +687,14 @@ class CourseGenerationService:
             package_type_hint=request.package_type_hint or plan.package_type,
             starter_type=creator_choices.starter_type,
             implementation_language=creator_choices.implementation_language,
+            language_version=creator_choices.language_version,
             application_framework=creator_choices.application_framework,
+            framework_version=creator_choices.framework_version,
+            package_manager=creator_choices.package_manager,
             primary_database=creator_choices.primary_database,
+            primary_database_version=creator_choices.primary_database_version,
             cache_backend=creator_choices.cache_backend,
+            cache_backend_version=creator_choices.cache_backend_version,
             tech_stack=list(creator_choices.tech_stack),
             data_sources=list(creator_choices.data_sources),
         )
@@ -681,9 +704,14 @@ class CourseGenerationService:
             package_type_hint=intake.package_type_hint,
             starter_type=intake.starter_type,
             implementation_language=intake.implementation_language,
+            language_version=intake.language_version,
             application_framework=intake.application_framework,
+            framework_version=intake.framework_version,
+            package_manager=intake.package_manager,
             primary_database=intake.primary_database,
+            primary_database_version=intake.primary_database_version,
             cache_backend=intake.cache_backend,
+            cache_backend_version=intake.cache_backend_version,
             tech_stack=intake.tech_stack,
             data_sources=intake.data_sources,
         )
@@ -744,9 +772,14 @@ class CourseGenerationService:
             package_type_hint=request.package_type_hint,
             starter_type=creator_choices.starter_type,
             implementation_language=creator_choices.implementation_language,
+            language_version=creator_choices.language_version,
             application_framework=creator_choices.application_framework,
+            framework_version=creator_choices.framework_version,
+            package_manager=creator_choices.package_manager,
             primary_database=creator_choices.primary_database,
+            primary_database_version=creator_choices.primary_database_version,
             cache_backend=creator_choices.cache_backend,
+            cache_backend_version=creator_choices.cache_backend_version,
             tech_stack=list(creator_choices.tech_stack),
             data_sources=list(creator_choices.data_sources),
         )
@@ -1321,84 +1354,43 @@ class CourseGenerationService:
             data_sources.append(source)
 
         implementation_language = (setup.implementation_language or "").strip().lower() or None
+        language_version = (setup.language_version or "").strip() or None
         application_framework = (setup.application_framework or "").strip().lower() or None
+        framework_version = (setup.framework_version or "").strip() or None
+        package_manager = (setup.package_manager or "").strip().lower() or None
+        primary_database_version = (setup.primary_database_version or "").strip() or None
+        cache_backend_version = (setup.cache_backend_version or "").strip() or None
 
-        framework_language_defaults = {
-            "fastapi": "python",
-            "flask": "python",
-            "django": "python",
-            "express": "typescript",
-            "hono": "typescript",
-            "nestjs": "typescript",
-            "gin": "go",
-            "fiber": "go",
-            "actix": "rust",
-            "actix-web": "rust",
-            "axum": "rust",
-        }
-        default_frameworks = {
-            "python": "fastapi",
-            "typescript": "express",
-            "javascript": "express",
-            "go": "gin",
-            "rust": "actix-web",
-        }
-
-        if application_framework and implementation_language is None:
-            implementation_language = framework_language_defaults.get(application_framework)
-        if implementation_language is None:
-            stack_signal = " ".join([lowered_goal, *list(setup.tech_stack)]).lower()
-            if any(token in stack_signal for token in ["typescript", "nestjs", "hono"]):
-                implementation_language = "typescript"
-            elif any(token in stack_signal for token in ["javascript", "node", "express"]):
-                implementation_language = "javascript"
-            elif any(token in stack_signal for token in ["golang", "go", "gin", "fiber"]):
-                implementation_language = "go"
-            elif any(token in stack_signal for token in ["rust", "actix", "axum"]):
-                implementation_language = "rust"
-            else:
-                implementation_language = "python"
-        if application_framework is None:
-            application_framework = default_frameworks.get(implementation_language)
-
-        inferred_design = infer_assignment_design(
-            title=self._title_from_goal(goal),
-            problem_statement=goal,
-            learning_outcomes=[],
-            starter_type=starter_type,
-            implementation_language=implementation_language,
-            application_framework=application_framework,
-            primary_database=setup.primary_database,
-            cache_backend=setup.cache_backend,
-            tech_stack=list(setup.tech_stack),
-            data_sources=data_sources,
-        ).design_spec
-        inferred_family = (
-            inferred_design.project_contract.family
-            if inferred_design is not None
-            else ProjectFamily.generic_backend_service
-        )
-
-        primary_database = setup.primary_database
-        if primary_database is None and inferred_family in {
-            ProjectFamily.transactional_stateful_service,
-            ProjectFamily.control_plane_service,
-        }:
-            primary_database = "postgres"
-
-        cache_backend = setup.cache_backend
-        if cache_backend is None and (
-            inferred_family == ProjectFamily.control_plane_service
-            or any(keyword in lowered_goal for keyword in ["cache", "caching", "read-heavy", "latency"])
-        ):
-            cache_backend = "redis"
+        primary_database = (setup.primary_database or "").strip().lower() or None
+        cache_backend = (setup.cache_backend or "").strip().lower() or None
+        normalized = self.stack_catalog_service.describe_choices(
+            CreatorCourseSetupChoices(
+                starter_type=starter_type,
+                implementation_language=implementation_language,
+                language_version=language_version,
+                application_framework=application_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
+                primary_database=primary_database,
+                primary_database_version=primary_database_version,
+                cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
+                tech_stack=list(setup.tech_stack),
+                data_sources=data_sources,
+            )
+        ).creator_choices
 
         return CreatorCourseSetupChoices(
             starter_type=starter_type,
-            implementation_language=implementation_language,
-            application_framework=application_framework,
-            primary_database=primary_database,
-            cache_backend=cache_backend,
+            implementation_language=normalized.implementation_language,
+            language_version=normalized.language_version,
+            application_framework=normalized.application_framework,
+            framework_version=normalized.framework_version,
+            package_manager=normalized.package_manager,
+            primary_database=normalized.primary_database,
+            primary_database_version=normalized.primary_database_version,
+            cache_backend=normalized.cache_backend,
+            cache_backend_version=normalized.cache_backend_version,
             tech_stack=list(setup.tech_stack),
             data_sources=data_sources,
         )
@@ -1438,13 +1430,40 @@ class CourseGenerationService:
     ) -> AssignmentDesignSpec | None:
         if design_spec is None:
             return None
+        runtime_binding = build_project_runtime_binding(
+            family=design_spec.project_contract.family,
+            implementation_language=creator_choices.implementation_language,
+            application_framework=creator_choices.application_framework,
+            primary_database=creator_choices.primary_database,
+            cache_backend=creator_choices.cache_backend,
+            tech_stack=list(creator_choices.tech_stack),
+            data_sources=list(creator_choices.data_sources),
+        )
+        runtime_plan = build_project_runtime_plan(
+            family=design_spec.project_contract.family,
+            implementation_language=creator_choices.implementation_language,
+            language_version=creator_choices.language_version,
+            application_framework=creator_choices.application_framework,
+            framework_version=creator_choices.framework_version,
+            package_manager=creator_choices.package_manager,
+            primary_database=creator_choices.primary_database,
+            primary_database_version=creator_choices.primary_database_version,
+            cache_backend=creator_choices.cache_backend,
+            cache_backend_version=creator_choices.cache_backend_version,
+            tech_stack=list(creator_choices.tech_stack),
+            data_sources=list(creator_choices.data_sources),
+            allow_inference=False,
+        )
         return design_spec.model_copy(
             update={
                 "runtime_dependencies": design_spec.runtime_dependencies.model_copy(
                     update={
                         "starter_type": creator_choices.starter_type,
                         "implementation_language": creator_choices.implementation_language,
+                        "language_version": creator_choices.language_version,
                         "application_framework": creator_choices.application_framework,
+                        "framework_version": creator_choices.framework_version,
+                        "package_manager": creator_choices.package_manager,
                         "visible_fixture_files": [
                             source.workspace_path
                             for source in creator_choices.data_sources
@@ -1452,11 +1471,19 @@ class CourseGenerationService:
                         ]
                         or list(design_spec.runtime_dependencies.visible_fixture_files),
                         "primary_database": creator_choices.primary_database,
+                        "primary_database_version": creator_choices.primary_database_version,
                         "cache_backend": creator_choices.cache_backend,
+                        "cache_backend_version": creator_choices.cache_backend_version,
                         "tech_stack": list(creator_choices.tech_stack),
                         "data_sources": list(creator_choices.data_sources),
                     }
-                )
+                ),
+                "project_contract": design_spec.project_contract.model_copy(
+                    update={
+                        "runtime_binding": runtime_binding,
+                        "runtime_plan": runtime_plan,
+                    }
+                ),
             }
         )
 
@@ -1473,13 +1500,25 @@ class CourseGenerationService:
         ]
         if creator_choices.implementation_language:
             stack_note = f"The current plan targets `{creator_choices.implementation_language}`"
+            if creator_choices.language_version:
+                stack_note += f" version `{creator_choices.language_version}`"
             if creator_choices.application_framework:
                 stack_note += f" with `{creator_choices.application_framework}`"
+                if creator_choices.framework_version:
+                    stack_note += f" version `{creator_choices.framework_version}`"
+            if creator_choices.package_manager:
+                stack_note += f" via `{creator_choices.package_manager}`"
             parts.append(stack_note + ".")
         if creator_choices.primary_database:
-            parts.append(f"The current plan assumes `{creator_choices.primary_database}` as the primary database.")
+            database_note = f"The current plan assumes `{creator_choices.primary_database}`"
+            if creator_choices.primary_database_version:
+                database_note += f" `{creator_choices.primary_database_version}`"
+            parts.append(database_note + " as the primary database.")
         if creator_choices.cache_backend:
-            parts.append(f"The plan also gives learners access to `{creator_choices.cache_backend}` for caching work.")
+            cache_note = f"The plan also gives learners access to `{creator_choices.cache_backend}`"
+            if creator_choices.cache_backend_version:
+                cache_note += f" `{creator_choices.cache_backend_version}`"
+            parts.append(cache_note + " for caching work.")
         if creator_choices.data_sources:
             labels = ", ".join(f"`{source.title}`" for source in creator_choices.data_sources[:3])
             parts.append(f"Learners will also work with data sources such as {labels}.")
@@ -1508,8 +1547,14 @@ class CourseGenerationService:
             )
         if creator_choices.implementation_language:
             stack_note = f"Implement this deliverable in `{creator_choices.implementation_language}`"
+            if creator_choices.language_version:
+                stack_note += f" version `{creator_choices.language_version}`"
             if creator_choices.application_framework:
                 stack_note += f" using `{creator_choices.application_framework}`"
+                if creator_choices.framework_version:
+                    stack_note += f" version `{creator_choices.framework_version}`"
+            if creator_choices.package_manager:
+                stack_note += f" with `{creator_choices.package_manager}`"
             notes.append(stack_note + ".")
         if creator_choices.tech_stack:
             notes.append(

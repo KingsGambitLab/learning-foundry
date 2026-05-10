@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -17,9 +15,14 @@ from app.services.coursegen_logging import log_coursegen_event
 from app.services.openai_runtime_support import (
     extract_openai_usage,
     load_openai_env_file,
+    parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
 )
-from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH
+from app.services.task_agent_starter_templates import (
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+)
 
 VISIBLE_TEST_SCRIPT_PATH = "checks/run_visible_checks.py"
 HIDDEN_TEST_SCRIPT_PATH = ".coursegen/grader/run_hidden_checks.py"
@@ -53,7 +56,7 @@ class OpenAITestScriptAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 90.0,
+        request_timeout_s: float = 240.0,
         max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
@@ -99,9 +102,13 @@ class OpenAITestScriptAuthoringService:
         notes: list[str] = []
         workspace_root = Path(workspace.root_dir)
         public_root = Path(workspace.public_dir)
-        client = self._client(
-            api_key=config["OPENAI_API_KEY"],
-            base_url=config.get("OPENAI_BASE_URL"),
+        client = (
+            self._client(
+                api_key=config["OPENAI_API_KEY"],
+                base_url=config.get("OPENAI_BASE_URL"),
+            )
+            if self.client_factory is not None
+            else None
         )
         model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
 
@@ -117,6 +124,8 @@ class OpenAITestScriptAuthoringService:
             scripts, response_usage = self._generate_scripts(
                 client,
                 model_id=model_id,
+                api_key=config["OPENAI_API_KEY"],
+                base_url=config.get("OPENAI_BASE_URL"),
                 payload=payload,
                 workflow_run_id=run.id,
                 deliverable_id=deliverable.id,
@@ -130,8 +139,8 @@ class OpenAITestScriptAuthoringService:
             updated_files.extend(self._write_if_changed(visible_path, scripts.visible_script, workspace_root))
             updated_files.extend(self._write_if_changed(hidden_path, scripts.hidden_script, workspace_root))
 
-            manifest["visible_check_command"] = "python checks/run_visible_checks.py"
-            manifest["hidden_check_command"] = "python .coursegen/grader/run_hidden_checks.py"
+            manifest["visible_check_command"] = f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+            manifest["hidden_check_command"] = f"sh {RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"
             manifest["generated_test_scripts"] = {
                 "source": "openai_live",
                 "generated_for_deliverable": deliverable.id,
@@ -171,24 +180,7 @@ class OpenAITestScriptAuthoringService:
         manifest: dict[str, Any],
         failure_context: FailureContext | None,
     ) -> dict[str, Any]:
-        editable_paths = (
-            (manifest.get("learner_starter_surface") or {}).get("primary_editable_paths")
-            or (manifest.get("runtime_dependencies") or {}).get("editable_files")
-            or ["app.py"]
-        )
-        support_paths = (
-            (manifest.get("learner_starter_surface") or {}).get("support_paths")
-            or ["checks/run_visible_checks.py"]
-        )
-        file_payload: dict[str, str] = {}
-        for relative_path in [*editable_paths, *support_paths, "README.md", HIDDEN_MANIFEST_PATH]:
-            target = starter_root / str(relative_path)
-            if not target.exists() or target.is_dir():
-                continue
-            try:
-                file_payload[str(relative_path)] = target.read_text(encoding="utf-8")
-            except OSError:
-                continue
+        file_payload = self._starter_text_files(starter_root)
         return {
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
@@ -198,11 +190,23 @@ class OpenAITestScriptAuthoringService:
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
 
+    def _starter_text_files(self, starter_root: Path) -> dict[str, str]:
+        file_payload: dict[str, str] = {}
+        for path in sorted(p for p in starter_root.rglob("*") if p.is_file()):
+            relative_path = path.relative_to(starter_root).as_posix()
+            try:
+                file_payload[relative_path] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+        return file_payload
+
     def _generate_scripts(
         self,
         client,
         *,
         model_id: str,
+        api_key: str,
+        base_url: str | None,
         payload: dict[str, Any],
         workflow_run_id: str,
         deliverable_id: str,
@@ -210,6 +214,8 @@ class OpenAITestScriptAuthoringService:
         response = self._create_response_with_retries(
             client,
             model=model_id,
+            api_key=api_key,
+            base_url=base_url,
             input=[
                 {
                     "role": "system",
@@ -225,7 +231,7 @@ class OpenAITestScriptAuthoringService:
                         "Visible tests should be learner-friendly and basic. Hidden tests should be materially stronger. "
                         "For `partial_implementation` starters, visible tests should still fail the untouched starter when core behavior is missing. "
                         "For `working_buggy` starters, visible tests may pass but hidden tests should expose the deeper bug. "
-                        "Use only the published endpoints and the actual learner files in the prompt. "
+                        "Use only the published endpoints and the actual learner files in the prompt, including the authored runtime protocol when present. "
                         "Do not import the learner application directly."
                     ),
                 },
@@ -234,10 +240,11 @@ class OpenAITestScriptAuthoringService:
             temperature=0.1,
             workflow_run_id=workflow_run_id,
             deliverable_id=deliverable_id,
+            text_format=_GeneratedScripts,
         )
-        raw = getattr(response, "output_text", "")
-        data = self._extract_json(raw)
-        scripts = _GeneratedScripts.model_validate(data)
+        scripts = response.output_parsed
+        if scripts is None:
+            raise ValueError("OpenAI test authoring returned no parsed scripts.")
         log_coursegen_event(
             "workspace_test_authoring_deliverable_completed",
             workflow_run_id=workflow_run_id,
@@ -251,10 +258,13 @@ class OpenAITestScriptAuthoringService:
         client,
         *,
         model: str,
+        api_key: str,
+        base_url: str | None,
         input: list[dict[str, Any]],
         temperature: float,
         workflow_run_id: str,
         deliverable_id: str,
+        text_format: type[BaseModel],
     ):
         last_error: Exception | None = None
         for attempt in range(1, self.max_request_retries + 2):
@@ -266,12 +276,22 @@ class OpenAITestScriptAuthoringService:
                 attempt=attempt,
             )
             try:
-                return self._run_with_timeout(
-                    lambda: client.responses.create(
+                if self.client_factory is not None:
+                    return client.responses.parse(
                         model=model,
                         input=input,
                         temperature=temperature,
+                        text_format=text_format,
+                        timeout=self.request_timeout_s,
                     )
+                return parse_structured_openai_response_with_hard_timeout(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    input=input,
+                    text_format=text_format,
+                    request_timeout_s=self.request_timeout_s,
+                    extra_request_kwargs={"temperature": temperature},
                 )
             except Exception as exc:  # pragma: no cover
                 last_error = exc
@@ -288,45 +308,6 @@ class OpenAITestScriptAuthoringService:
                 time.sleep(min(2**attempt, 4))
         assert last_error is not None
         raise last_error
-
-    def _run_with_timeout(self, fn):
-        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-        def target() -> None:
-            try:
-                result_queue.put(("ok", fn()))
-            except Exception as exc:  # pragma: no cover
-                result_queue.put(("error", exc))
-
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
-        try:
-            status, payload = result_queue.get(timeout=self.request_timeout_s)
-        except queue.Empty as exc:
-            raise TimeoutError(
-                f"OpenAI test authoring request exceeded {self.request_timeout_s:.0f}s."
-            ) from exc
-        if status == "error":
-            raise payload
-        return payload
-
-    def _extract_json(self, raw_text: str) -> dict[str, Any]:
-        text = raw_text.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            while lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1:
-                raise
-            return json.loads(text[start : end + 1])
 
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}
@@ -350,7 +331,7 @@ class OpenAITestScriptAuthoringService:
             return self.client_factory(api_key=api_key, base_url=base_url)
         from openai import OpenAI
 
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if base_url:
             kwargs["base_url"] = base_url
         return OpenAI(**kwargs)

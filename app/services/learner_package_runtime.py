@@ -6,10 +6,6 @@ from pathlib import Path
 from app.domain.grading import AssignmentGradeReport, GradeStatus, DeliverableGradeReport, ReviewAreaGradeReport
 from app.domain.learner import LearnerDeliverableProgress
 from app.domain.publish import LearnerDeliverablePackage, PublishSnapshot
-from app.services.task_agent_starter_templates import (
-    render_legacy_task_agent_root_app,
-    render_task_agent_root_app,
-)
 
 
 def project_brief_markdown(snapshot: PublishSnapshot) -> str:
@@ -87,10 +83,6 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     for deliverable in learner_package.deliverables:
         for file in deliverable.workspace_seed_files:
             files_to_write.setdefault(file.relative_path, file.content)
-    legacy_app = render_legacy_task_agent_root_app()
-    current_app = render_task_agent_root_app()
-    if files_to_write.get("app.py") == legacy_app:
-        files_to_write["app.py"] = current_app
     brief = project_brief_markdown(snapshot)
     files_to_write["README.md"] = brief
     files_to_write["project_brief.md"] = brief
@@ -104,8 +96,6 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     for relative_path, content in files_to_write.items():
         target = root / relative_path
         if target.exists():
-            if relative_path == "app.py" and target.read_text(encoding="utf-8") == legacy_app:
-                target.write_text(current_app, encoding="utf-8")
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")

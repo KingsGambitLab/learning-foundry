@@ -1,37 +1,25 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.domain.grading import ApprovalRecord
 from app.domain.registry import PackageType
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import (
     dependency_container_image,
     infer_assignment_design,
-    runtime_target_commands_for_stack,
 )
 from app.services.learner_studio_service import LearnerStudioService
-from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
-from app.services.openai_task_agent_authoring import (
-    DeliverableCustomization,
-    EvalCaseCustomization,
-    OpenAITaskAgentAuthoringService,
-    SchemaCustomization,
-    StarterScenarioCustomization,
-    StarterSurfaceCustomization,
-    TaskAgentCustomization,
-)
 from app.services.spec_validation import validate_task_agent_spec
-from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
-    task_agent_entrypoint_path,
-    render_task_agent_runtime_deliverable,
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VERIFY_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
 )
 
 
@@ -71,37 +59,60 @@ def test_typescript_starter_dockerfile_follows_runtime_plan() -> None:
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
     dockerfile = starter_files["Dockerfile"]
+    manifest = json.loads(starter_files[HIDDEN_MANIFEST_PATH])
 
     assert dockerfile.startswith("FROM ")
-    assert (
-        "FROM node:22-bookworm-slim" in dockerfile
-        or "FROM sha256:" in dockerfile
-    )
-    assert "ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0" in dockerfile
-    assert (
-        "RUN corepack enable" in dockerfile
-        or "apt-get install -y --no-install-recommends nodejs npm" in dockerfile
-    )
-    assert "RUN pnpm install --yes --dangerously-allow-all-builds" in dockerfile
-    assert "COPY . /workspace" in dockerfile
-    assert "EXPOSE 8000" in dockerfile
-
-
-def test_runtime_target_commands_for_pnpm_allow_noninteractive_builds() -> None:
-    install_command, run_command, check_command = runtime_target_commands_for_stack(
-        implementation_language="typescript",
-        application_framework="nestjs",
-        package_manager="pnpm",
-    )
-
-    assert install_command == "pnpm install --yes --dangerously-allow-all-builds"
-    assert run_command == "pnpm start:dev"
-    assert check_command == "python checks/run_visible_checks.py"
+    assert "FROM debian:bookworm-slim" in dockerfile
+    assert "runtime Dockerfile has not been authored yet" in dockerfile
+    assert manifest["runtime_protocol_bundle"]["source"] == "starter_default"
 
 
 def test_runtime_plan_prefers_lightweight_dependency_images() -> None:
     assert dependency_container_image(technology="postgres", version_hint=None) == "postgres:16-alpine"
     assert dependency_container_image(technology="redis", version_hint=None) == "redis:7-alpine"
+
+
+def test_assignment_runtime_plan_prefers_explicit_stack_contract_over_tech_stack() -> None:
+    inferred = infer_assignment_design(
+        title="Feature Flag Control Plane",
+        problem_statement=(
+            "Build a feature flag control plane backend with gradual rollout support, audit logs, and safe config updates."
+        ),
+        implementation_language="typescript",
+        language_version="24",
+        application_framework="nestjs",
+        framework_version="11",
+        package_manager="npm",
+        primary_database="mongodb",
+        primary_database_version="8",
+        cache_backend="redis",
+        cache_backend_version="8",
+        tech_stack=["Node 22", "NestJS 10", "pnpm", "MongoDB 7", "Redis 7"],
+    )
+
+    assert inferred.design_spec is not None
+    runtime_plan = inferred.design_spec.project_contract.runtime_plan
+    runtime_dependencies = inferred.design_spec.runtime_dependencies
+    app_service = next(service for service in runtime_plan.services if service.service_id == "app")
+    mongodb_service = next(service for service in runtime_plan.services if service.service_id == "mongodb")
+    redis_service = next(service for service in runtime_plan.services if service.service_id == "redis")
+
+    assert runtime_plan.language_version == "24"
+    assert runtime_plan.framework_version == "11"
+    assert runtime_plan.package_manager == "npm"
+    assert app_service.package_manager == "npm"
+    assert "node:24-bookworm-slim" in (app_service.container_image or "")
+    assert runtime_plan.setup_steps == []
+    assert runtime_plan.verify_steps == []
+    assert runtime_plan.run_steps == []
+    assert runtime_plan.check_steps == []
+    assert runtime_dependencies.language_version == "24"
+    assert runtime_dependencies.framework_version == "11"
+    assert runtime_dependencies.package_manager == "npm"
+    assert runtime_dependencies.primary_database_version == "8"
+    assert runtime_dependencies.cache_backend_version == "8"
+    assert mongodb_service.version_hint == "8"
+    assert redis_service.version_hint == "8"
 
 
 def test_assignment_runtime_dockerfile_reuses_app_base_and_adds_verifier_python() -> None:
@@ -126,26 +137,6 @@ def test_assignment_runtime_dockerfile_reuses_app_base_and_adds_verifier_python(
     assert 'CMD ["python3", "runtime/verify_assignment.py"]' in dockerfile
 
 
-def test_starter_runtime_emits_stable_approval_ids() -> None:
-    runtime_source = render_task_agent_runtime_deliverable()
-
-    assert '"approval_id": f"{run_id}::approval::0"' in runtime_source
-
-
-def test_blackbox_runner_normalizes_missing_approval_ids() -> None:
-    runner = TaskAgentBlackBoxRunner()
-
-    approvals = runner._parse_records(
-        [{"tool_id": "send_final_output", "status": "approved"}],
-        ApprovalRecord,
-        include_order=True,
-    )
-
-    assert len(approvals) == 1
-    assert approvals[0].approval_id == "approval::send_final_output::0"
-    assert approvals[0].approved is True
-
-
 def test_learner_runtime_launch_script_exports_corepack_prompt_override() -> None:
     spec = _build_spec(
         title="Feature Flag Control Plane",
@@ -162,7 +153,7 @@ def test_learner_runtime_launch_script_exports_corepack_prompt_override() -> Non
             output_path = workspace_path / relative_path
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(content, encoding="utf-8")
-        manifest = json.loads((workspace_path / "starter_manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((workspace_path / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
         assert manifest["runtime_plan"]["package_manager"] == "pnpm"
 
         service = LearnerStudioService()
@@ -172,12 +163,12 @@ def test_learner_runtime_launch_script_exports_corepack_prompt_override() -> Non
             include_setup=True,
         )
 
-    assert "export COREPACK_ENABLE_DOWNLOAD_PROMPT=0" in launch_script
-    assert "corepack enable" in launch_script
-    assert "pnpm install --yes --dangerously-allow-all-builds" in launch_script
+    assert f"sh {RUNTIME_INSTALL_SCRIPT_PATH}" in launch_script
+    assert f"sh {RUNTIME_VERIFY_SCRIPT_PATH}" in launch_script
+    assert f"exec sh {RUNTIME_RUN_SCRIPT_PATH}" in launch_script
 
 
-def test_python_runtime_plan_includes_verify_step_and_launch_script_runs_it_before_preview() -> None:
+def test_python_launch_script_uses_authored_runtime_protocol_before_preview() -> None:
     spec = _build_spec(
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
@@ -187,9 +178,7 @@ def test_python_runtime_plan_includes_verify_step_and_launch_script_runs_it_befo
         ),
     )
 
-    verify_steps = spec.project_contract.runtime_plan.verify_steps
-    assert verify_steps
-    assert "from app import app as _coursegen_app" in verify_steps[0].command
+    assert spec.project_contract.runtime_plan.verify_steps == []
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
     with TemporaryDirectory() as temp_dir:
@@ -205,12 +194,11 @@ def test_python_runtime_plan_includes_verify_step_and_launch_script_runs_it_befo
             include_setup=False,
         )
 
-    assert "[coursegen] verify step 1 started" in launch_script
-    assert "from app import app as _coursegen_app" in launch_script
-    assert launch_script.index("[coursegen] verify step 1 started") < launch_script.index("exec python .coursegen/preview_app.py")
+    assert f"sh {RUNTIME_VERIFY_SCRIPT_PATH}" in launch_script
+    assert launch_script.index(f"sh {RUNTIME_VERIFY_SCRIPT_PATH}") < launch_script.index(f"exec sh {RUNTIME_RUN_SCRIPT_PATH}")
 
 
-def test_starter_surface_is_authored_and_python_entrypoint_is_not_a_wrapper() -> None:
+def test_protocol_only_starter_surface_tracks_repo_bundle_metadata() -> None:
     spec = _build_spec(
         title="Grounded Internal Docs Assistant",
         summary="Build a grounded assistant over a visible internal docs corpus.",
@@ -229,17 +217,17 @@ def test_starter_surface_is_authored_and_python_entrypoint_is_not_a_wrapper() ->
     assert starter_surface.domain_scenarios
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
-    entrypoint_path = task_agent_entrypoint_path(spec)
-    source = starter_files[entrypoint_path]
-    manifest = json.loads(starter_files["starter_manifest.json"])
+    manifest = json.loads(starter_files[HIDDEN_MANIFEST_PATH])
 
-    assert "from runtime.task_agent_runtime import" not in source
-    assert "def create_app_from_manifest(" in source
     assert manifest["learner_starter_surface"]["primary_editable_paths"]
     assert manifest["learner_starter_surface"]["required_endpoints"]
+    assert manifest["visible_check_command"] == f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+    assert manifest["starter_repo_bundle"]["source"] == "starter_default"
+    for relative_path in starter_surface.primary_editable_paths:
+        assert relative_path not in starter_files
 
 
-def test_python_starter_entrypoint_imports_cleanly() -> None:
+def test_protocol_only_starter_does_not_generate_a_fake_entrypoint() -> None:
     spec = _build_spec(
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
@@ -250,24 +238,10 @@ def test_python_starter_entrypoint_imports_cleanly() -> None:
     )
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
-    entrypoint_path = task_agent_entrypoint_path(spec)
-    with TemporaryDirectory() as temp_dir:
-        workspace_path = Path(temp_dir)
-        for relative_path, content in starter_files.items():
-            output_path = workspace_path / relative_path
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content, encoding="utf-8")
-        module_path = workspace_path / entrypoint_path
-        module_name = "coursegen_inventory_app"
-        importlib.invalidate_caches()
-        sys.modules.pop(module_name, None)
-        spec_obj = importlib.util.spec_from_file_location(module_name, module_path)
-        assert spec_obj is not None
-        assert spec_obj.loader is not None
-        module = importlib.util.module_from_spec(spec_obj)
-        spec_obj.loader.exec_module(module)
-
-    assert getattr(module, "app", None) is not None
+    starter_surface = spec.deliverables[0].learner_starter_surface
+    assert starter_surface is not None
+    for relative_path in starter_surface.primary_editable_paths:
+        assert relative_path not in starter_files
 
 
 def test_generic_workflow_specs_now_start_from_a_neutral_valid_contract() -> None:
@@ -284,138 +258,9 @@ def test_generic_workflow_specs_now_start_from_a_neutral_valid_contract() -> Non
     assert validation.valid
     assert spec.project_contract.family.value == "workflow_agent_service"
     assert all(
-        phrase not in str(case.model_dump(mode="json")).lower()
-        for case in spec.eval_dataset.cases
+        phrase not in str(check.model_dump(mode="json")).lower()
+        for deliverable in spec.deliverables
+        for check in deliverable.public_checks
         for phrase in ("routine case", "ambiguous or risky case")
     )
-    assert any(endpoint.path.startswith("/workflow-agent") for endpoint in spec.production_contract.canonical_endpoints)
-
-
-def test_authoring_customization_can_make_generic_workflow_spec_domain_specific() -> None:
-    spec = _build_spec(
-        title="Production Customer Support Bot",
-        summary="Build a production-ready customer support bot.",
-        problem_statement=(
-            "Build a customer support bot that handles refunds, outage updates, suspicious logins, "
-            "approval gates, and production-ready tracing."
-        ),
-    )
-    initial_validation = validate_task_agent_spec(spec)
-    assert initial_validation.valid
-    primary_case_id = spec.eval_dataset.cases[0].id
-    edge_case_id = spec.eval_dataset.cases[1].id
-
-    service = OpenAITaskAgentAuthoringService(enabled=False)
-    customized = service._apply_customization(
-        spec,
-        TaskAgentCustomization(
-            task_schema=SchemaCustomization(
-                required=["ticket_id", "customer_message", "issue_type"],
-                properties={
-                    "ticket_id": {"type": "string"},
-                    "customer_message": {"type": "string"},
-                    "issue_type": {"type": "string"},
-                    "account_tier": {"type": "string"},
-                    "dry_run": {"type": "boolean"},
-                },
-            ),
-            output_schema=SchemaCustomization(
-                required=["decision", "priority", "response_summary", "confidence", "needs_human"],
-                properties={
-                    "decision": {"type": "string"},
-                    "priority": {"type": "string"},
-                    "response_summary": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    "needs_human": {"type": "boolean"},
-                },
-            ),
-            eval_cases=[
-                EvalCaseCustomization(
-                    id=primary_case_id,
-                    title="Billing refund request",
-                    input={
-                        "ticket_id": "T-100",
-                        "customer_message": "I was charged twice and need a refund.",
-                        "issue_type": "billing_refund",
-                        "account_tier": "pro",
-                    },
-                    expected_output={
-                        "decision": "draft_refund_reply",
-                        "priority": "medium",
-                        "needs_human": True,
-                    },
-                    should_escalate=True,
-                    requires_approval=True,
-                ),
-                EvalCaseCustomization(
-                    id=edge_case_id,
-                    title="Suspicious login request",
-                    input={
-                        "ticket_id": "T-102",
-                        "customer_message": "My account was accessed from a country I have never visited.",
-                        "issue_type": "suspicious_login",
-                        "account_tier": "business",
-                    },
-                    expected_output={
-                        "decision": "security_escalation",
-                        "priority": "urgent",
-                        "needs_human": True,
-                    },
-                    should_escalate=True,
-                    requires_approval=False,
-                ),
-            ],
-            deliverables=[
-                DeliverableCustomization(
-                    id=spec.deliverables[0].id,
-                    learner_starter_surface=StarterSurfaceCustomization(
-                        starter_summary=(
-                            "Build the real support workflow in learner-owned code so refund, outage, and "
-                            "security tickets move through triage, approval, and reply drafting"
-                        ),
-                        implementation_checklist=[
-                            "Persist a traceable support run id through the request lifecycle.",
-                            "Keep risky ticket decisions reviewable before a final reply is sent.",
-                        ],
-                        domain_scenarios=[
-                            StarterScenarioCustomization(
-                                id="billing_refund",
-                                title="Billing refund request",
-                                request_summary=(
-                                    "A pro customer says they were charged twice and wants a refund on the same ticket."
-                                ),
-                                expected_behavior=(
-                                    "Gather the needed context, draft the refund path, and require review before any irreversible action."
-                                ),
-                            ),
-                            StarterScenarioCustomization(
-                                id="suspicious_login",
-                                title="Suspicious login request",
-                                request_summary=(
-                                    "A business customer reports account access from a country they do not recognize."
-                                ),
-                                expected_behavior=(
-                                    "Treat it as a security-sensitive path, escalate quickly, and keep the trace explicit."
-                                ),
-                            ),
-                        ],
-                    ),
-                )
-            ],
-        ),
-    )
-    customized = ensure_task_agent_deliverable_briefs(customized, overwrite=True)
-
-    validation = validate_task_agent_spec(customized)
-    assert validation.valid
-    starter_surface = customized.deliverables[0].learner_starter_surface
-    assert starter_surface is not None
-    assert starter_surface.starter_summary.startswith("Build the real support workflow")
-    assert starter_surface.domain_scenarios[0].title == "Billing refund request"
-    assert "charged twice" in starter_surface.domain_scenarios[0].request_summary
-    assert customized.deliverables[0].public_checks[0].title == "Billing refund request"
-    assert "Build the real support workflow" in customized.deliverables[0].learner_brief.task_to_build
-    assert any(
-        "Persist a traceable support run id" in item
-        for item in customized.deliverables[0].learner_brief.definition_of_done
-    )
+    assert any(endpoint.path.startswith("/workflows") for endpoint in spec.public_endpoints)

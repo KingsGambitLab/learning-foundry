@@ -48,6 +48,7 @@ class CourseRun(BaseModel):
     summary: str
     package_type: PackageType
     pattern_slug: str | None = None
+    creator_choices: CreatorCourseSetupChoices | None = None
     shared_design_spec: AssignmentDesignSpec | None = None
     shared_workflow_run_id: str | None = None
     latest_publish_snapshot_id: str | None = None
@@ -278,6 +279,7 @@ class CreateCourseRunRequest(BaseModel):
     title: str | None = None
     summary: str | None = None
     package_type: PackageType | None = None
+    creator_choices: CreatorCourseSetupChoices | None = None
     shared_design_spec: AssignmentDesignSpec | None = None
     course_family_id: str | None = None
     deliverables: list[CreateCourseDeliverableRequest] = Field(default_factory=list, validation_alias="deliverables")
@@ -286,9 +288,14 @@ class CreateCourseRunRequest(BaseModel):
 class CreatorCourseSetupInput(BaseModel):
     starter_type: StarterType | None = None
     implementation_language: str | None = None
+    language_version: str | None = None
     application_framework: str | None = None
+    framework_version: str | None = None
+    package_manager: str | None = None
     primary_database: str | None = None
+    primary_database_version: str | None = None
     cache_backend: str | None = None
+    cache_backend_version: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
     data_sources: list[DataSourceSpec] = Field(default_factory=list)
 
@@ -296,11 +303,46 @@ class CreatorCourseSetupInput(BaseModel):
 class CreatorCourseSetupChoices(BaseModel):
     starter_type: StarterType = StarterType.partial_implementation
     implementation_language: str | None = None
+    language_version: str | None = None
     application_framework: str | None = None
+    framework_version: str | None = None
+    package_manager: str | None = None
     primary_database: str | None = None
+    primary_database_version: str | None = None
     cache_backend: str | None = None
+    cache_backend_version: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
     data_sources: list[DataSourceSpec] = Field(default_factory=list)
+
+
+class CreatorStackCatalogOption(BaseModel):
+    value: str
+    label: str
+    source_url: str | None = None
+    recommended: bool = False
+
+
+class CreatorStackCatalog(BaseModel):
+    languages: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    frameworks_by_language: dict[str, list[CreatorStackCatalogOption]] = Field(default_factory=dict)
+    package_managers_by_language: dict[str, list[CreatorStackCatalogOption]] = Field(default_factory=dict)
+    databases: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    caches: list[CreatorStackCatalogOption] = Field(default_factory=list)
+
+
+class RecommendCreatorStackContractRequest(BaseModel):
+    goal: str = Field(min_length=10)
+    creator_setup: CreatorCourseSetupInput = Field(default_factory=CreatorCourseSetupInput)
+
+
+class RecommendCreatorStackContractResponse(BaseModel):
+    creator_choices: CreatorCourseSetupChoices
+    catalog: CreatorStackCatalog
+    language_versions: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    framework_versions: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    database_versions: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    cache_versions: list[CreatorStackCatalogOption] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class GenerateCourseFromBriefRequest(BaseModel):

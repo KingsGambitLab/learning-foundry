@@ -21,6 +21,7 @@ from app.domain.workflow import WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.coursegen_logging import log_coursegen_event
+from app.services.dependency_contract_materializer import DependencyContractMaterializer
 from app.services.generated_test_harness import GeneratedTestScriptRunner
 from app.services.learner_studio_service import LearnerStudioService
 
@@ -36,6 +37,7 @@ class DockerSandboxRunner:
         cache_images: bool = True,
         cache_namespace: str = "course-gen-cache",
         workspace_manager: AssignmentWorkspaceManager | None = None,
+        dependency_contract_materializer: DependencyContractMaterializer | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.build_timeout_s = build_timeout_s
@@ -51,6 +53,10 @@ class DockerSandboxRunner:
             host="127.0.0.1",
         )
         self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 90))
+        self.dependency_contract_materializer = dependency_contract_materializer or DependencyContractMaterializer(
+            docker_binary=docker_binary,
+            command_timeout_s=min(build_timeout_s, 180),
+        )
 
     def status(self) -> SandboxAvailability:
         try:
@@ -361,22 +367,71 @@ class DockerSandboxRunner:
                 )
                 continue
 
-            manifest = self.runtime_harness._runtime_manifest(starter_root)
-            image_name = self.runtime_harness._workspace_runtime_image_name(starter_root)
-            build_command = []
-            build_stdout_parts.append(
-                f"[{deliverable.id}] Using runtime image {image_name} from the authored runtime plan."
-            )
-            self.runtime_harness._ensure_runtime_image_available(image_name)
-            if self.runtime_harness._image_exists(image_name):
-                any_cached = True
-
             host_port = self.runtime_harness._allocate_port()
             container_name = f"course-gen-sandbox-{deliverable.id}-{uuid4().hex[:8]}".lower()
             network_name = f"{container_name}-net"
             base_url = f"http://127.0.0.1:{host_port}"
             logs = ""
+            runtime_image_ready = False
             try:
+                manifest = self.runtime_harness._runtime_manifest(starter_root)
+                materialization = self.dependency_contract_materializer.materialize(
+                    starter_root=starter_root,
+                    runtime_plan=spec.project_contract.runtime_plan,
+                    deliverable_id=deliverable.id,
+                )
+                if materialization.attempted:
+                    log_coursegen_event(
+                        "sandbox_dependency_contract_materialized",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        image_name=materialization.image_name,
+                        synced_paths=materialization.synced_paths,
+                        success=materialization.succeeded,
+                        error=materialization.error,
+                    )
+                    if materialization.stdout:
+                        build_stdout_parts.append(
+                            f"[{deliverable.id}] Dependency contract materialization stdout:\n{materialization.stdout}".strip()
+                        )
+                    if materialization.stderr:
+                        build_stderr_parts.append(
+                            f"[{deliverable.id}] Dependency contract materialization stderr:\n{materialization.stderr}".strip()
+                        )
+                if not materialization.succeeded:
+                    all_builds_succeeded = False
+                    log_coursegen_event(
+                        "sandbox_deliverable_completed",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        sandbox_status="failed",
+                        error=materialization.error,
+                    )
+                    deliverable_reports.append(
+                        DeliverableSandboxReport(
+                            deliverable_id=deliverable.id,
+                            compile_succeeded=False,
+                            runtime_succeeded=False,
+                            stdout=materialization.stdout,
+                            stderr=materialization.stderr,
+                            error=materialization.error
+                            or "Dependency contract materialization failed before runtime boot.",
+                        )
+                    )
+                    continue
+                image_name = self.runtime_harness._workspace_runtime_image_name(starter_root)
+                build_command = []
+                build_stdout_parts.append(
+                    f"[{deliverable.id}] Using runtime image {image_name} from the authored runtime plan."
+                )
+                if materialization.synced_paths:
+                    build_stdout_parts.append(
+                        f"[{deliverable.id}] Materialized dependency contract paths: {', '.join(materialization.synced_paths)}"
+                    )
+                self.runtime_harness._ensure_runtime_image_available(image_name)
+                runtime_image_ready = True
+                if self.runtime_harness._image_exists(image_name):
+                    any_cached = True
                 log_coursegen_event(
                     "sandbox_deliverable_support_services_starting",
                     workflow_run_id=workflow_run_id,
@@ -421,12 +476,12 @@ class DockerSandboxRunner:
                         self.runtime_harness._app_runtime_environment(starter_root)
                     ),
                     image_name,
-                    "sh",
-                    "-lc",
-                    self.runtime_harness._runtime_launch_script(
-                        workspace_path=starter_root,
-                        spec=spec,
-                        include_setup=True,
+                    *self.runtime_harness._runtime_shell_command(
+                        self.runtime_harness._runtime_launch_script(
+                            workspace_path=starter_root,
+                            spec=spec,
+                            include_setup=True,
+                        )
                     ),
                 ]
                 run_command = local_run_command
@@ -538,6 +593,8 @@ class DockerSandboxRunner:
                     error=check_error,
                 )
             except Exception as exc:  # noqa: BLE001
+                if not runtime_image_ready:
+                    all_builds_succeeded = False
                 all_runs_succeeded = False
                 logs = self.runtime_harness._container_logs(container_name) or ""
                 log_coursegen_event(
@@ -551,7 +608,7 @@ class DockerSandboxRunner:
                 deliverable_reports.append(
                     DeliverableSandboxReport(
                         deliverable_id=deliverable.id,
-                        compile_succeeded=True,
+                        compile_succeeded=runtime_image_ready,
                         runtime_succeeded=False,
                         stdout="",
                         stderr=logs,
@@ -648,7 +705,7 @@ class DockerSandboxRunner:
         manifest: dict,
         base_url: str,
     ) -> tuple[bool, str, str | None]:
-        command = str(manifest.get("visible_check_command") or "python checks/run_visible_checks.py")
+        command = str(manifest.get("visible_check_command") or "sh .coursegen/runtime/check_visible.sh")
         report = self.test_script_runner.run_suite(
             workspace_root=starter_root,
             command=command,

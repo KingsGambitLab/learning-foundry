@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -15,7 +16,12 @@ from app.domain.grading import LiveAssignmentGradeReport, LiveGradeTaskAgentRequ
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
-from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH, PREVIEW_LAUNCHER_PATH
+from app.services.task_agent_starter_templates import (
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VERIFY_SCRIPT_PATH,
+)
 
 
 class LearnerStudioError(RuntimeError):
@@ -27,6 +33,8 @@ def default_learner_studio_image() -> str:
 
 
 class LearnerStudioService:
+    _MANAGED_DOCKER_LABELS = {"coursegen.managed": "true"}
+
     def __init__(
         self,
         *,
@@ -35,6 +43,7 @@ class LearnerStudioService:
         build_timeout_s: int = 600,
         start_timeout_s: int = 90,
         host: str = "127.0.0.1",
+        minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
     ) -> None:
         self.docker_binary = docker_binary
@@ -42,6 +51,7 @@ class LearnerStudioService:
         self.build_timeout_s = build_timeout_s
         self.start_timeout_s = start_timeout_s
         self.host = host
+        self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
 
     def launch_editor(
@@ -221,12 +231,12 @@ class LearnerStudioService:
                 ),
                 *self._docker_env_args(self._app_runtime_environment(workspace_path)),
                 image_name,
-                "sh",
-                "-lc",
-                self._runtime_launch_script(
-                    workspace_path=workspace_path,
-                    spec=spec,
-                    include_setup=True,
+                *self._runtime_shell_command(
+                    self._runtime_launch_script(
+                        workspace_path=workspace_path,
+                        spec=spec,
+                        include_setup=True,
+                    )
                 ),
             ]
             result = subprocess.run(
@@ -273,54 +283,23 @@ class LearnerStudioService:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _runtime_commands(self, workspace_path: Path, *, phase: str) -> list[str]:
-        manifest = self._runtime_manifest(workspace_path)
-        runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
-        steps = runtime_plan.get(f"{phase}_steps") or []
-        commands: list[str] = []
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            target = step.get("target_service_id")
-            command = step.get("command")
-            if command and target in (None, "app"):
-                commands.append(str(command))
-        return commands
-
-    def _setup_commands(self, workspace_path: Path) -> list[str]:
-        return self._runtime_commands(workspace_path, phase="setup")
-
-    def _verify_commands(self, workspace_path: Path) -> list[str]:
-        return self._runtime_commands(workspace_path, phase="verify")
-
-    def _runtime_bootstrap_commands(self, workspace_path: Path) -> list[str]:
-        manifest = self._runtime_manifest(workspace_path)
-        runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
-        language = str(runtime_plan.get("implementation_language") or "").strip().lower()
-        package_manager = str(runtime_plan.get("package_manager") or "").strip().lower()
-        commands: list[str] = []
-        if language in {"typescript", "javascript"} and package_manager in {"pnpm", "yarn"}:
-            commands.append("corepack enable")
-        return commands
-
-    def _runtime_shell_exports(self, workspace_path: Path) -> list[str]:
-        manifest = self._runtime_manifest(workspace_path)
-        runtime_plan = manifest.get("runtime_plan") or (manifest.get("project_contract") or {}).get("runtime_plan") or {}
-        language = str(runtime_plan.get("implementation_language") or "").strip().lower()
-        package_manager = str(runtime_plan.get("package_manager") or "").strip().lower()
-        exports: list[str] = []
-        if language in {"typescript", "javascript"} and package_manager in {"pnpm", "yarn"}:
-            exports.append("export COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
-        return exports
+    def _runtime_script_command(self, workspace_path: Path, relative_path: str) -> str | None:
+        target = workspace_path / relative_path
+        if target.exists():
+            return f"sh {relative_path}"
+        return None
 
     def _preview_command(self, workspace_path: Path, spec: TaskAgentServiceSpec) -> str:
+        runtime_script = self._runtime_script_command(workspace_path, RUNTIME_RUN_SCRIPT_PATH)
+        if runtime_script is not None:
+            return runtime_script
         manifest = self._runtime_manifest(workspace_path)
         preview_command = manifest.get("preview_command")
         if isinstance(preview_command, str) and preview_command:
             return preview_command
         if spec.runtime_dependencies.preview_command:
             return spec.runtime_dependencies.preview_command
-        return f"python {PREVIEW_LAUNCHER_PATH} --host 0.0.0.0"
+        return "sh -c 'echo missing preview command >&2; exit 1'"
 
     def _runtime_launch_script(
         self,
@@ -332,20 +311,24 @@ class LearnerStudioService:
         lines = [
             "set -e",
             "export PORT=8000",
-            *self._runtime_shell_exports(workspace_path),
-            *self._runtime_bootstrap_commands(workspace_path),
-            *(self._setup_commands(workspace_path) if include_setup else []),
-            *[
-                line
-                for index, command in enumerate(self._verify_commands(workspace_path), start=1)
-                for line in (
-                    f"echo '[coursegen] verify step {index} started'",
-                    command,
-                )
-            ],
+            *(
+                [f"sh {RUNTIME_INSTALL_SCRIPT_PATH}"]
+                if include_setup and self._runtime_script_command(workspace_path, RUNTIME_INSTALL_SCRIPT_PATH)
+                else []
+            ),
+            *(
+                [f"sh {RUNTIME_VERIFY_SCRIPT_PATH}"]
+                if self._runtime_script_command(workspace_path, RUNTIME_VERIFY_SCRIPT_PATH)
+                else []
+            ),
             f"exec {self._preview_command(workspace_path, spec)}",
         ]
         return "\n".join(lines)
+
+    def _runtime_shell_command(self, launch_script: str) -> list[str]:
+        # Use a non-login shell so the authored runtime inherits the image PATH/env
+        # without shell-specific PATH rewrites (for example, Rust's cargo toolchain).
+        return ["sh", "-c", launch_script]
 
     def _healthcheck_path(self, workspace_path: Path, spec: TaskAgentServiceSpec) -> str:
         manifest = self._runtime_manifest(workspace_path)
@@ -436,6 +419,9 @@ class LearnerStudioService:
         return f"course-gen-runtime:{self._workspace_runtime_cache_key(workspace_path)[:24]}"
 
     def _workspace_runtime_image_name(self, workspace_path: Path) -> str:
+        dockerfile = workspace_path / "Dockerfile"
+        if dockerfile.exists():
+            return self._ensure_workspace_runtime_image(workspace_path)
         for service in self._runtime_services(workspace_path):
             if str(service.get("service_id")) != "app":
                 continue
@@ -452,9 +438,11 @@ class LearnerStudioService:
         image_tag = self._workspace_runtime_image_tag(workspace_path)
         if self._image_exists(image_tag):
             return image_tag
+        self._ensure_docker_build_capacity(workspace_path)
         command = [
             self.docker_binary,
             "build",
+            *self._docker_label_args({"coursegen.kind": "runtime"}),
             "-t",
             image_tag,
             ".",
@@ -482,6 +470,7 @@ class LearnerStudioService:
         if self._image_exists(image_tag):
             return image_tag
         with tempfile.TemporaryDirectory(prefix="course_gen_editor_image_") as temp_dir:
+            self._ensure_docker_build_capacity(Path(temp_dir))
             dockerfile = Path(temp_dir) / "Dockerfile"
             dockerfile.write_text(
                 "\n".join(
@@ -503,6 +492,7 @@ class LearnerStudioService:
                 [
                     self.docker_binary,
                     "build",
+                    *self._docker_label_args({"coursegen.kind": "editor"}),
                     "-t",
                     image_tag,
                     temp_dir,
@@ -517,6 +507,55 @@ class LearnerStudioService:
                 (result.stderr or result.stdout).strip() or "Could not build learner editor image."
             )
         return image_tag
+
+    def _docker_label_args(self, extra_labels: dict[str, str] | None = None) -> list[str]:
+        labels = dict(self._MANAGED_DOCKER_LABELS)
+        if extra_labels:
+            labels.update(extra_labels)
+        args: list[str] = []
+        for key, value in sorted(labels.items()):
+            args.extend(["--label", f"{key}={value}"])
+        return args
+
+    def _free_disk_bytes(self, path: Path) -> int:
+        return int(shutil.disk_usage(path).free)
+
+    def _ensure_docker_build_capacity(self, path: Path) -> None:
+        if self._free_disk_bytes(path) >= self.minimum_free_disk_bytes:
+            return
+        self._reclaim_managed_docker_space()
+        if self._free_disk_bytes(path) >= self.minimum_free_disk_bytes:
+            return
+        free_gib = self._free_disk_bytes(path) / (1024**3)
+        required_gib = self.minimum_free_disk_bytes / (1024**3)
+        raise LearnerStudioError(
+            f"Insufficient free disk space for Docker builds ({free_gib:.1f} GiB free, "
+            f"{required_gib:.1f} GiB required after cleanup)."
+        )
+
+    def _reclaim_managed_docker_space(self) -> None:
+        commands = [
+            [self.docker_binary, "builder", "prune", "-af"],
+            [
+                self.docker_binary,
+                "image",
+                "prune",
+                "-af",
+                "--filter",
+                "label=coursegen.managed=true",
+            ],
+        ]
+        for command in commands:
+            try:
+                subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.build_timeout_s,
+                )
+            except subprocess.TimeoutExpired:
+                continue
 
     def _docker_env_args(self, environment: dict[str, str]) -> list[str]:
         args: list[str] = []

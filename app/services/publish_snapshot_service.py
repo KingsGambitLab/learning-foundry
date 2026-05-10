@@ -21,7 +21,7 @@ from app.services.learner_brief_builder import (
     render_learner_deliverable_markdown,
     render_learner_starter_readme,
 )
-from app.services.task_agent_starter_templates import default_preview_command, task_agent_starter_relative_paths
+from app.services.task_agent_starter_templates import default_preview_command
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -139,6 +139,7 @@ class PublishSnapshotService:
             )
             seed_files = self._workspace_seed_files(
                 spec=spec,
+                workflow_run=workflow_run,
                 workflow_run_id=workflow_run.id,
                 spec_deliverable_id=(spec_deliverable.id if spec_deliverable is not None else None),
                 content_markdown=content_markdown,
@@ -247,7 +248,7 @@ class PublishSnapshotService:
             brief=learner_brief,
             summary=course_deliverable_summary,
             learning_outcomes=learning_outcomes,
-            visible_check_command=spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py",
+            visible_check_command=spec.runtime_dependencies.visible_check_command or "sh .coursegen/runtime/check_visible.sh",
             preview_command=spec.runtime_dependencies.preview_command or default_preview_command(spec, host="127.0.0.1"),
             public_checks=public_checks,
         )
@@ -256,37 +257,31 @@ class PublishSnapshotService:
         self,
         *,
         spec,
+        workflow_run,
         workflow_run_id: str,
         spec_deliverable_id: str | None,
         content_markdown: str,
         starter_readme: str,
     ) -> list[LearnerPackageFile]:
         seed_files: list[LearnerPackageFile] = []
-        if spec_deliverable_id is None:
+        if spec_deliverable_id is None or workflow_run.artifacts.materialized_bundle is None:
             return seed_files
-        seed_files[:0] = [
-            self._read_seed_file(
-                workflow_run_id,
-                relative_path,
-                f"public/starter/{spec_deliverable_id}/{relative_path}",
-            )
-            for relative_path in task_agent_starter_relative_paths(spec)
-        ]
-        seen_paths = {file.relative_path for file in seed_files}
-        for relative_path in spec.runtime_dependencies.visible_fixture_files:
-            if not relative_path or relative_path in seen_paths:
+        starter_prefix = f"public/starter/{spec_deliverable_id}/"
+        for entry in workflow_run.artifacts.materialized_bundle.files:
+            if entry.visibility.value != "public":
                 continue
-            try:
-                seed_files.append(
-                    self._read_seed_file(
-                        workflow_run_id,
-                        relative_path,
-                        f"public/starter/{spec_deliverable_id}/{relative_path}",
-                    )
+            if not entry.relative_path.startswith(starter_prefix):
+                continue
+            relative_path = entry.relative_path.removeprefix(starter_prefix)
+            if not relative_path or relative_path == "README.md":
+                continue
+            seed_files.append(
+                self._read_seed_file(
+                    workflow_run_id,
+                    relative_path,
+                    entry.relative_path,
                 )
-                seen_paths.add(relative_path)
-            except FileNotFoundError:
-                continue
+            )
         return seed_files
 
     def _read_seed_file(

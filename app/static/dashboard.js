@@ -49,8 +49,13 @@
       const goalField = document.getElementById("goal");
       const goalCount = document.getElementById("goal-count");
       const creatorLanguageField = document.getElementById("creator-language");
+      const creatorLanguageVersionField = document.getElementById("creator-language-version");
       const creatorFrameworkField = document.getElementById("creator-framework");
+      const creatorFrameworkVersionField = document.getElementById("creator-framework-version");
+      const creatorPackageManagerField = document.getElementById("creator-package-manager");
       const creatorRuntimeRequirementsField = document.getElementById("creator-runtime-requirements");
+      const creatorDatabaseVersionField = document.getElementById("creator-database-version");
+      const creatorCacheVersionField = document.getElementById("creator-cache-version");
       const outcomesCount = document.getElementById("outcomes-count");
       const generateButton = document.getElementById("generate-button");
       const suggestOutcomesButton = document.getElementById("suggest-outcomes-button");
@@ -69,6 +74,14 @@
       const creatorStepTitle = document.getElementById("creator-step-title");
       const creatorPanes = Array.from(document.querySelectorAll(".creator-pane"));
       const creatorStepper = document.getElementById("creator-stepper");
+      const creatorStackContractUrl = state.creator_stack_contract_url;
+      const creatorStackCatalogState = {
+        catalog: null,
+        language_versions: [],
+        framework_versions: [],
+        database_versions: [],
+        cache_versions: [],
+      };
       const creatorState = {
         step: 1,
         goal: "",
@@ -76,9 +89,14 @@
         choices: {
           starter_type: "partial_implementation",
           implementation_language: null,
+          language_version: null,
           application_framework: null,
-          primary_database: "postgres",
-          cache_backend: "redis",
+          framework_version: null,
+          package_manager: null,
+          primary_database: null,
+          primary_database_version: null,
+          cache_backend: null,
+          cache_backend_version: null,
           tech_stack: [],
           data_sources: [],
         },
@@ -1251,9 +1269,14 @@
         return {
           starter_type: starter?.value || "partial_implementation",
           implementation_language: creatorLanguageField?.value?.trim() || null,
+          language_version: creatorLanguageVersionField?.value?.trim() || null,
           application_framework: creatorFrameworkField?.value?.trim() || null,
+          framework_version: creatorFrameworkVersionField?.value?.trim() || null,
+          package_manager: creatorPackageManagerField?.value?.trim() || null,
           primary_database: dbSelect?.value || null,
+          primary_database_version: creatorDatabaseVersionField?.value?.trim() || null,
           cache_backend: cacheSelect?.value || null,
+          cache_backend_version: creatorCacheVersionField?.value?.trim() || null,
           tech_stack: splitRuntimeRequirements(creatorRuntimeRequirementsField?.value),
           data_sources: Array.isArray(creatorState.choices.data_sources)
             ? creatorState.choices.data_sources.map((source) => ({ ...source }))
@@ -1266,9 +1289,14 @@
         creatorState.choices = {
           starter_type: choices.starter_type || "partial_implementation",
           implementation_language: choices.implementation_language || null,
+          language_version: choices.language_version || null,
           application_framework: choices.application_framework || null,
+          framework_version: choices.framework_version || null,
+          package_manager: choices.package_manager || null,
           primary_database: choices.primary_database || null,
+          primary_database_version: choices.primary_database_version || null,
           cache_backend: choices.cache_backend || null,
+          cache_backend_version: choices.cache_backend_version || null,
           tech_stack: Array.isArray(choices.tech_stack) ? [...choices.tech_stack] : [],
           data_sources: Array.isArray(choices.data_sources) ? choices.data_sources.map((source) => ({ ...source })) : [],
         };
@@ -1277,8 +1305,17 @@
         if (creatorLanguageField) {
           creatorLanguageField.value = choices.implementation_language || "";
         }
+        if (creatorLanguageVersionField) {
+          creatorLanguageVersionField.value = choices.language_version || "";
+        }
         if (creatorFrameworkField) {
           creatorFrameworkField.value = choices.application_framework || "";
+        }
+        if (creatorFrameworkVersionField) {
+          creatorFrameworkVersionField.value = choices.framework_version || "";
+        }
+        if (creatorPackageManagerField) {
+          creatorPackageManagerField.value = choices.package_manager || "";
         }
         if (creatorRuntimeRequirementsField) {
           creatorRuntimeRequirementsField.value = (choices.tech_stack || []).join(", ");
@@ -1287,85 +1324,59 @@
         if (dbSelect && choices.primary_database !== undefined) {
           dbSelect.value = choices.primary_database || "";
         }
+        if (creatorDatabaseVersionField) {
+          creatorDatabaseVersionField.value = choices.primary_database_version || "";
+        }
         const cacheSelect = document.getElementById("creator-cache");
         if (cacheSelect && choices.cache_backend !== undefined) {
           cacheSelect.value = choices.cache_backend || "";
         }
+        if (creatorCacheVersionField) {
+          creatorCacheVersionField.value = choices.cache_backend_version || "";
+        }
         renderCreatorDataSources();
+      }
+
+      function setSelectOptions(selectEl, options, placeholder) {
+        if (!selectEl) return;
+        const currentValue = selectEl.value;
+        const normalizedOptions = Array.isArray(options) ? options : [];
+        const optionMarkup = normalizedOptions.map((option) => {
+          const badge = option.recommended ? " (Recommended)" : "";
+          return `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label || option.value)}${badge}</option>`;
+        }).join("");
+        selectEl.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>${optionMarkup}`;
+        if (currentValue && normalizedOptions.some((option) => option.value === currentValue)) {
+          selectEl.value = currentValue;
+        }
+      }
+
+      function applyCreatorStackContractPayload(payload) {
+        if (!payload) return;
+        creatorStackCatalogState.catalog = payload.catalog || null;
+        creatorStackCatalogState.language_versions = Array.isArray(payload.language_versions) ? payload.language_versions : [];
+        creatorStackCatalogState.framework_versions = Array.isArray(payload.framework_versions) ? payload.framework_versions : [];
+        creatorStackCatalogState.database_versions = Array.isArray(payload.database_versions) ? payload.database_versions : [];
+        creatorStackCatalogState.cache_versions = Array.isArray(payload.cache_versions) ? payload.cache_versions : [];
+
+        const choices = payload.creator_choices || readCreatorChoices();
+        const catalog = creatorStackCatalogState.catalog || {};
+        const frameworks = catalog.frameworks_by_language?.[choices.implementation_language || ""] || [];
+        const packageManagers = catalog.package_managers_by_language?.[choices.implementation_language || ""] || [];
+
+        setSelectOptions(creatorFrameworkField, frameworks, "Suggest for me");
+        setSelectOptions(creatorPackageManagerField, packageManagers, "Suggest for me");
+        setSelectOptions(creatorLanguageVersionField, creatorStackCatalogState.language_versions, "Suggest from public sources");
+        setSelectOptions(creatorFrameworkVersionField, creatorStackCatalogState.framework_versions, "Suggest from public sources");
+        setSelectOptions(creatorDatabaseVersionField, creatorStackCatalogState.database_versions, "Suggest from public sources");
+        setSelectOptions(creatorCacheVersionField, creatorStackCatalogState.cache_versions, "Suggest from public sources");
+        applyCreatorChoicesToInputs(choices);
       }
 
       function friendlyDatabase(value) {
         const labels = { postgres: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", mongodb: "MongoDB" };
         if (!value) return "No database";
         return labels[value] || titleCase(value);
-      }
-
-      function defaultFrameworkForLanguage(language) {
-        const defaults = {
-          python: "fastapi",
-          typescript: "express",
-          javascript: "express",
-          go: "gin",
-          rust: "actix-web",
-        };
-        return defaults[language] || "";
-      }
-
-      function defaultRuntimeRequirementsForStack(language, framework) {
-        const normalizedLanguage = (language || "").trim().toLowerCase();
-        const normalizedFramework = (framework || "").trim().toLowerCase();
-        const effectiveFramework = normalizedFramework || defaultFrameworkForLanguage(normalizedLanguage);
-        const defaults = {
-          python: [`Python 3.12`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `uv`],
-          typescript: [`Node 22`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `pnpm`],
-          javascript: [`Node 22`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `pnpm`],
-          go: [`Go 1.23`, effectiveFramework ? friendlyFramework(effectiveFramework) : null],
-          rust: [`Rust stable`, effectiveFramework ? friendlyFramework(effectiveFramework) : null, `cargo`],
-        };
-        return (defaults[normalizedLanguage] || []).filter(Boolean).join(", ");
-      }
-
-      function matchesAutoSuggestion(currentValue, candidates = []) {
-        const normalizedCurrent = String(currentValue || "").trim().toLowerCase();
-        if (!normalizedCurrent) return true;
-        return candidates
-          .filter(Boolean)
-          .map((candidate) => String(candidate).trim().toLowerCase())
-          .includes(normalizedCurrent);
-      }
-
-      function syncStackFieldsFromLanguage(nextLanguage) {
-        if (!creatorFrameworkField || !creatorRuntimeRequirementsField) return;
-        const previousLanguage = creatorState.choices.implementation_language || "";
-        const currentFramework = creatorFrameworkField.value.trim();
-        const previousDefaultFramework = defaultFrameworkForLanguage(previousLanguage);
-        const nextDefaultFramework = defaultFrameworkForLanguage(nextLanguage);
-        const shouldUpdateFramework = matchesAutoSuggestion(currentFramework, [
-          "",
-          previousDefaultFramework,
-        ]);
-
-        let nextFramework = currentFramework;
-        if (shouldUpdateFramework) {
-          nextFramework = nextLanguage ? nextDefaultFramework : "";
-          creatorFrameworkField.value = nextFramework;
-        }
-
-        const currentRuntimeRequirements = creatorRuntimeRequirementsField.value.trim();
-        const previousDefaultRuntime = defaultRuntimeRequirementsForStack(previousLanguage, currentFramework || previousDefaultFramework);
-        const nextDefaultRuntime = defaultRuntimeRequirementsForStack(nextLanguage, nextFramework);
-        const shouldUpdateRuntimeRequirements = matchesAutoSuggestion(currentRuntimeRequirements, [
-          "",
-          previousDefaultRuntime,
-        ]);
-
-        if (shouldUpdateRuntimeRequirements) {
-          creatorRuntimeRequirementsField.value = nextLanguage ? nextDefaultRuntime : "";
-        }
-
-        creatorState.choices.implementation_language = nextLanguage || null;
-        creatorState.choices.application_framework = creatorFrameworkField.value.trim() || null;
-        creatorState.choices.tech_stack = splitRuntimeRequirements(creatorRuntimeRequirementsField.value);
       }
 
       function friendlyLanguage(value) {
@@ -1487,8 +1498,9 @@
         const choices = plan.creator_choices || creatorState.choices;
         const choicePills = [
           pill(`Starter: ${friendlyStarterType(choices.starter_type)}`),
-          ...(choices.implementation_language ? [pill(`Language: ${friendlyLanguage(choices.implementation_language)}`)] : []),
-          ...(choices.application_framework ? [pill(`Framework: ${friendlyFramework(choices.application_framework)}`)] : []),
+          ...(choices.implementation_language ? [pill(`Language: ${friendlyLanguage(choices.implementation_language)}${choices.language_version ? ` ${choices.language_version}` : ""}`)] : []),
+          ...(choices.application_framework ? [pill(`Framework: ${friendlyFramework(choices.application_framework)}${choices.framework_version ? ` ${choices.framework_version}` : ""}`)] : []),
+          ...(choices.package_manager ? [pill(`Build tool: ${choices.package_manager}`)] : []),
           pill(`Database: ${friendlyDatabase(choices.primary_database)}`),
           pill(`Cache: ${friendlyCache(choices.cache_backend)}`),
           ...(choices.tech_stack && choices.tech_stack.length ? [pill(`Runtime requirements: ${choices.tech_stack.length}`)] : []),
@@ -1594,40 +1606,26 @@
 
       async function fetchCreatorSetupSuggestions(opts = {}) {
         const goal = goalField.value.trim();
-        if (goal.length < 10) {
+        if (goal.length < 10 || !creatorStackContractUrl) {
           return false;
         }
-        const currentChoices = readCreatorChoices();
         try {
-          const response = await fetch("/v1/designs/infer", {
+          const response = await fetch(creatorStackContractUrl, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              title: goal.slice(0, 80),
-              problem_statement: goal,
-              learning_outcomes: creatorState.outcomes,
-              starter_type: currentChoices.starter_type,
-              implementation_language: currentChoices.implementation_language,
-              application_framework: currentChoices.application_framework,
-              primary_database: currentChoices.primary_database,
-              cache_backend: currentChoices.cache_backend,
-              tech_stack: currentChoices.tech_stack,
-              data_sources: currentChoices.data_sources,
+              goal,
+              creator_setup: readCreatorChoices(),
             }),
           });
           if (!response.ok) {
             throw new Error(await extractDetail(response));
           }
           const payload = await response.json();
-          const runtime = payload.design_spec?.runtime_dependencies || {};
-          const nextChoices = {
-            ...currentChoices,
-            implementation_language: currentChoices.implementation_language || runtime.implementation_language || null,
-            application_framework: currentChoices.application_framework || runtime.application_framework || null,
-            primary_database: currentChoices.primary_database || runtime.primary_database || null,
-            cache_backend: currentChoices.cache_backend || runtime.cache_backend || null,
-          };
-          applyCreatorChoicesToInputs(nextChoices);
+          applyCreatorStackContractPayload(payload);
+          if (!opts.silentMessage && Array.isArray(payload.notes) && payload.notes.length) {
+            setMessage(formMessage, "info", payload.notes.join(" "));
+          }
           return true;
         } catch (error) {
           if (!opts.silentMessage) {
@@ -1831,17 +1829,36 @@
         creatorState.choices = {
           starter_type: "partial_implementation",
           implementation_language: null,
+          language_version: null,
           application_framework: null,
-          primary_database: "postgres",
-          cache_backend: "redis",
+          framework_version: null,
+          package_manager: null,
+          primary_database: null,
+          primary_database_version: null,
+          cache_backend: null,
+          cache_backend_version: null,
           tech_stack: [],
           data_sources: [],
         };
         creatorState.plan = null;
+        creatorStackCatalogState.catalog = null;
+        creatorStackCatalogState.language_versions = [];
+        creatorStackCatalogState.framework_versions = [];
+        creatorStackCatalogState.database_versions = [];
+        creatorStackCatalogState.cache_versions = [];
         if (goalField) goalField.value = "";
         if (creatorLanguageField) creatorLanguageField.value = "";
-        if (creatorFrameworkField) creatorFrameworkField.value = "";
+        setSelectOptions(creatorLanguageVersionField, [], "Suggest from public sources");
+        setSelectOptions(creatorFrameworkField, [], "Suggest for me");
+        setSelectOptions(creatorFrameworkVersionField, [], "Suggest from public sources");
+        setSelectOptions(creatorPackageManagerField, [], "Suggest for me");
         if (creatorRuntimeRequirementsField) creatorRuntimeRequirementsField.value = "";
+        const creatorDatabaseField = document.getElementById("creator-database");
+        if (creatorDatabaseField) creatorDatabaseField.value = "";
+        setSelectOptions(creatorDatabaseVersionField, [], "Suggest from public sources");
+        const creatorCacheField = document.getElementById("creator-cache");
+        if (creatorCacheField) creatorCacheField.value = "";
+        setSelectOptions(creatorCacheVersionField, [], "Suggest from public sources");
         if (creatorDataSourceFileInput) creatorDataSourceFileInput.value = "";
         if (creatorDataSourcePurpose) creatorDataSourcePurpose.value = defaultDataSourcePurpose();
         renderCreatorOutcomes();
@@ -2755,23 +2772,59 @@
 
       creatorLanguageField?.addEventListener("change", (event) => {
         const value = event.target?.value || "";
-        syncStackFieldsFromLanguage(value);
+        creatorState.choices.implementation_language = value || null;
+        creatorState.choices.application_framework = null;
+        creatorState.choices.framework_version = null;
+        creatorState.choices.package_manager = null;
+        creatorState.choices.language_version = null;
+        if (creatorFrameworkField) creatorFrameworkField.value = "";
+        if (creatorFrameworkVersionField) creatorFrameworkVersionField.value = "";
+        if (creatorPackageManagerField) creatorPackageManagerField.value = "";
+        if (creatorLanguageVersionField) creatorLanguageVersionField.value = "";
+        fetchCreatorSetupSuggestions({ silentMessage: true });
       });
 
       creatorFrameworkField?.addEventListener("change", () => {
-        if (!creatorLanguageField || !creatorRuntimeRequirementsField) return;
-        const language = creatorLanguageField.value || "";
-        const currentFramework = creatorFrameworkField.value.trim();
-        const previousFramework = creatorState.choices.application_framework || defaultFrameworkForLanguage(language);
-        const previousRuntime = defaultRuntimeRequirementsForStack(language, previousFramework);
-        const currentRuntime = creatorRuntimeRequirementsField.value.trim();
-        if (matchesAutoSuggestion(currentRuntime, ["", previousRuntime])) {
-          creatorRuntimeRequirementsField.value = language
-            ? defaultRuntimeRequirementsForStack(language, currentFramework)
-            : "";
-        }
-        creatorState.choices.application_framework = currentFramework || null;
-        creatorState.choices.tech_stack = splitRuntimeRequirements(creatorRuntimeRequirementsField.value);
+        creatorState.choices.application_framework = creatorFrameworkField.value.trim() || null;
+        creatorState.choices.framework_version = null;
+        if (creatorFrameworkVersionField) creatorFrameworkVersionField.value = "";
+        fetchCreatorSetupSuggestions({ silentMessage: true });
+      });
+
+      creatorLanguageVersionField?.addEventListener("change", () => {
+        creatorState.choices.language_version = creatorLanguageVersionField.value.trim() || null;
+      });
+
+      creatorFrameworkVersionField?.addEventListener("change", () => {
+        creatorState.choices.framework_version = creatorFrameworkVersionField.value.trim() || null;
+      });
+
+      creatorPackageManagerField?.addEventListener("change", () => {
+        creatorState.choices.package_manager = creatorPackageManagerField.value.trim() || null;
+      });
+
+      creatorDatabaseVersionField?.addEventListener("change", () => {
+        creatorState.choices.primary_database_version = creatorDatabaseVersionField.value.trim() || null;
+      });
+
+      creatorCacheVersionField?.addEventListener("change", () => {
+        creatorState.choices.cache_backend_version = creatorCacheVersionField.value.trim() || null;
+      });
+
+      document.getElementById("creator-database")?.addEventListener("change", (event) => {
+        const nextValue = event.target?.value || null;
+        creatorState.choices.primary_database = nextValue;
+        creatorState.choices.primary_database_version = null;
+        if (creatorDatabaseVersionField) creatorDatabaseVersionField.value = "";
+        fetchCreatorSetupSuggestions({ silentMessage: true });
+      });
+
+      document.getElementById("creator-cache")?.addEventListener("change", (event) => {
+        const nextValue = event.target?.value || null;
+        creatorState.choices.cache_backend = nextValue;
+        creatorState.choices.cache_backend_version = null;
+        if (creatorCacheVersionField) creatorCacheVersionField.value = "";
+        fetchCreatorSetupSuggestions({ silentMessage: true });
       });
 
       creatorStep3Next?.addEventListener("click", async () => {

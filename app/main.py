@@ -25,6 +25,7 @@ from app.services.lms_service import LMSService
 from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
+from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
 from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringService
 from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringService
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
@@ -77,7 +78,11 @@ async def lifespan(app: FastAPI):
         )
     if not hasattr(app.state, "task_agent_workspace_authoring_service"):
         app.state.task_agent_workspace_authoring_service = TaskAgentWorkspaceAuthoringService(
-            workspace_manager=app.state.assignment_workspace_manager
+            workspace_manager=app.state.assignment_workspace_manager,
+            repo_authoring_service=OpenAIStarterRepoAuthoringService(
+                enabled=True,
+                env_file=os.environ.get("COURSE_GEN_OPENAI_ENV_FILE"),
+            ),
         )
     if not hasattr(app.state, "task_agent_authoring_service"):
         app.state.task_agent_authoring_service = OpenAITaskAgentAuthoringService(

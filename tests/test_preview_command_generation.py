@@ -9,7 +9,7 @@ from app.domain.workflow import MaterializeBundleRequest
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
-from app.services.task_agent_starter_templates import PREVIEW_LAUNCHER_PATH, build_task_agent_starter_files
+from app.services.task_agent_starter_templates import RUNTIME_RUN_SCRIPT_PATH, build_task_agent_starter_files
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -27,7 +27,7 @@ def _inventory_design():
     return inferred.design_spec
 
 
-def test_python_starter_files_use_local_preview_launcher() -> None:
+def test_starter_files_use_runtime_run_script_for_preview() -> None:
     design_spec = _inventory_design()
     spec, _origin_template = build_task_agent_scaffold(
         title="Inventory Reservation Service",
@@ -36,16 +36,15 @@ def test_python_starter_files_use_local_preview_launcher() -> None:
     )
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
-    assert PREVIEW_LAUNCHER_PATH in starter_files
     manifest_payload = json.loads(starter_files[".coursegen/deliverable.json"])
-    assert manifest_payload["preview_command"] == f"python {PREVIEW_LAUNCHER_PATH} --host 0.0.0.0"
+    assert manifest_payload["preview_command"] == f"sh {RUNTIME_RUN_SCRIPT_PATH}"
 
     tasks_payload = json.loads(starter_files[".vscode/tasks.json"])
     preview_task = next(task for task in tasks_payload["tasks"] if task["label"] == "Preview app")
-    assert PREVIEW_LAUNCHER_PATH in preview_task["command"]
+    assert f"sh {RUNTIME_RUN_SCRIPT_PATH}" in preview_task["command"]
 
 
-def test_materialized_starter_readme_uses_local_preview_launcher() -> None:
+def test_materialized_starter_readme_uses_runtime_run_script() -> None:
     design_spec = _inventory_design()
     with tempfile.TemporaryDirectory() as temp_dir:
         store = SQLiteWorkflowStore(db_path=f"{temp_dir}/test.db")
@@ -70,8 +69,7 @@ def test_materialized_starter_readme_uses_local_preview_launcher() -> None:
             run.id,
             f"public/starter/{run.artifacts.task_agent_spec.deliverables[0].id}/README.md",
         ).content
-        assert f"python {PREVIEW_LAUNCHER_PATH}" in starter_readme
+        assert f"sh {RUNTIME_RUN_SCRIPT_PATH}" in starter_readme
         assert "uvicorn app:app" not in starter_readme
-
-        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / PREVIEW_LAUNCHER_PATH
-        assert launcher_path.exists()
+        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / ".coursegen/preview_app.py"
+        assert not launcher_path.exists()

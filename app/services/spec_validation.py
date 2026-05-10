@@ -85,13 +85,6 @@ def validate_task_agent_spec(spec: TaskAgentServiceSpec) -> ValidationResult:
                 f"Domain pack '{spec.domain_pack}' is marked '{domain_pack.risk_class.value}'.",
             )
 
-    if not spec.runtime_dependencies.editable_files:
-        add_issue(
-            ValidationLevel.error,
-            "missing_editable_files",
-            "runtime_dependencies.editable_files",
-            "The runtime dependency spec must declare which learner files are editable.",
-        )
     if spec.assessment_strategy.public_checks_required and spec.runtime_dependencies.visible_check_command is None:
         add_issue(
             ValidationLevel.error,

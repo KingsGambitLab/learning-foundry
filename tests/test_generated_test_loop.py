@@ -4,15 +4,18 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from app.domain.registry import PackageType
 from app.domain.sandbox import SandboxExecutionResult, SandboxExecutionStatus
 from app.domain.workflow import MaterializeBundleRequest, WorkflowNodeStatus
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
+from app.services.dependency_contract_materializer import DependencyContractMaterializationResult
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.generated_test_harness import BaselineValidationResult, GeneratedTestBaselineVerifier
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
+from app.services.learner_studio_service import LearnerStudioError
 from app.services.openai_test_script_authoring import (
     TestScriptAuthoringResult as _TestScriptAuthoringResult,
     TestScriptAuthoringSource as _TestScriptAuthoringSource,
@@ -36,6 +39,27 @@ class _NoOpTestAuthoringService:
             notes=[],
             message="Left the current generated test scripts in place.",
             available=False,
+        )
+
+
+class _FailingDependencyContractMaterializer:
+    def materialize(self, *, deliverable_id, **kwargs):  # noqa: ANN003
+        return DependencyContractMaterializationResult(
+            deliverable_id=deliverable_id,
+            attempted=True,
+            succeeded=False,
+            image_name="rust:1.82-bookworm",
+            stderr="lockfile generation failed",
+            error="Dependency contract materialization failed before runtime boot.",
+        )
+
+
+class _NoOpDependencyContractMaterializer:
+    def materialize(self, *, deliverable_id, **kwargs):  # noqa: ANN003
+        return DependencyContractMaterializationResult(
+            deliverable_id=deliverable_id,
+            attempted=False,
+            succeeded=True,
         )
 
 
@@ -122,7 +146,7 @@ class GeneratedTestLoopTests(unittest.TestCase):
             latest = updated["node_executions"][-1]
 
         self.assertEqual(latest.status, WorkflowNodeStatus.failed)
-        self.assertTrue(any(finding.code == "generated_test_scripts_not_authored" for finding in latest.findings))
+        self.assertTrue(any(finding.code == "starter_repo_bundle_not_authored" for finding in latest.findings))
 
     def test_authoring_tests_stays_on_the_current_authoring_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -146,6 +170,62 @@ class GeneratedTestLoopTests(unittest.TestCase):
 
         self.assertEqual(latest.attempt, 1)
         self.assertEqual(updated["authoring_attempt"], 1)
+
+    def test_sandbox_runner_converts_runtime_image_build_failure_into_failed_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+
+            runner = DockerSandboxRunner(
+                dependency_contract_materializer=_NoOpDependencyContractMaterializer()
+            )
+            with patch.object(
+                runner.runtime_harness,
+                "_workspace_runtime_image_name",
+                side_effect=LearnerStudioError("runtime image build failed"),
+            ):
+                result = runner._execute_starter_harness(
+                    workspace_root=Path(workspace.public_dir),
+                    spec=spec,
+                    workflow_run_id=run.id,
+                    now=datetime.now(UTC),
+                    started=0.0,
+                )
+
+        self.assertEqual(result.status, SandboxExecutionStatus.failed)
+        self.assertFalse(result.build_succeeded)
+        self.assertTrue(result.deliverable_reports)
+        self.assertIn("runtime image build failed", result.deliverable_reports[0].error or "")
+
+    def test_sandbox_runner_converts_dependency_contract_materialization_failure_into_failed_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+
+            runner = DockerSandboxRunner(
+                dependency_contract_materializer=_FailingDependencyContractMaterializer()
+            )
+            result = runner._execute_starter_harness(
+                workspace_root=Path(workspace.public_dir),
+                spec=spec,
+                workflow_run_id=run.id,
+                now=datetime.now(UTC),
+                started=0.0,
+            )
+
+        self.assertEqual(result.status, SandboxExecutionStatus.failed)
+        self.assertFalse(result.build_succeeded)
+        self.assertTrue(result.deliverable_reports)
+        self.assertIn(
+            "Dependency contract materialization failed before runtime boot.",
+            result.deliverable_reports[0].error or "",
+        )
 
 
 if __name__ == "__main__":

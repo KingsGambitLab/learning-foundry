@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from enum import Enum
 from pathlib import Path
@@ -13,7 +14,16 @@ from app.services.public_surface_quality import (
     endpoint_uses_archetype_words,
     endpoint_uses_title_slug,
 )
-from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH
+from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
+from app.services.task_agent_starter_templates import (
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VERIFY_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+    build_task_agent_starter_files,
+)
 
 
 class BundleValidationLevel(str, Enum):
@@ -80,14 +90,37 @@ def _expected_public_artifacts(spec: TaskAgentServiceSpec) -> dict[str, tuple[st
             "learner",
             deliverable.id,
         )
+        expected[f"{deliverable_root}/{RUNTIME_INSTALL_SCRIPT_PATH}"] = (
+            "runtime_install_script",
+            "operator",
+            deliverable.id,
+        )
+        expected[f"{deliverable_root}/{RUNTIME_VERIFY_SCRIPT_PATH}"] = (
+            "runtime_verify_script",
+            "operator",
+            deliverable.id,
+        )
+        expected[f"{deliverable_root}/{RUNTIME_RUN_SCRIPT_PATH}"] = (
+            "runtime_run_script",
+            "operator",
+            deliverable.id,
+        )
+        expected[f"{deliverable_root}/{RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"] = (
+            "runtime_visible_check_script",
+            "operator",
+            deliverable.id,
+        )
+        expected[f"{deliverable_root}/{RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"] = (
+            "runtime_hidden_check_script",
+            "operator",
+            deliverable.id,
+        )
         expected[f"{deliverable_root}/.vscode/tasks.json"] = ("vscode_tasks", "learner", deliverable.id)
         expected[f"{deliverable_root}/{HIDDEN_MANIFEST_PATH}"] = (
             "starter_manifest",
             "operator",
             deliverable.id,
         )
-        for entrypoint_path in _primary_editable_paths(spec, deliverable):
-            expected[f"{deliverable_root}/{entrypoint_path}"] = ("starter_entrypoint", "learner", deliverable.id)
     return expected
 
 
@@ -118,12 +151,7 @@ def _read_text(bundle: MaterializedBundle, relative_path: str) -> str:
 
 
 def _primary_editable_paths(spec: TaskAgentServiceSpec, deliverable: DeliverableSpec) -> list[str]:
-    starter_surface = deliverable.learner_starter_surface
-    if starter_surface is not None and starter_surface.primary_editable_paths:
-        return list(starter_surface.primary_editable_paths)
-    if spec.runtime_dependencies.editable_files:
-        return list(spec.runtime_dependencies.editable_files)
-    return ["app.py"]
+    return learner_editable_paths_for_deliverable(spec, deliverable)
 
 
 def _iter_local_file_references(content: str) -> list[str]:
@@ -161,6 +189,7 @@ def _validate_starter_readme(
     content: str,
     reference_root: Path,
     spec: TaskAgentServiceSpec,
+    check_local_refs: bool = True,
 ) -> None:
     published_endpoints = _published_endpoint_identities(spec)
     for section in _STARTER_README_REQUIRED_SECTIONS:
@@ -173,7 +202,7 @@ def _validate_starter_readme(
                 message=f"Starter README is missing the required section `{section}`.",
             )
     for reference in _iter_local_file_references(content):
-        if not (reference_root / reference).exists():
+        if check_local_refs and not (reference_root / reference).exists():
             _add_issue(
                 issues,
                 level=BundleValidationLevel.error,
@@ -376,6 +405,58 @@ def validate_materialized_bundle(
 
     for deliverable in spec.deliverables:
         starter_root = Path(bundle.root_dir) / "public" / "starter" / deliverable.id
+        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+        manifest_payload: dict[str, object] = {}
+        if manifest_path.exists():
+            try:
+                manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                _add_issue(
+                    errors,
+                    level=BundleValidationLevel.error,
+                    code="starter_manifest_invalid_json",
+                    relative_path=str(manifest_path.relative_to(bundle.root_dir)),
+                    message="Starter manifest must contain valid JSON.",
+                )
+        starter_repo_bundle = (
+            manifest_payload.get("starter_repo_bundle")
+            if isinstance(manifest_payload, dict)
+            else {}
+        ) or {}
+        runtime_protocol_bundle = (
+            manifest_payload.get("runtime_protocol_bundle")
+            if isinstance(manifest_payload, dict)
+            else {}
+        ) or {}
+        starter_repo_source = str(
+            starter_repo_bundle.get("source")
+            if isinstance(starter_repo_bundle, dict)
+            else ""
+        ).strip().lower()
+        starter_repo_authored_paths = sorted(
+            str(path).strip()
+            for path in (
+                starter_repo_bundle.get("authored_paths")
+                if isinstance(starter_repo_bundle, dict)
+                else []
+            )
+            if str(path).strip()
+        )
+        runtime_protocol_source = str(
+            runtime_protocol_bundle.get("source")
+            if isinstance(runtime_protocol_bundle, dict)
+            else ""
+        ).strip().lower()
+        runtime_protocol_authored_paths = sorted(
+            str(path).strip()
+            for path in (
+                runtime_protocol_bundle.get("authored_paths")
+                if isinstance(runtime_protocol_bundle, dict)
+                else []
+            )
+            if str(path).strip()
+        )
+        default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
         readme_path = starter_root / "README.md"
         if readme_path.exists():
             _validate_starter_readme(
@@ -384,16 +465,96 @@ def validate_materialized_bundle(
                 content=readme_path.read_text(encoding="utf-8"),
                 reference_root=starter_root,
                 spec=spec,
+                check_local_refs=starter_repo_source not in {"", "starter_default"},
             )
+        if starter_repo_source in {"", "starter_default"}:
+            _add_issue(
+                warnings,
+                level=BundleValidationLevel.warning,
+                code="starter_repo_bundle_not_authored",
+                relative_path=str(manifest_path.relative_to(bundle.root_dir)),
+                message="Starter repo files were not authored from the real starter workspace.",
+            )
+        if runtime_protocol_source in {"", "starter_default"}:
+            _add_issue(
+                warnings,
+                level=BundleValidationLevel.warning,
+                code="runtime_protocol_bundle_not_authored",
+                relative_path=str(manifest_path.relative_to(bundle.root_dir)),
+                message="Runtime install/verify/run files were not authored from the real starter workspace.",
+            )
+        else:
+            missing_runtime_paths = [
+                relative_path
+                for relative_path in (
+                    "Dockerfile",
+                    RUNTIME_INSTALL_SCRIPT_PATH,
+                    RUNTIME_VERIFY_SCRIPT_PATH,
+                    RUNTIME_RUN_SCRIPT_PATH,
+                )
+                if not (starter_root / relative_path).exists()
+                or relative_path not in runtime_protocol_authored_paths
+            ]
+            default_runtime_paths = [
+                relative_path
+                for relative_path in (
+                    "Dockerfile",
+                    RUNTIME_INSTALL_SCRIPT_PATH,
+                    RUNTIME_VERIFY_SCRIPT_PATH,
+                    RUNTIME_RUN_SCRIPT_PATH,
+                )
+                if (starter_root / relative_path).exists()
+                and (starter_root / relative_path).read_text(encoding="utf-8")
+                == default_starter_files.get(relative_path, "")
+            ]
+            if missing_runtime_paths or default_runtime_paths:
+                _add_issue(
+                    errors,
+                    level=BundleValidationLevel.error,
+                    code="runtime_protocol_bundle_incomplete",
+                    relative_path=str(manifest_path.relative_to(bundle.root_dir)),
+                    message=(
+                        "Runtime protocol must be authored as a complete bundle. "
+                        f"Missing declared runtime files: {', '.join(missing_runtime_paths) or 'none'}. "
+                        f"Default placeholders still present: {', '.join(default_runtime_paths) or 'none'}."
+                    ),
+                )
         for relative_path in _primary_editable_paths(spec, deliverable):
             entrypoint_path = starter_root / relative_path
             if not entrypoint_path.exists():
+                if starter_repo_source not in {"", "starter_default"}:
+                    _add_issue(
+                        errors,
+                        level=BundleValidationLevel.error,
+                        code="starter_primary_editable_missing",
+                        relative_path=str((starter_root / relative_path).relative_to(bundle.root_dir)),
+                        message="Primary learner-owned files must exist in the published starter workspace.",
+                    )
                 continue
             _validate_starter_entrypoint_honesty(
                 errors,
                 relative_path=str(entrypoint_path.relative_to(bundle.root_dir)),
                 content=entrypoint_path.read_text(encoding="utf-8"),
             )
+        if starter_repo_source not in {"", "starter_default"}:
+            required_editable_paths = _primary_editable_paths(spec, deliverable)
+            missing_repo_paths = [
+                relative_path
+                for relative_path in required_editable_paths
+                if not (starter_root / relative_path).exists()
+                or relative_path not in starter_repo_authored_paths
+            ]
+            if missing_repo_paths:
+                _add_issue(
+                    errors,
+                    level=BundleValidationLevel.error,
+                    code="starter_repo_bundle_incomplete",
+                    relative_path=str(manifest_path.relative_to(bundle.root_dir)),
+                    message=(
+                        "Starter repo bundle is marked authored, but primary learner-owned files are still missing "
+                        f"or undeclared: {', '.join(missing_repo_paths)}."
+                    ),
+                )
 
     course_readme_path = Path(bundle.root_dir) / "public" / "README.md"
     if course_readme_path.exists():

@@ -15,12 +15,16 @@ from fastapi.testclient import TestClient
 
 from app.domain.ai import AIUsageSummary
 from app.domain.course import (
+    CreatorCourseSetupChoices,
+    CreatorStackCatalog,
+    CreatorStackCatalogOption,
     CourseAsyncOperation,
     CourseGenerationSource,
     CourseGenerationStatus,
     CreateCourseDeliverableRequest,
     GenerateCourseFromBriefRequest,
     GeneratedCoursePlan,
+    RecommendCreatorStackContractResponse,
 )
 from app.domain.grading import (
     AssignmentGradeReport,
@@ -53,13 +57,20 @@ from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.examples import get_generic_project_submission
 from app.services.intake_router import GenerationIntake
 from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
+from app.services.generated_test_harness import BaselineValidationResult
 from app.services.lms_service import LMSService
 from app.services.openai_course_planner import OpenAICoursePlanner
 from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
+from app.services.openai_repo_authoring import RepoAuthoringResult, RepoAuthoringSource
+from app.services.openai_test_script_authoring import (
+    TestScriptAuthoringResult,
+    TestScriptAuthoringSource,
+)
 from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services import openai_runtime_support
 from app.services.openai_task_agent_authoring import (
-    EvalCaseCustomization,
+    DeliverableCustomization,
+    PublicCheckCustomization,
     OpenAITaskAgentAuthoringService,
     TaskAgentCustomization,
     TaskAgentAuthoringResult,
@@ -67,13 +78,16 @@ from app.services.openai_task_agent_authoring import (
     TaskAgentAuthoringStatus,
 )
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
+from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 from app.services.learner_studio_service import LearnerStudioError
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
-    render_legacy_task_agent_root_app,
-    render_task_agent_root_app,
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VERIFY_SCRIPT_PATH,
 )
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
 from app.services.workflow_service import WorkflowService
@@ -202,6 +216,90 @@ class FakeMultilineOutcomePlanner(FakeLivePlanner):
         )
 
 
+class FakeStackCatalogService:
+    def describe_choices(self, choices: CreatorCourseSetupChoices) -> RecommendCreatorStackContractResponse:
+        creator_choices = choices.model_copy(
+            update={
+                "implementation_language": choices.implementation_language or "go",
+                "language_version": choices.language_version or "1.26",
+                "application_framework": choices.application_framework or "gin",
+                "framework_version": choices.framework_version or "1.12.0",
+                "package_manager": choices.package_manager or "go",
+                "primary_database": choices.primary_database,
+                "primary_database_version": choices.primary_database_version or ("18" if choices.primary_database else None),
+                "cache_backend": choices.cache_backend,
+                "cache_backend_version": choices.cache_backend_version or ("8" if choices.cache_backend else None),
+            }
+        )
+        return RecommendCreatorStackContractResponse(
+            creator_choices=creator_choices,
+            catalog=CreatorStackCatalog(
+                languages=[
+                    CreatorStackCatalogOption(value="go", label="Go", source_url="https://go.dev/dl/?mode=json", recommended=True),
+                ],
+                frameworks_by_language={
+                    "go": [
+                        CreatorStackCatalogOption(
+                            value="gin",
+                            label="Gin",
+                            source_url="https://pkg.go.dev/github.com/gin-gonic/gin",
+                            recommended=True,
+                        )
+                    ]
+                },
+                package_managers_by_language={
+                    "go": [
+                        CreatorStackCatalogOption(value="go", label="go", recommended=True),
+                    ]
+                },
+                databases=[
+                    CreatorStackCatalogOption(
+                        value="postgres",
+                        label="PostgreSQL",
+                        source_url="https://hub.docker.com/_/postgres",
+                        recommended=True,
+                    )
+                ],
+                caches=[
+                    CreatorStackCatalogOption(
+                        value="redis",
+                        label="Redis",
+                        source_url="https://hub.docker.com/_/redis",
+                        recommended=True,
+                    )
+                ],
+            ),
+            language_versions=[
+                CreatorStackCatalogOption(value="1.26", label="1.26", source_url="https://go.dev/dl/?mode=json", recommended=True),
+            ],
+            framework_versions=[
+                CreatorStackCatalogOption(
+                    value="1.12.0",
+                    label="1.12.0",
+                    source_url="https://pkg.go.dev/github.com/gin-gonic/gin",
+                    recommended=True,
+                )
+            ],
+            database_versions=[
+                CreatorStackCatalogOption(
+                    value="18",
+                    label="18",
+                    source_url="https://hub.docker.com/_/postgres",
+                    recommended=True,
+                )
+            ],
+            cache_versions=[
+                CreatorStackCatalogOption(
+                    value="8",
+                    label="8",
+                    source_url="https://hub.docker.com/_/redis",
+                    recommended=True,
+                )
+            ],
+            notes=["Creator approves the final stack contract before generation."],
+        )
+
+
 class FakeSandboxRunner:
     def __init__(self, *, success: bool = True) -> None:
         self.success = success
@@ -308,6 +406,182 @@ class FakeTaskAgentAuthoringService:
         )
 
 
+class _AlwaysValidBaselineVerifier:
+    def verify_deliverable(self, **kwargs):  # noqa: ANN003
+        return BaselineValidationResult(valid=True)
+
+
+class FakeRepoAuthoringService:
+    def author_workspace_repo(self, run, **kwargs):  # noqa: ANN003
+        spec = run.artifacts.task_agent_spec
+        workspace = run.artifacts.workspace_snapshot
+        if spec is None or workspace is None:
+            return run, RepoAuthoringResult(
+                source=RepoAuthoringSource.unavailable,
+                updated_files=[],
+                usage=None,
+                notes=[],
+                message="fake repo authoring unavailable",
+                available=False,
+            )
+        updated_files: list[str] = []
+        public_root = Path(workspace.public_dir)
+        for deliverable in spec.deliverables:
+            starter_root = public_root / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            if not manifest_path.exists():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            starter_surface = deliverable.learner_starter_surface
+            editable_paths = (
+                list(starter_surface.primary_editable_paths)
+                if starter_surface is not None and starter_surface.primary_editable_paths
+                else list(spec.runtime_dependencies.editable_files)
+            )
+            if not editable_paths:
+                editable_paths = ["app.py"]
+            for relative_path in editable_paths:
+                target = starter_root / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if relative_path.endswith(".py"):
+                    target.write_text(
+                        "\n".join(
+                            [
+                                "from fastapi import FastAPI",
+                                "",
+                                "app = FastAPI()",
+                                "",
+                                "@app.get('/health')",
+                                "def health():",
+                                "    return {'ok': True}",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    target.write_text("// fake authored repo file\n", encoding="utf-8")
+                updated_files.append(str(target.relative_to(workspace.root_dir)))
+            dockerfile = starter_root / "Dockerfile"
+            dockerfile.write_text(
+                "\n".join(
+                    [
+                        "FROM python:3.12-slim",
+                        "WORKDIR /workspace",
+                        "COPY . /workspace",
+                        "RUN sh .coursegen/runtime/install.sh",
+                        'CMD ["sh", ".coursegen/runtime/run.sh"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            install_script = starter_root / RUNTIME_INSTALL_SCRIPT_PATH
+            install_script.parent.mkdir(parents=True, exist_ok=True)
+            install_script.write_text("#!/usr/bin/env sh\nset -eu\nexit 0\n", encoding="utf-8")
+            verify_script = starter_root / RUNTIME_VERIFY_SCRIPT_PATH
+            verify_script.write_text("#!/usr/bin/env sh\nset -eu\nexit 0\n", encoding="utf-8")
+            run_script = starter_root / RUNTIME_RUN_SCRIPT_PATH
+            run_script.write_text(
+                "#!/usr/bin/env sh\nset -eu\npython -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}\n",
+                encoding="utf-8",
+            )
+            manifest["starter_repo_bundle"] = {
+                "source": "openai_live",
+                "generated_for_deliverable": deliverable.id,
+                "authored_paths": editable_paths,
+            }
+            manifest["runtime_protocol_bundle"] = {
+                "source": "openai_live",
+                "generated_for_deliverable": deliverable.id,
+                "authored_paths": [
+                    "Dockerfile",
+                    RUNTIME_INSTALL_SCRIPT_PATH,
+                    RUNTIME_VERIFY_SCRIPT_PATH,
+                    RUNTIME_RUN_SCRIPT_PATH,
+                ],
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            updated_files.extend(
+                [
+                    str(dockerfile.relative_to(workspace.root_dir)),
+                    str(install_script.relative_to(workspace.root_dir)),
+                    str(verify_script.relative_to(workspace.root_dir)),
+                    str(run_script.relative_to(workspace.root_dir)),
+                    str(manifest_path.relative_to(workspace.root_dir)),
+                ]
+            )
+        return run, RepoAuthoringResult(
+            source=RepoAuthoringSource.openai_live,
+            updated_files=updated_files,
+            usage=None,
+            notes=["Fake repo authoring populated learner-owned repo files and runtime protocol."],
+            message="fake repo authoring completed",
+            available=True,
+        )
+
+
+class FakeTestScriptAuthoringService:
+    def author_workspace_tests(self, run, **kwargs):  # noqa: ANN003
+        spec = run.artifacts.task_agent_spec
+        workspace = run.artifacts.workspace_snapshot
+        if spec is None or workspace is None:
+            return run, TestScriptAuthoringResult(
+                source=TestScriptAuthoringSource.unavailable,
+                updated_files=[],
+                usage=None,
+                notes=[],
+                message="fake test authoring unavailable",
+                available=False,
+            )
+        updated_files: list[str] = []
+        public_root = Path(workspace.public_dir)
+        passing_script = "\n".join(
+            [
+                "import json, os",
+                "payload = {'summary': 'ok', 'tests': [{'id': 'fake', 'title': 'fake', 'status': 'passed', 'summary': 'ok', 'diagnostics': []}]}",
+                "report_path = os.environ.get('REPORT_PATH')",
+                "if report_path:",
+                "    with open(report_path, 'w', encoding='utf-8') as fh:",
+                "        json.dump(payload, fh)",
+                "else:",
+                "    print(json.dumps(payload))",
+                "raise SystemExit(0)",
+                "",
+            ]
+        )
+        for deliverable in spec.deliverables:
+            starter_root = public_root / "starter" / deliverable.id
+            visible_path = starter_root / "checks" / "run_visible_checks.py"
+            hidden_path = starter_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+            visible_path.parent.mkdir(parents=True, exist_ok=True)
+            hidden_path.parent.mkdir(parents=True, exist_ok=True)
+            visible_path.write_text(passing_script, encoding="utf-8")
+            hidden_path.write_text(passing_script, encoding="utf-8")
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["generated_test_scripts"] = {
+                "source": "openai_live",
+                "generated_for_deliverable": deliverable.id,
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            updated_files.extend(
+                [
+                    str(visible_path.relative_to(workspace.root_dir)),
+                    str(hidden_path.relative_to(workspace.root_dir)),
+                    str(manifest_path.relative_to(workspace.root_dir)),
+                ]
+            )
+        return run, TestScriptAuthoringResult(
+            source=TestScriptAuthoringSource.openai_live,
+            updated_files=updated_files,
+            usage=None,
+            notes=["Fake test authoring populated visible and hidden scripts."],
+            message="fake test authoring completed",
+            available=True,
+        )
+
+
 class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
     def execute(self, run) -> SandboxExecutionResult:
         self.calls.append(run.id)
@@ -318,9 +592,30 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
         if run.artifacts.task_agent_spec is not None and workspace is not None:
             public_dir = Path(workspace.public_dir)
             for deliverable in run.artifacts.task_agent_spec.deliverables:
-                app_path = public_dir / "starter" / deliverable.id / "app.py"
+                editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+                compile_targets = [
+                    public_dir / "starter" / deliverable.id / relative_path
+                    for relative_path in editable_paths
+                    if relative_path.endswith(".py")
+                ]
+                content_targets = [
+                    public_dir / "starter" / deliverable.id / relative_path
+                    for relative_path in editable_paths
+                    if not relative_path.endswith(".py")
+                ]
+                missing_targets = [
+                    str((public_dir / "starter" / deliverable.id / relative_path).relative_to(public_dir))
+                    for relative_path in editable_paths
+                    if not (public_dir / "starter" / deliverable.id / relative_path).exists()
+                ]
                 try:
-                    py_compile.compile(str(app_path), doraise=True)
+                    if missing_targets:
+                        raise FileNotFoundError(f"Missing editable files: {', '.join(missing_targets)}")
+                    for target in compile_targets:
+                        py_compile.compile(str(target), doraise=True)
+                    for target in content_targets:
+                        if "BROKEN_STARTER_SENTINEL" in target.read_text(encoding="utf-8"):
+                            raise ValueError(f"Broken starter sentinel found in {target.relative_to(public_dir)}")
                     compile_succeeded = True
                     error = None
                 except Exception as exc:
@@ -359,17 +654,28 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
 
 
 class BrokenFirstWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
-    def __init__(self, workspace_manager: AssignmentWorkspaceManager) -> None:
-        super().__init__(workspace_manager=workspace_manager)
+    def __init__(self, workspace_manager: AssignmentWorkspaceManager, repo_authoring_service=None) -> None:  # noqa: ANN001
+        super().__init__(workspace_manager=workspace_manager, repo_authoring_service=repo_authoring_service)
         self.author_calls = 0
 
     def author_workspace(self, run):
         run, result = super().author_workspace(run)
         self.author_calls += 1
         if self.author_calls == 1 and run.artifacts.workspace_snapshot is not None:
-            broken_path = Path(run.artifacts.workspace_snapshot.public_dir) / "starter" / "deliverable_1" / "app.py"
-            broken_path.write_text("def broken(:\n", encoding="utf-8")
-            result.updated_files.append("public/starter/deliverable_1/app.py")
+            deliverable = run.artifacts.task_agent_spec.deliverables[0]
+            editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+            if not editable_paths:
+                return run, result
+            broken_path = (
+                Path(run.artifacts.workspace_snapshot.public_dir)
+                / "starter"
+                / deliverable.id
+                / editable_paths[0]
+            )
+            broken_path.parent.mkdir(parents=True, exist_ok=True)
+            broken_contents = "def broken(:\n" if broken_path.suffix == ".py" else "BROKEN_STARTER_SENTINEL\n"
+            broken_path.write_text(broken_contents, encoding="utf-8")
+            result.updated_files.append(str(broken_path.relative_to(run.artifacts.workspace_snapshot.root_dir)))
             result.message = "Injected a broken starter on the first authoring pass to exercise the repair loop."
         return run, result
 
@@ -662,7 +968,12 @@ class CourseGenCodexApiTests(unittest.TestCase):
         store = SQLiteWorkflowStore(db_path=f"{self.temp_dir.name}/test.db")
         self.fake_sandbox_runner = FakeSandboxRunner()
         self.workspace_manager = AssignmentWorkspaceManager(base_dir=f"{self.temp_dir.name}/workspaces")
-        self.workspace_authoring_service = TaskAgentWorkspaceAuthoringService(self.workspace_manager)
+        self.fake_repo_authoring_service = FakeRepoAuthoringService()
+        self.fake_test_authoring_service = FakeTestScriptAuthoringService()
+        self.workspace_authoring_service = TaskAgentWorkspaceAuthoringService(
+            self.workspace_manager,
+            repo_authoring_service=self.fake_repo_authoring_service,
+        )
         self.disabled_authoring_service = OpenAITaskAgentAuthoringService(enabled=False)
         self.creator_asset_service = CreatorAssetService(
             store,
@@ -670,9 +981,12 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         app.state.docker_sandbox_runner = self.fake_sandbox_runner
         app.state.task_agent_workspace_authoring_service = self.workspace_authoring_service
+        app.state.test_script_authoring_service = self.fake_test_authoring_service
         app.state.assignment_node_runtime = LangGraphAssignmentGraph(
             self.fake_sandbox_runner,
             workspace_authoring_service=self.workspace_authoring_service,
+            test_authoring_service=self.fake_test_authoring_service,
+            baseline_verifier=_AlwaysValidBaselineVerifier(),
         )
         app.state.task_agent_blackbox_runner = TaskAgentBlackBoxRunner()
         app.state.learner_feedback_service = OpenAILearnerFeedbackService(enabled=False)
@@ -1170,6 +1484,37 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertNotIn("Optimistic locking and retries in postgres", deliverable_titles)
         self.assertIn("shared production-ready codebase", body["plan"]["creator_summary"].lower())
 
+    def test_creator_stack_contract_endpoint_returns_structured_recommendations(self) -> None:
+        app.state.course_generation_service = CourseGenerationService(
+            app.state.course_workflow_service,
+            stack_catalog_service=FakeStackCatalogService(),
+        )
+        response = self.client.post(
+            "/v1/course-generation/creator-stack-contract",
+            json={
+                "goal": "Build a production-grade Go reservation service with Gin, Postgres, and Redis.",
+                "creator_setup": {
+                    "implementation_language": "go",
+                    "application_framework": "gin",
+                    "primary_database": "postgres",
+                    "cache_backend": "redis",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["creator_choices"]["implementation_language"], "go")
+        self.assertEqual(body["creator_choices"]["language_version"], "1.26")
+        self.assertEqual(body["creator_choices"]["application_framework"], "gin")
+        self.assertEqual(body["creator_choices"]["framework_version"], "1.12.0")
+        self.assertEqual(body["creator_choices"]["package_manager"], "go")
+        self.assertEqual(body["creator_choices"]["primary_database_version"], "18")
+        self.assertEqual(body["creator_choices"]["cache_backend_version"], "8")
+        self.assertEqual(body["catalog"]["languages"][0]["value"], "go")
+        self.assertEqual(body["language_versions"][0]["value"], "1.26")
+        self.assertEqual(body["framework_versions"][0]["value"], "1.12.0")
+        self.assertIn("Creator approves the final stack contract before generation.", body["notes"])
+
     def test_create_course_run_from_creator_plan_preserves_creator_choices(self) -> None:
         planned = self.client.post(
             "/v1/course-generation/creator-plan",
@@ -1181,8 +1526,15 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 ],
                 "creator_choices": {
                     "starter_type": "bare_stub",
+                    "implementation_language": "go",
+                    "language_version": "1.25",
+                    "application_framework": "gin",
+                    "framework_version": "1.11",
+                    "package_manager": "go",
                     "primary_database": "postgres",
+                    "primary_database_version": "17",
                     "cache_backend": "redis",
+                    "cache_backend_version": "8",
                 },
             },
         )
@@ -1195,8 +1547,21 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         body = created.json()
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "bare_stub")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["implementation_language"], "go")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["language_version"], "1.25")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["application_framework"], "gin")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["framework_version"], "1.11")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["package_manager"], "go")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["primary_database"], "postgres")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["primary_database_version"], "17")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["cache_backend"], "redis")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["cache_backend_version"], "8")
+        runtime_plan = body["shared_design_spec"]["project_contract"]["runtime_plan"]
+        self.assertEqual(runtime_plan["implementation_language"], "go")
+        self.assertEqual(runtime_plan["language_version"], "1.25")
+        self.assertEqual(runtime_plan["application_framework"], "gin")
+        self.assertEqual(runtime_plan["framework_version"], "1.11")
+        self.assertEqual(runtime_plan["package_manager"], "go")
         self.assertIsNotNone(body["shared_workflow_run_id"])
         self.assertEqual(
             body["goal"],
@@ -1595,244 +1960,6 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "manual_review")
         self.assertEqual(body["design_spec"]["risk_class"], "review_required")
 
-    def test_generic_project_example_example_validates(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage")
-        self.assertEqual(example.status_code, 200)
-        example_body = example.json()
-
-        response = self.client.post(
-            "/v1/specs/task-agent/validate",
-            json=example_body,
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertTrue(body["valid"])
-        self.assertEqual(body["errors"], [])
-        self.assertGreaterEqual(len(body["deliverable_gates"]), 8)
-        self.assertTrue(all(case["tags"] for case in example_body["eval_dataset"]["cases"]))
-
-    def test_validation_flags_unmapped_hidden_eval_case(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage").json()
-        for quality in example["qualities"]:
-            if "dataset_id" in quality["test"]:
-                quality["test"]["dataset_id"] = "different_eval_dataset"
-        example["eval_dataset"]["cases"].append(
-            {
-                "id": "orphan_eval_case",
-                "input": {
-                    "ticket_id": "T-999",
-                    "customer_message": "This case is not mapped to any review area.",
-                    "account_tier": "pro",
-                },
-                "expected_output": {
-                    "decision": "needs_info",
-                    "priority": "low",
-                    "response_summary": "We need more information.",
-                    "confidence": 0.2,
-                    "needs_human": False,
-                },
-                "must_use_any_of_tools": [],
-                "must_not_use_tools": [],
-                "tags": [],
-            }
-        )
-
-        response = self.client.post(
-            "/v1/specs/task-agent/validate",
-            json=example,
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertFalse(body["valid"])
-        self.assertIn("unmapped_eval_case", {error["code"] for error in body["errors"]})
-
-    def test_validation_flags_review_area_without_hidden_grader_coverage(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage").json()
-        for behavior in example["behaviors"]:
-            if behavior["first_required_in"] == "deliverable_6":
-                behavior["first_required_in"] = "deliverable_5"
-
-        response = self.client.post(
-            "/v1/specs/task-agent/validate",
-            json=example,
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertFalse(body["valid"])
-        self.assertIn("missing_hidden_grader_coverage", {error["code"] for error in body["errors"]})
-
-    def test_gate_computation_is_independent_for_review_areas(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage")
-        response = self.client.post(
-            "/v1/specs/task-agent/gates/deliverable_4",
-            json=example.json(),
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["deliverable_id"], "deliverable_4")
-        self.assertEqual(body["cumulative_deliverables"], ["deliverable_4"])
-        self.assertIn("approval_before_irreversible_reply", body["active_behavior_ids"])
-        self.assertNotIn("structured_output", body["active_behavior_ids"])
-        self.assertNotIn("dry_run_blocks_mutations", body["active_behavior_ids"])
-
-    def test_grader_plan_endpoint_expands_deliverable_dependencies(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage")
-        response = self.client.post(
-            "/v1/specs/task-agent/grader-plans/deliverable_5",
-            json=example.json(),
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["deliverable_id"], "deliverable_5")
-        self.assertEqual(body["total_tests"], 3)
-        entry_ids = {entry["test_id"] for entry in body["entries"]}
-        self.assertIn("fallback_on_tool_failure", entry_ids)
-        self.assertIn("dry_run_blocks_mutations", entry_ids)
-        self.assertIn("/run", body["endpoint_paths"])
-        self.assertNotIn("/approve/{id}", body["endpoint_paths"])
-        self.assertIn("search_kb", body["tool_ids"])
-
-    def test_task_agent_grading_endpoint_passes_reference_submission(self) -> None:
-        spec = self.client.get("/v1/examples/task-agent/support-triage")
-        submission = self.client.get("/v1/examples/task-agent/support-triage/submission")
-        response = self.client.post(
-            "/v1/specs/task-agent/grade/deliverable_8",
-            json={
-                "spec": spec.json(),
-                "submission": submission.json(),
-            },
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["status"], "passed")
-        self.assertEqual(body["passed_tests"], body["total_tests"])
-
-    def test_task_agent_grading_endpoint_catches_dry_run_regression(self) -> None:
-        spec = self.client.get("/v1/examples/task-agent/support-triage").json()
-        submission = self.client.get("/v1/examples/task-agent/support-triage/submission").json()
-        for run in submission["runs"]:
-            if run["run_id"] == "run-billing-dry-001":
-                for call in run["tool_calls"]:
-                    if call["tool_id"] == "send_reply":
-                        call["status"] = "ok"
-
-        response = self.client.post(
-            "/v1/specs/task-agent/grade/deliverable_5",
-            json={"spec": spec, "submission": submission},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        failing = {result["test_id"] for result in body["results"] if result["status"] == "failed"}
-        self.assertIn("dry_run_blocks_mutations", failing)
-
-    def test_task_agent_live_grading_endpoint_runs_black_box_probe(self) -> None:
-        self._install_mock_blackbox_runner()
-        spec = self.client.get("/v1/examples/task-agent/support-triage").json()
-
-        response = self.client.post(
-            "/v1/specs/task-agent/grade-live/deliverable_8",
-            json={
-                "spec": spec,
-                "live": {"base_url": "http://learner.test"},
-            },
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["grade_report"]["status"], "passed")
-        self.assertEqual(body["grade_report"]["passed_tests"], body["grade_report"]["total_tests"])
-        self.assertEqual(len(body["submission"]["runs"]), 3)
-
-    def test_task_agent_live_grading_tolerates_missing_tool_call_order(self) -> None:
-        reference_submission = get_generic_project_submission().model_dump(mode="json")
-        remaining_runs = list(reference_submission["runs"])
-        runtime_runs: dict[str, dict] = {}
-
-        def response(payload: dict, status_code: int = 200) -> httpx.Response:
-            return httpx.Response(status_code=status_code, json=payload)
-
-        def response_shape(run: dict) -> dict:
-            tool_calls = []
-            for call in run.get("tool_calls", []):
-                normalized = dict(call)
-                normalized.pop("order", None)
-                tool_calls.append(normalized)
-            return {
-                "output": run.get("output", {}),
-                "trace_events": run.get("trace_events", []),
-                "step_count": run.get("step_count", 0),
-                "latency_ms": run.get("latency_ms", 0),
-                "cost_usd": run.get("cost_usd", 0.0),
-                "tool_calls": tool_calls,
-                "approvals": run.get("approvals", []),
-                "escalations": run.get("escalations", []),
-                "failure_injections": run.get("failure_injections", []),
-                "fallback_actions": run.get("fallback_actions", []),
-                "resumed_after_pause": run.get("resumed_after_pause", False),
-                "success": run.get("success", True),
-                "quality_score": run.get("quality_score"),
-                "notes": run.get("notes", []),
-            }
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            path = request.url.path
-            payload = json.loads(request.content.decode() or "{}") if request.content else {}
-
-            if request.method == "POST" and path == "/run":
-                dry_run = bool(payload.get("dry_run", False))
-                run = next(run for run in remaining_runs if run.get("dry_run", False) == dry_run)
-                remaining_runs.remove(run)
-                runtime_runs[run["run_id"]] = run
-                return response({"run_id": run["run_id"], "status": "completed", **response_shape(run)})
-
-            if request.method == "GET" and path.startswith("/runs/"):
-                run_id = path.split("/")[-1]
-                run = runtime_runs[run_id]
-                return response({"run_id": run_id, "status": "completed", **response_shape(run)})
-
-            if request.method == "GET" and path.startswith("/trace/"):
-                run_id = path.split("/")[-1]
-                run = runtime_runs[run_id]
-                return response({"run_id": run_id, "events": run.get("trace_events", [])})
-
-            return response({"detail": "unknown route"}, status_code=404)
-
-        app.state.task_agent_blackbox_runner = TaskAgentBlackBoxRunner(
-            client_factory=lambda base_url, timeout_s: httpx.Client(
-                transport=httpx.MockTransport(handler),
-                base_url=base_url,
-                timeout=timeout_s,
-            )
-        )
-        spec = self.client.get("/v1/examples/task-agent/support-triage").json()
-
-        response_live = self.client.post(
-            "/v1/specs/task-agent/grade-live/deliverable_8",
-            json={
-                "spec": spec,
-                "live": {"base_url": "http://learner.test"},
-            },
-        )
-        self.assertEqual(response_live.status_code, 200)
-        body = response_live.json()
-        self.assertEqual(body["grade_report"]["status"], "passed")
-
-    def test_validation_catches_unknown_tool_reference(self) -> None:
-        example = self.client.get("/v1/examples/task-agent/support-triage").json()
-        example["behaviors"][1]["test"]["expectations"][0]["must_call_any_of"].append("nonexistent_tool")
-
-        response = self.client.post("/v1/specs/task-agent/validate", json=example)
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertFalse(body["valid"])
-        error_codes = {item["code"] for item in body["errors"]}
-        self.assertIn("unknown_tool_reference", error_codes)
-
     def test_workflow_run_creation_persists_task_agent_draft(self) -> None:
         response = self.client.post(
             "/v1/workflow-runs",
@@ -1854,7 +1981,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["stage"], "awaiting_hil_gate_1")
         self.assertEqual(body["pending_gate"], "gate_1_spec_review")
         self.assertEqual(body["artifacts"]["draft_kind"], "task_agent_spec")
-        self.assertEqual(body["artifacts"]["task_agent_spec"]["domain_pack"], "generic_project_example")
+        self.assertIsNone(body["artifacts"]["task_agent_spec"]["domain_pack"])
         self.assertGreaterEqual(len(body["artifacts"]["node_executions"]), 5)
         self.assertEqual(body["artifacts"]["node_executions"][0]["kind"], "authoring_runtime")
 
@@ -1894,7 +2021,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["artifacts"]["origin_template"], "openai_customized:generic_project_example")
+        self.assertTrue(body["artifacts"]["origin_template"].startswith("openai_customized:"))
         self.assertIn("Customized with fake OpenAI.", body["artifacts"]["notes"])
         self.assertEqual(body["artifacts"]["task_agent_spec"]["deliverables"][0]["title"], "OpenAI-authored foundation")
 
@@ -2054,6 +2181,8 @@ class CourseGenCodexApiTests(unittest.TestCase):
         app.state.assignment_node_runtime = LangGraphAssignmentGraph(
             failing_sandbox,
             workspace_authoring_service=self.workspace_authoring_service,
+            test_authoring_service=self.fake_test_authoring_service,
+            baseline_verifier=_AlwaysValidBaselineVerifier(),
             max_authoring_attempts=2,
             max_reviewer_attempts=2,
         )
@@ -2089,18 +2218,26 @@ class CourseGenCodexApiTests(unittest.TestCase):
         body = created.json()
         self.assertEqual(body["stage"], "blocked")
         self.assertEqual(body["status"], "blocked")
-        self.assertEqual(body["artifacts"]["review_summary"]["authoring"]["attempts_used"], 2)
+        self.assertEqual(body["artifacts"]["review_summary"]["authoring"]["attempts_used"], 1)
         self.assertTrue(body["artifacts"]["review_summary"]["authoring"]["exhausted"])
-        self.assertIn("Authoring loop exhausted", "\n".join(body["artifacts"]["review_summary"]["blockers"]))
+        self.assertIn(
+            "Retry produced no material spec changes",
+            "\n".join(body["artifacts"]["review_summary"]["blockers"]),
+        )
 
     def test_authoring_repair_loop_preserves_workspace_and_fixes_broken_deliverable_file(self) -> None:
         compile_sandbox = WorkspaceCompileSandboxRunner()
-        broken_workspace_authoring = BrokenFirstWorkspaceAuthoringService(self.workspace_manager)
+        broken_workspace_authoring = BrokenFirstWorkspaceAuthoringService(
+            self.workspace_manager,
+            repo_authoring_service=self.fake_repo_authoring_service,
+        )
         app.state.docker_sandbox_runner = compile_sandbox
         app.state.task_agent_workspace_authoring_service = broken_workspace_authoring
         app.state.assignment_node_runtime = LangGraphAssignmentGraph(
             compile_sandbox,
             workspace_authoring_service=broken_workspace_authoring,
+            test_authoring_service=self.fake_test_authoring_service,
+            baseline_verifier=_AlwaysValidBaselineVerifier(),
             max_authoring_attempts=3,
             max_reviewer_attempts=1,
         )
@@ -2138,15 +2275,17 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(body["artifacts"]["review_summary"]["authoring"]["attempts_used"], 2)
         node_kinds = [node["kind"] for node in body["artifacts"]["node_executions"]]
         self.assertIn("authoring_repair", node_kinds)
+        starter_surface = body["artifacts"]["task_agent_spec"]["deliverables"][0]["learner_starter_surface"]
+        editable_path = starter_surface["primary_editable_paths"][0]
 
         starter_path = (
             Path(body["artifacts"]["workspace_snapshot"]["public_dir"])
             / "starter"
             / "deliverable_1"
-            / "app.py"
+            / editable_path
         )
         source = starter_path.read_text(encoding="utf-8")
-        self.assertIn("create_app_from_manifest", source)
+        self.assertNotIn("BROKEN_STARTER_SENTINEL", source)
         self.assertNotIn("def broken(:", source)
 
     def test_workspace_repair_full_repair_rematerializes_learner_artifacts(self) -> None:
@@ -2286,38 +2425,6 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(workflow_ids, {body["shared_workflow_run_id"]})
         self.assertIsNotNone(body["shared_design_spec"])
         self.assertTrue(body["shared_design_spec"]["capabilities"]["tool_use_required"])
-
-    def test_course_review_reports_linked_workflow_state_and_bundle_paths(self) -> None:
-        created = self.client.post(
-            "/v1/course-runs",
-            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
-        )
-        self.assertEqual(created.status_code, 200)
-        course_run = created.json()
-        course_run_id = course_run["id"]
-        shared_run_id = course_run["shared_workflow_run_id"]
-
-        child_bundle = self.client.post(
-            f"/v1/workflow-runs/{shared_run_id}/materialize",
-            json={"overwrite": True},
-        )
-        self.assertEqual(child_bundle.status_code, 200)
-
-        review = self.client.get(f"/v1/course-runs/{course_run_id}/review")
-        self.assertEqual(review.status_code, 200)
-        body = review.json()
-        self.assertEqual(body["counts"]["linked_workflow_runs"], 1)
-        self.assertEqual(body["counts"]["workflow_runs_with_bundle"], 1)
-        self.assertGreaterEqual(body["counts"]["deliverables_with_bundle"], 1)
-        self.assertEqual(body["counts"]["deliverables_with_blockers"], 5)
-        self.assertIn("Materialize the course bundle", "\n".join(body["next_actions"]))
-        self.assertIn("gate_1_spec_review", "\n".join(body["blockers"]))
-
-        first_deliverable = body["deliverables"][0]
-        self.assertEqual(first_deliverable["workflow_run_id"], shared_run_id)
-        self.assertTrue(first_deliverable["bundle_available"])
-        self.assertIn("public/README.md", first_deliverable["linked_workflow"]["bundle"]["public_files"])
-        self.assertTrue(first_deliverable["linked_workflow"]["review_summary"]["review_ready"])
 
     def test_workflow_spec_update_repairs_references_even_if_review_blockers_remain(self) -> None:
         created = self.client.post(
@@ -2579,7 +2686,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(gate_1.json()["pending_gate"], "gate_2_progression_review")
 
 
-    def test_openai_customization_does_not_overwrite_grounded_rag_expected_output_with_invalid_keys(self) -> None:
+    def test_openai_customization_ignores_invalid_public_check_paths(self) -> None:
         service = OpenAITaskAgentAuthoringService(enabled=False)
         spec, _origin = build_task_agent_scaffold(
             title="Grounded RAG contract",
@@ -2590,69 +2697,32 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 learning_outcomes=["grounded answers", "citations"],
             ),
         )
-        original_expected = next(case for case in spec.eval_dataset.cases if case.id == "ada_birth").expected_output
+        deliverable = spec.deliverables[0]
+        original_checks = [check.model_dump(mode="json") for check in deliverable.public_checks]
         updated = service._apply_customization(
             spec,
             TaskAgentCustomization(
-                eval_cases=[
-                    EvalCaseCustomization(
-                        id="ada_birth",
-                        expected_output={"decision": "answer", "needs_human": False, "confidence": "high"},
-                    )
+                deliverables=[
+                    DeliverableCustomization(
+                        id=deliverable.id,
+                        public_checks=[
+                            PublicCheckCustomization(
+                                id="invalid_visible_check",
+                                request_method="POST",
+                                request_path="not-a-real-route",
+                                expected_status=200,
+                            )
+                        ],
+                    ),
                 ]
             ),
         )
-        case = next(case for case in updated.eval_dataset.cases if case.id == "ada_birth")
-        self.assertEqual(case.expected_output, original_expected)
-
-    def test_course_sync_and_publish_follow_child_workflow_state(self) -> None:
-        created = self.client.post(
-            "/v1/course-runs",
-            json={"pattern_slug": "tusharbisht-cs-demo-agent-to-production"},
-        )
-        self.assertEqual(created.status_code, 200)
-        course_run = created.json()
-        course_run_id = course_run["id"]
-        shared_run_id = course_run["shared_workflow_run_id"]
-
-        for gate in [
-            "gate_1_spec_review",
-            "gate_2_progression_review",
-            "gate_3_pre_publish",
-        ]:
-            decision = self.client.post(
-                f"/v1/workflow-runs/{shared_run_id}/decisions",
-                json={"gate": gate, "decision": "approve"},
-            )
-            self.assertEqual(decision.status_code, 200)
-
-        synced = self.client.post(f"/v1/course-runs/{course_run_id}/sync")
-        self.assertEqual(synced.status_code, 200)
-        self.assertEqual(synced.json()["stage"], "ready_to_publish")
-
-        published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
-        self.assertEqual(published.status_code, 200)
-        self.assertEqual(published.json()["status"], "published")
-        self.assertIsNotNone(published.json()["latest_publish_snapshot_id"])
-
-        snapshot = app.state.workflow_service.store.get_publish_snapshot(
-            published.json()["latest_publish_snapshot_id"]
-        )
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot.course_run_id, course_run_id)
-        self.assertIsNotNone(snapshot.learner_package)
-        self.assertIsNotNone(snapshot.task_agent_spec)
-        self.assertEqual(len(snapshot.learner_package.deliverables), len(course_run["deliverables"]))
+        updated_deliverable = next(item for item in updated.deliverables if item.id == deliverable.id)
         self.assertEqual(
-            snapshot.learner_package.deliverables[0].deliverable_id,
-            course_run["deliverables"][0]["deliverable_slug"],
+            [check.model_dump(mode="json") for check in updated_deliverable.public_checks],
+            original_checks,
         )
-        self.assertEqual(snapshot.learner_package.deliverables[0].title, course_run["deliverables"][0]["title"])
-        self.assertNotIn("checkpoint_deliverable_ids", snapshot.learner_package.deliverables[0].model_dump(mode="json"))
-        self.assertIn("app.py", snapshot.learner_package.deliverables[0].visible_files)
-        self.assertEqual(snapshot.learner_package.deliverables[0].learner_brief.files_to_edit, ["app.py"])
-        self.assertTrue(snapshot.learner_package.deliverables[0].learner_brief.definition_of_done)
+
         self.assertIn("## Files to edit", snapshot.learner_package.deliverables[0].content_markdown)
         self.assertNotIn("Hidden checkpoint coverage", snapshot.learner_package.deliverables[0].content_markdown)
 
@@ -2876,6 +2946,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         workspace_root = Path(first_deliverable["workspace_session"]["workspace_root"])
         self.assertTrue((workspace_root / "app.py").exists())
         self.assertTrue((workspace_root / "checks" / "run_visible_checks.py").exists())
+        original_app = (workspace_root / "app.py").read_text(encoding="utf-8")
 
         (workspace_root / "app.py").unlink()
         self.assertFalse((workspace_root / "app.py").exists())
@@ -2883,12 +2954,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         healed = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
         self.assertEqual(healed.status_code, 200)
         self.assertTrue((workspace_root / "app.py").exists())
-        self.assertEqual((workspace_root / "app.py").read_text(encoding="utf-8"), render_task_agent_root_app())
-
-        (workspace_root / "app.py").write_text(render_legacy_task_agent_root_app(), encoding="utf-8")
-        migrated = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
-        self.assertEqual(migrated.status_code, 200)
-        self.assertEqual((workspace_root / "app.py").read_text(encoding="utf-8"), render_task_agent_root_app())
+        self.assertEqual((workspace_root / "app.py").read_text(encoding="utf-8"), original_app)
 
         experience_page = self.client.get(f"/v1/lms/enrollments/{enrollment_id}/experience")
         self.assertEqual(experience_page.status_code, 200)
@@ -3150,8 +3216,11 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("course_structure", starter_manifest_payload)
         self.assertIn("runtime_dependencies", starter_manifest_payload)
         self.assertIn("capabilities", starter_manifest_payload)
-        self.assertEqual(starter_manifest_payload["runtime_dependencies"]["editable_files"], ["app.py"])
-        self.assertEqual(starter_manifest_payload["visible_check_command"], "python checks/run_visible_checks.py")
+        self.assertEqual(
+            starter_manifest_payload["runtime_dependencies"]["editable_files"],
+            starter_manifest_payload["learner_starter_surface"]["primary_editable_paths"],
+        )
+        self.assertEqual(starter_manifest_payload["visible_check_command"], "sh .coursegen/runtime/check_visible.sh")
         self.assertTrue(starter_manifest_payload["public_checks"][0]["expected_assertions"])
 
         visible_check_script = self.client.get(
@@ -4035,88 +4104,6 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(private_review.status_code, 200)
         self.assertIn(shared_run_id, private_review.json()["content"])
-
-    def test_workflow_grader_plans_follow_task_agent_draft(self) -> None:
-        created = self.client.post(
-            "/v1/workflow-runs",
-            json={
-                "intake": {
-                    "title": "Feature flag service",
-                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
-                    "learning_outcomes": ["tool selection", "observability"],
-                }
-            },
-        ).json()
-        run_id = created["id"]
-
-        collection = self.client.get(f"/v1/workflow-runs/{run_id}/grader-plans")
-        self.assertEqual(collection.status_code, 200)
-        self.assertEqual(collection.json()["eval_dataset_id"], "customer_support_agent_eval_v1")
-        self.assertGreaterEqual(len(collection.json()["deliverable_plans"]), 3)
-
-        deliverable_8 = self.client.get(f"/v1/workflow-runs/{run_id}/grader-plans/deliverable_8")
-        self.assertEqual(deliverable_8.status_code, 200)
-        body = deliverable_8.json()
-        self.assertEqual(body["deliverable_id"], "deliverable_8")
-        self.assertEqual(
-            {entry["test_id"] for entry in body["entries"]},
-            {
-                "task_output_quality_final",
-                "confidence_calibration_final",
-                "latency_final",
-                "cost_final",
-            },
-        )
-        self.assertIn("/eval", body["endpoint_paths"])
-
-    def test_workflow_submission_grading_records_event(self) -> None:
-        created = self.client.post(
-            "/v1/workflow-runs",
-            json={
-                "intake": {
-                    "title": "Feature flag service",
-                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
-                    "learning_outcomes": ["tool selection", "observability"],
-                }
-            },
-        ).json()
-        run_id = created["id"]
-        submission = self.client.get("/v1/examples/task-agent/support-triage/submission").json()
-
-        graded = self.client.post(f"/v1/workflow-runs/{run_id}/grade/deliverable_8", json=submission)
-        self.assertEqual(graded.status_code, 200)
-        self.assertEqual(graded.json()["status"], "passed")
-
-        events = self.client.get(f"/v1/workflow-runs/{run_id}/events")
-        self.assertEqual(events.status_code, 200)
-        event_types = [event["event_type"] for event in events.json()]
-        self.assertIn("submission_graded", event_types)
-
-    def test_workflow_live_grading_records_event(self) -> None:
-        self._install_mock_blackbox_runner()
-        created = self.client.post(
-            "/v1/workflow-runs",
-            json={
-                "intake": {
-                    "title": "Feature flag service",
-                    "problem_statement": "Build an agent that evaluates rollout requests, uses tools, drafts replies, escalates edge cases, and is production ready.",
-                    "learning_outcomes": ["tool selection", "observability"],
-                }
-            },
-        ).json()
-        run_id = created["id"]
-
-        graded = self.client.post(
-            f"/v1/workflow-runs/{run_id}/grade-live/deliverable_8",
-            json={"base_url": "http://learner.test"},
-        )
-        self.assertEqual(graded.status_code, 200)
-        self.assertEqual(graded.json()["grade_report"]["status"], "passed")
-
-        events = self.client.get(f"/v1/workflow-runs/{run_id}/events")
-        self.assertEqual(events.status_code, 200)
-        event_types = [event["event_type"] for event in events.json()]
-        self.assertIn("submission_graded_live", event_types)
 
     def test_materialize_workflow_bundle_and_read_file(self) -> None:
         created = self.client.post(

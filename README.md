@@ -15,6 +15,25 @@ The current system is intentionally opinionated around one core promise:
 
 > the learner should receive one real project, in one real workspace, with review grouped by visible deliverables, and the exact learner path should be tested before publish.
 
+One explicit engineering guardrail for this refactor:
+
+> do not add custom starter/compiler code for individual languages or frameworks.
+>
+> Keep the repo/runtime contract dumb and creator-owned. Make the harness strong enough to boot, verify, repair, and certify the authored repo instead of teaching the platform one language at a time.
+>
+> The authored bundle should own `Dockerfile` and `.coursegen/runtime/*.sh`. Default protocol files should fail loudly until authoring replaces them.
+>
+> Runtime-plan commands are advisory metadata only. The harness should execute authored runtime protocol files, not platform-synthesized language commands.
+>
+> Do not use string matching, regex, or prose heuristics to decide whether a stack is supported or how it should execute. The creator-owned stack contract, the authored repo/runtime bundle, and harness results are the source of truth.
+>
+> When a stack needs a dependency lock or toolchain contract, the authored `install.sh` should materialize it deterministically inside the creator-selected base image. The harness may sync only those dependency-contract files back into the starter workspace before runtime boot.
+>
+> Do not parse raw JSON text from LLM output. Use structured outputs plus a hard-kill timeout boundary so malformed or wedged model calls fail loudly instead of pinning workflow threads.
+
+See [`docs/unseen-stack-dry-run.md`](/Users/tushar/Desktop/codebases/course-gen-codex/docs/unseen-stack-dry-run.md) for the target node-by-node flow when a creator picks an unseen stack.
+See [`docs/testing-debug-playbook.md`](/Users/tushar/Desktop/codebases/course-gen-codex/docs/testing-debug-playbook.md) for the practical local loop to test, replay, rerun, stop, and debug failures without drifting back into language-specific fixes.
+
 ## Current status
 
 This repo is in active refactor mode. The current backbone is:
@@ -76,6 +95,7 @@ The repo is organized around a few stable layers:
   - focused architectural regression slices for the current refactor path
 - `scripts/`
   - smoke flows and local utility scripts
+  - `replay_failure_smoke.py` for replaying the last failed deliverables against the current harness or an optional repo-repair pass without mutating workflow state
 
 This is useful to keep in mind when you trace behavior:
 

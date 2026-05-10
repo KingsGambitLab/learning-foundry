@@ -29,7 +29,16 @@ from app.services.public_surface_quality import starter_surface_markers
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_retry_service import TaskAgentRetryService
 from app.services.task_agent_repair_service import TaskAgentRepairService
-from app.services.task_agent_starter_templates import HIDDEN_GRADER_SCRIPT_PATH, HIDDEN_MANIFEST_PATH
+from app.services.task_agent_starter_templates import (
+    HIDDEN_GRADER_SCRIPT_PATH,
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+)
+from app.services.task_agent_contract_surface import (
+    learner_editable_paths_for_deliverable,
+    learner_editable_paths_for_spec,
+)
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
 
 
@@ -867,8 +876,8 @@ class LangGraphAssignmentGraph:
         state, sandbox_result = self._sandbox_result(state)
         spec = state["run"].artifacts.task_agent_spec
         assert spec is not None
-        primary_editable_paths = list(spec.runtime_dependencies.editable_files or ["app.py"])
-        entrypoint_path = primary_editable_paths[0]
+        primary_editable_paths = learner_editable_paths_for_spec(spec)
+        entrypoint_path = primary_editable_paths[0] if primary_editable_paths else "the learner-owned repo surface"
 
         findings: list[ReviewerFinding] = [
             ReviewerFinding(
@@ -886,12 +895,7 @@ class LangGraphAssignmentGraph:
             wrapper_deliverables = []
             for deliverable in spec.deliverables:
                 deliverable_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter" / deliverable.id
-                starter_surface = deliverable.learner_starter_surface
-                editable_paths = (
-                    starter_surface.primary_editable_paths
-                    if starter_surface is not None and starter_surface.primary_editable_paths
-                    else primary_editable_paths
-                )
+                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 deliverable_has_placeholder = False
                 deliverable_has_wrapper = False
                 for relative_path in editable_paths:
@@ -1292,9 +1296,13 @@ class LangGraphAssignmentGraph:
                 hidden_check_command = manifest_payload.get("hidden_check_command")
                 generated_test_scripts = manifest_payload.get("generated_test_scripts") or {}
                 generated_test_source = str(generated_test_scripts.get("source") or "").strip().lower()
+                starter_repo_bundle = manifest_payload.get("starter_repo_bundle") or {}
+                starter_repo_source = str(starter_repo_bundle.get("source") or "").strip().lower()
+                runtime_protocol_bundle = manifest_payload.get("runtime_protocol_bundle") or {}
+                runtime_protocol_source = str(runtime_protocol_bundle.get("source") or "").strip().lower()
                 if (
-                    visible_check_command != "python checks/run_visible_checks.py"
-                    or hidden_check_command != "python .coursegen/grader/run_hidden_checks.py"
+                    visible_check_command != f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+                    or hidden_check_command != f"sh {RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"
                     or not starter_surface.get("primary_editable_paths")
                     or not starter_surface.get("required_endpoints")
                 ):
@@ -1309,6 +1317,38 @@ class LangGraphAssignmentGraph:
                                 "plus a real learner starter surface."
                             ),
                             code="generated_test_commands_incomplete",
+                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                        )
+                    )
+                    continue
+                if starter_repo_source in {"", "starter_default"}:
+                    learner_checks_valid = False
+                    findings.append(
+                        ReviewerFinding(
+                            category="tests_review",
+                            severity=ReviewerFindingSeverity.error,
+                            title="starter_repo_bundle_not_authored",
+                            detail=(
+                                "The starter repo is still using the default protocol-only files. "
+                                "Authoring must produce the learner-owned repo bundle before review."
+                            ),
+                            code="starter_repo_bundle_not_authored",
+                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                        )
+                    )
+                    continue
+                if runtime_protocol_source in {"", "starter_default"}:
+                    learner_checks_valid = False
+                    findings.append(
+                        ReviewerFinding(
+                            category="tests_review",
+                            severity=ReviewerFindingSeverity.error,
+                            title="runtime_protocol_bundle_not_authored",
+                            detail=(
+                                "The runtime install, verify, and run protocol is still using the default placeholders. "
+                                "Authoring must produce the real runtime scripts before review."
+                            ),
+                            code="runtime_protocol_bundle_not_authored",
                             location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
                         )
                     )

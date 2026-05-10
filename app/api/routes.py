@@ -25,6 +25,8 @@ from app.domain.course import (
     QueueCourseGenerationResponse,
     QueueCourseOperationResponse,
     QueueCourseRevisionResponse,
+    RecommendCreatorStackContractRequest,
+    RecommendCreatorStackContractResponse,
     SuggestLearningOutcomesRequest,
     SuggestLearningOutcomesResponse,
 )
@@ -180,9 +182,14 @@ def infer_assignment_design_for_intake(intake: GenerationIntake) -> AssignmentDe
         package_type_hint=intake.package_type_hint,
         starter_type=intake.starter_type,
         implementation_language=intake.implementation_language,
+        language_version=intake.language_version,
         application_framework=intake.application_framework,
+        framework_version=intake.framework_version,
+        package_manager=intake.package_manager,
         primary_database=intake.primary_database,
+        primary_database_version=intake.primary_database_version,
         cache_backend=intake.cache_backend,
+        cache_backend_version=intake.cache_backend_version,
         tech_stack=intake.tech_stack,
         data_sources=intake.data_sources,
     )
@@ -469,6 +476,17 @@ def generate_creator_course_plan(
 ) -> GenerateCreatorCoursePlanResponse:
     try:
         return _course_generation_service(request).generate_creator_plan(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/v1/course-generation/creator-stack-contract", response_model=RecommendCreatorStackContractResponse, tags=["course"])
+def recommend_creator_stack_contract(
+    payload: RecommendCreatorStackContractRequest,
+    request: Request,
+) -> RecommendCreatorStackContractResponse:
+    try:
+        return _course_generation_service(request).recommend_creator_stack_contract(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

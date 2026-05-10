@@ -106,6 +106,26 @@ class FailureContextDeliverableReport(BaseModel):
     stderr_excerpt: str | None = None
 
 
+class FailureContextDependencyContract(BaseModel):
+    deliverable_id: str
+    starter_root: str | None = None
+    implementation_language: str | None = None
+    language_version: str | None = None
+    application_framework: str | None = None
+    framework_version: str | None = None
+    package_manager: str | None = None
+    container_image: str | None = None
+    root_files: list[str] = Field(default_factory=list)
+    expected_manifest_paths: list[str] = Field(default_factory=list)
+    present_manifest_paths: list[str] = Field(default_factory=list)
+    expected_lockfile_paths: list[str] = Field(default_factory=list)
+    present_lockfile_paths: list[str] = Field(default_factory=list)
+    expected_toolchain_paths: list[str] = Field(default_factory=list)
+    present_toolchain_paths: list[str] = Field(default_factory=list)
+    runtime_protocol_paths_present: list[str] = Field(default_factory=list)
+    runtime_bundle_complete: bool = False
+
+
 class FailureContextSandboxSummary(BaseModel):
     error: str | None = None
     build_stdout_excerpt: str | None = None
@@ -126,6 +146,7 @@ class FailureContext(BaseModel):
     findings: list[ReviewerFinding] = Field(default_factory=list)
     validation_issues: list[FailureContextValidationIssue] = Field(default_factory=list)
     sandbox: FailureContextSandboxSummary | None = None
+    dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
 
 
 class WorkflowNodeExecution(BaseModel):

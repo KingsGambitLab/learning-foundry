@@ -15,6 +15,7 @@ from app.domain.workflow import (
     WorkflowNodeKind,
     WorkflowRun,
 )
+from app.services.dependency_contract_facts import dependency_contract_facts_for_deliverables
 
 _REVIEWER_KINDS = {
     WorkflowNodeKind.reviewer_runtime,
@@ -39,6 +40,13 @@ def build_failure_context(
     )
     validation_issues = _validation_issues(run.artifacts.validation_summary or {})
     sandbox = _sandbox_summary(latest_node, related_nodes)
+    dependency_contracts = dependency_contract_facts_for_deliverables(
+        public_root=(run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None),
+        runtime_plan=run.artifacts.task_agent_spec.project_contract.runtime_plan
+        if run.artifacts.task_agent_spec is not None
+        else None,
+        deliverable_ids=list(sandbox.failed_deliverables if sandbox is not None else []),
+    )
     owner_hint = _owner_hint(latest_node, validation_issues, sandbox)
     phase = _phase(latest_node, validation_issues, sandbox)
     failure_signature = _failure_signature(latest_node, validation_issues, sandbox)
@@ -52,6 +60,7 @@ def build_failure_context(
         findings=findings,
         validation_issues=validation_issues,
         sandbox=sandbox,
+        dependency_contracts=dependency_contracts,
     )
 
 
@@ -204,6 +213,13 @@ def _owner_hint(
         marker in text for marker in platform_compiler_markers
     ):
         return WorkflowFailureOwnerHint.platform_runtime
+
+    if latest_node.kind in {
+        WorkflowNodeKind.reviewer_code,
+        WorkflowNodeKind.reviewer_pedagogy,
+        WorkflowNodeKind.reviewer_tests,
+    } and latest_node.findings:
+        return WorkflowFailureOwnerHint.authored_artifact
 
     authored_markers = (
         "traceback (most recent call last)",

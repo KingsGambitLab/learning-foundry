@@ -203,14 +203,38 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                           </select>
                         </label>
                         <label class="field">
+                          <span>Language version</span>
+                          <select name="language_version" id="creator-language-version" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest from public sources</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div class="creator-choice-row">
+                        <label class="field">
                           <span>Preferred framework</span>
-                          <input name="application_framework" id="creator-framework" class="creator-text-input" type="text" value="" placeholder="Leave blank and we’ll suggest one" autocomplete="off" spellcheck="false" />
+                          <select name="application_framework" id="creator-framework" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest for me</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Framework version</span>
+                          <select name="framework_version" id="creator-framework-version" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest from public sources</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div class="creator-choice-row">
+                        <label class="field">
+                          <span>Package manager or build tool</span>
+                          <select name="package_manager" id="creator-package-manager" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest for me</option>
+                          </select>
                         </label>
                       </div>
                       <label class="field">
-                        <span>Optional runtime requirements</span>
-                        <textarea id="creator-runtime-requirements" rows="3" placeholder="Node 22, NestJS 11, MongoDB 7, pnpm" autocomplete="off" spellcheck="false"></textarea>
-                        <p class="field-hint">Add version or infrastructure requirements here if the course must target a specific stack.</p>
+                        <span>Optional extra runtime requirements</span>
+                        <textarea id="creator-runtime-requirements" rows="3" placeholder="Kafka, S3-compatible storage, OpenSearch, background worker" autocomplete="off" spellcheck="false"></textarea>
+                        <p class="field-hint">Use this for extra infrastructure or runtime constraints that should influence the repo, not for the core stack contract above.</p>
                       </label>
                       <div class="creator-pane-actions">
                         <button id="creator-step-1-next" class="button primary" type="button">Suggest outcomes and stack</button>
@@ -255,11 +279,25 @@ export COURSE_GEN_OPENAI_ENV_FILE=/absolute/path/to/openai.env.keys</pre>
                           </select>
                         </label>
                         <label class="field">
+                          <span>Database version</span>
+                          <select name="primary_database_version" id="creator-database-version" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest from public sources</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div class="creator-choice-row">
+                        <label class="field">
                           <span>Should learners have a cache available?</span>
                           <select name="cache_backend" id="creator-cache" class="creator-select">
                             <option value="">No cache</option>
                             <option value="redis" selected>Redis</option>
                             <option value="memcached">Memcached</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          <span>Cache version</span>
+                          <select name="cache_backend_version" id="creator-cache-version" class="creator-select" autocomplete="off">
+                            <option value="" selected>Suggest from public sources</option>
                           </select>
                         </label>
                       </div>

@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from app.domain.ai import AIUsageSummary
 from app.domain.task_agent import AssignmentDesignSpec, EndpointSpec
@@ -23,6 +24,7 @@ from app.services.assignment_design_inference import GenerationIntake, infer_ass
 from app.services.task_agent_contract_surface import primary_submit_endpoint
 from app.services.openai_task_agent_authoring import (
     OpenAITaskAgentAuthoringService,
+    PublicCheckCustomization,
     StarterScenarioCustomization,
     StarterSurfaceCustomization,
     TaskAgentCustomization,
@@ -30,10 +32,9 @@ from app.services.openai_task_agent_authoring import (
     TaskAgentAuthoringSource,
     TaskAgentAuthoringStatus,
     DeliverableCustomization,
-    EvalCaseCustomization,
+    EndpointCustomization,
 )
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
-from app.services.task_agent_starter_templates import render_task_agent_runtime_entrypoint
 from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.workflow_service import WorkflowConflictError, WorkflowService
@@ -55,6 +56,7 @@ def _grounded_design_spec() -> AssignmentDesignSpec:
 class _FakeResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.output_text = json.dumps(payload)
+        self.output_parsed = TaskAgentCustomization.model_validate(payload)
         self.usage = None
 
 
@@ -63,7 +65,7 @@ class _TimeoutThenSuccessClient:
         self.calls = 0
         self.responses = self
 
-    def create(self, **_: object) -> _FakeResponse:
+    def parse(self, **_: object) -> _FakeResponse:
         self.calls += 1
         if self.calls == 1:
             raise TimeoutError("Request timed out.")
@@ -87,7 +89,7 @@ class _BlockingClient:
         self.sleep_s = sleep_s
         self.responses = self
 
-    def create(self, **_: object) -> _FakeResponse:
+    def parse(self, **_: object) -> _FakeResponse:
         time.sleep(self.sleep_s)
         return _FakeResponse(
             {
@@ -141,8 +143,7 @@ class _InvalidRevisionAuthoringService:
 
     def revise_spec(self, **kwargs):  # noqa: ANN001
         invalid = self.spec.model_copy(deep=True)
-        invalid.runtime_dependencies.editable_files = []
-        invalid.deliverables[0].learner_brief = None
+        invalid.public_endpoints = [EndpointSpec(method="GET", path="/health")]
         status = TaskAgentAuthoringStatus(
             available=True,
             source=TaskAgentAuthoringSource.openai_live,
@@ -177,6 +178,29 @@ class _AlwaysReadyAuthoringService(OpenAITaskAgentAuthoringService):
         )
 
 
+class _RetryingCustomizationAuthoringService(_AlwaysReadyAuthoringService):
+    def __init__(self) -> None:
+        super().__init__(enabled=True)
+        self.feedback_history: list[str | None] = []
+
+    def _generate_customization(self, **kwargs):  # noqa: ANN001
+        self.feedback_history.append(kwargs.get("feedback"))
+        if len(self.feedback_history) == 1:
+            return (
+                TaskAgentCustomization(
+                    public_endpoints=[EndpointCustomization(method="GET", path="/health")],
+                    notes=["first invalid attempt"],
+                ),
+                AIUsageSummary(request_count=1, input_tokens=10, output_tokens=10, total_tokens=20),
+            )
+        return (
+            TaskAgentCustomization(
+                notes=["second attempt valid"],
+            ),
+            AIUsageSummary(request_count=1, input_tokens=10, output_tokens=10, total_tokens=20),
+        )
+
+
 class AuthoringResilienceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_api_key = os.environ.get("OPENAI_API_KEY")
@@ -207,24 +231,24 @@ class AuthoringResilienceTests(unittest.TestCase):
         self.assertEqual(result.spec.summary, "Customized after a retry.")
 
     def test_generate_scaffold_hard_times_out_blocking_live_request(self) -> None:
-        blocking_client = _BlockingClient(sleep_s=0.2)
-        service = OpenAITaskAgentAuthoringService(
-            client_factory=lambda api_key, base_url: blocking_client,
+        service = _AlwaysReadyAuthoringService(
             request_timeout_s=0.05,
             max_request_retries=0,
         )
 
-        started_at = time.time()
-        result = service.generate_scaffold(
-            title="Build a Grounded Internal Docs Assistant",
-            summary="Answer docs questions with citations and abstention.",
-            design_spec=_grounded_design_spec(),
-        )
-        elapsed_s = time.time() - started_at
+        with patch(
+            "app.services.openai_task_agent_authoring.parse_structured_openai_response_with_hard_timeout",
+            side_effect=TimeoutError("OpenAI authoring request exceeded 0.05s hard timeout."),
+        ) as mocked_parse:
+            result = service.generate_scaffold(
+                title="Build a Grounded Internal Docs Assistant",
+                summary="Answer docs questions with citations and abstention.",
+                design_spec=_grounded_design_spec(),
+            )
 
-        self.assertLess(elapsed_s, 0.2)
+        mocked_parse.assert_called_once()
         self.assertEqual(result.source, TaskAgentAuthoringSource.deterministic_fallback)
-        self.assertIn("exceeded 0.1s", result.status.message)
+        self.assertIn("OpenAI authoring request exceeded", result.status.message)
 
     def test_workflow_blocks_early_when_live_authoring_falls_back(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
@@ -274,8 +298,6 @@ class AuthoringResilienceTests(unittest.TestCase):
                 cache_backend="redis",
             ).design_spec,
         )
-        primary_case_id = base_spec.eval_dataset.cases[0].id
-        edge_case_id = base_spec.eval_dataset.cases[1].id
         base_spec = ensure_task_agent_deliverable_briefs(base_spec, overwrite=True)
         service = OpenAITaskAgentAuthoringService(enabled=False)
         customization = TaskAgentCustomization(
@@ -308,43 +330,29 @@ class AuthoringResilienceTests(unittest.TestCase):
                             ),
                         ],
                     ),
+                    public_checks=[
+                        PublicCheckCustomization(
+                            id="deliverable_1_inventory_reserve",
+                            title="Reserve available stock from one warehouse",
+                            learner_goal="Verify the reservation path records a durable reservation and updates stock.",
+                            request_method="POST",
+                            request_path="/inventory-reservations",
+                            request_body={
+                                "request_id": "REQ-INV-1001",
+                                "sku": "SKU-RED-CHAIR",
+                                "warehouse_id": "WH-EAST",
+                                "quantity": 3,
+                                "order_id": "ORD-1001",
+                            },
+                            expected_status=200,
+                            expected_response_contains=[
+                                "reservation",
+                                "allocated",
+                                "stock",
+                            ],
+                        )
+                    ],
                 )
-            ],
-            eval_cases=[
-                EvalCaseCustomization(
-                    id=primary_case_id,
-                    title="Reserve available stock from one warehouse",
-                    input={
-                        "task-specific": {
-                            "request_id": "REQ-INV-1001",
-                            "task_input": "Reserve 3 units of SKU-RED-CHAIR from warehouse WH-EAST for order ORD-1001.",
-                        }
-                    },
-                    expected_output={
-                        "result": "<result>",
-                        "confidence": "<confidence>",
-                        "needs_human": False,
-                    },
-                    tags=["deliverable_1"],
-                ),
-                EvalCaseCustomization(
-                    id=edge_case_id,
-                    title="Escalate inconsistent inventory state for human review",
-                    input={
-                        "task-specific": {
-                            "request_id": "REQ-INV-2002",
-                            "task_input": "Move stock after detecting inconsistent reserved totals.",
-                        }
-                    },
-                    expected_output={
-                        "result": "<result>",
-                        "confidence": "<confidence>",
-                        "needs_human": True,
-                    },
-                    should_escalate=True,
-                    requires_approval=True,
-                    tags=["deliverable_1"],
-                ),
             ],
         )
 
@@ -353,37 +361,20 @@ class AuthoringResilienceTests(unittest.TestCase):
         validation = validate_task_agent_spec(updated)
 
         self.assertFalse(any(error.code == "placeholder_public_check" for error in validation.errors))
-        self.assertEqual(
-            updated.deliverables[0].public_checks[0].title,
-            "Reserve available stock from one warehouse",
+        authored_checks = [
+            check
+            for check in updated.deliverables[0].public_checks
+            if check.request_path == "/inventory-reservations"
+        ]
+        self.assertTrue(
+            any(check.title == "Reserve available stock from one warehouse" for check in authored_checks)
         )
-        self.assertIn(
-            "decrease allocatable stock without going negative",
-            " ".join(updated.deliverables[0].public_checks[0].expected_assertions).lower(),
+        self.assertTrue(
+            any(
+                "decrease allocatable stock without going negative" in check.learner_goal.lower()
+                for check in authored_checks
+            )
         )
-
-    def test_validation_rejects_placeholder_schema_field_names(self) -> None:
-        spec, _ = build_task_agent_scaffold(
-            title="Build a Grounded Internal Docs Assistant",
-            summary="Answer docs questions with citations and abstention.",
-            design_spec=_grounded_design_spec(),
-        )
-        spec.task_schema = {
-            "type": "object",
-            "required": ["domain_field"],
-            "properties": {"domain_field": {"type": "string"}},
-        }
-        spec.output_schema = {
-            "type": "object",
-            "required": ["domain_result"],
-            "properties": {"domain_result": {"type": "string"}},
-        }
-
-        validation = validate_task_agent_spec(spec)
-        error_codes = {error.code for error in validation.errors}
-
-        self.assertIn("placeholder_task_schema_field", error_codes)
-        self.assertIn("placeholder_output_schema_field", error_codes)
 
     def test_specialized_projects_render_non_placeholder_public_endpoints(self) -> None:
         inferred = infer_assignment_design(
@@ -406,7 +397,7 @@ class AuthoringResilienceTests(unittest.TestCase):
         validation = validate_task_agent_spec(spec)
         self.assertNotIn("placeholder_service_endpoints", {error.code for error in validation.errors})
         self.assertTrue(
-            any(endpoint.path.startswith("/concurrent-inventory") for endpoint in spec.production_contract.canonical_endpoints)
+            any(endpoint.path.startswith("/inventory-reservations") for endpoint in spec.public_endpoints)
         )
 
     def test_primary_submit_endpoint_prefers_non_parameterized_post(self) -> None:
@@ -420,37 +411,6 @@ class AuthoringResilienceTests(unittest.TestCase):
 
         self.assertIsNotNone(endpoint)
         self.assertEqual(endpoint.path, "/reservations")
-
-    def test_python_runtime_entrypoint_exposes_public_routes_and_internal_harness(self) -> None:
-        inferred = infer_assignment_design(
-            title="Build a Concurrent Inventory Reservation Service",
-            problem_statement=(
-                "Create a production-ready transactional backend that keeps inventory reservations "
-                "correct under retries, concurrency, and warehouse stock movement."
-            ),
-            implementation_language="python",
-            application_framework="fastapi",
-            primary_database="postgres",
-            cache_backend="redis",
-        )
-        spec, _ = build_task_agent_scaffold(
-            title="Build a Concurrent Inventory Reservation Service",
-            summary="Keep reservations correct under concurrent requests and retries.",
-            design_spec=inferred.design_spec,
-        )
-        spec.production_contract.canonical_endpoints = [
-            EndpointSpec(method="POST", path="/reservations", required=True),
-            EndpointSpec(method="GET", path="/reservations/{reservation_id}", required=True),
-            EndpointSpec(method="GET", path="/health", required=True),
-        ]
-
-        rendered = render_task_agent_runtime_entrypoint(spec, for_root_workspace=False)
-
-        self.assertIn("/_coursegen/run", rendered)
-        self.assertIn("x-coursegen-run-id", rendered)
-        self.assertIn("app.add_api_route(", rendered)
-        self.assertIn("_public_endpoints(manifest)", rendered)
-        self.assertNotIn('@app.post("/run")', rendered)
 
     def test_scaffold_drops_approval_lane_when_capability_disabled(self) -> None:
         inferred = infer_assignment_design(
@@ -471,10 +431,8 @@ class AuthoringResilienceTests(unittest.TestCase):
         )
 
         self.assertFalse(spec.capabilities.approval_flow_required)
-        self.assertNotIn("async_human_in_loop", [mode.value for mode in spec.supported_modes])
-        self.assertFalse(spec.production_contract.supports_async_runs)
-        self.assertFalse(any(tool.approval_required for tool in spec.tool_registry.tools))
-        self.assertFalse(any(case.requires_approval for case in spec.eval_dataset.cases))
+        self.assertFalse(any("/approve" in endpoint.path for endpoint in spec.public_endpoints))
+        self.assertFalse(any("approval" in deliverable.title.lower() for deliverable in spec.deliverables))
 
     def test_human_feedback_revision_rejects_invalid_reauthored_spec(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
@@ -514,7 +472,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.responses = self
 
-            def create(self, **_: object) -> _FakeResponse:
+            def parse(self, **_: object) -> _FakeResponse:
                 return _FakeResponse({"notes": ["minimal customization"]})
 
         service = _AlwaysReadyAuthoringService(client_factory=lambda api_key, base_url: _MinimalClient())
@@ -522,8 +480,7 @@ class AuthoringResilienceTests(unittest.TestCase):
 
         def _invalid_apply(base_spec, customization):  # noqa: ANN001
             invalid = original_apply(base_spec, customization)
-            invalid.runtime_dependencies.editable_files = []
-            invalid.deliverables[0].learner_brief = None
+            invalid.public_endpoints = [EndpointSpec(method="GET", path="/health")]
             return invalid
 
         service._apply_customization = _invalid_apply  # type: ignore[method-assign]
@@ -536,11 +493,29 @@ class AuthoringResilienceTests(unittest.TestCase):
         status = service.status()
 
         self.assertEqual(result.source, TaskAgentAuthoringSource.deterministic_fallback)
-        self.assertEqual(status.customization_validation_rejection_count, 1)
+        self.assertEqual(
+            status.customization_validation_rejection_count,
+            service.max_customization_validation_retries + 1,
+        )
         self.assertIn(
             "OpenAI customization produced an invalid spec",
             status.last_customization_validation_error or "",
         )
+
+    def test_generate_scaffold_retries_invalid_customization_with_validation_feedback(self) -> None:
+        service = _RetryingCustomizationAuthoringService()
+
+        result = service.generate_scaffold(
+            title="Build a Grounded Internal Docs Assistant",
+            summary="Answer docs questions with citations and abstention.",
+            design_spec=_grounded_design_spec(),
+        )
+
+        self.assertEqual(result.source, TaskAgentAuthoringSource.openai_live)
+        self.assertEqual(result.status.customization_validation_rejection_count, 1)
+        self.assertEqual(len(service.feedback_history), 2)
+        self.assertIsNone(service.feedback_history[0])
+        self.assertIn("missing_public_endpoints", service.feedback_history[1] or "")
 
     def test_gate_one_approval_fails_closed_when_validation_summary_is_missing(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()

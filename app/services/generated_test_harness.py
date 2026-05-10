@@ -15,10 +15,15 @@ from pydantic import BaseModel, Field
 from app.domain.registry import StarterType
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.learner_studio_service import LearnerStudioError, LearnerStudioService
-from app.services.task_agent_starter_templates import HIDDEN_MANIFEST_PATH
+from app.services.task_agent_contract_surface import learner_editable_paths_for_manifest
+from app.services.task_agent_starter_templates import (
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+)
 
-DEFAULT_VISIBLE_CHECK_COMMAND = "python checks/run_visible_checks.py"
-DEFAULT_HIDDEN_CHECK_COMMAND = "python .coursegen/grader/run_hidden_checks.py"
+DEFAULT_VISIBLE_CHECK_COMMAND = f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+DEFAULT_HIDDEN_CHECK_COMMAND = f"sh {RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"
 
 
 class GeneratedTestCaseReport(BaseModel):
@@ -443,16 +448,39 @@ class GeneratedTestBaselineVerifier:
                 continue
             candidate = workspace_root / token
             if candidate.exists():
-                return candidate
+                return self._follow_shell_wrapper(candidate, workspace_root)
         return None
+
+    def _follow_shell_wrapper(self, candidate: Path, workspace_root: Path) -> Path:
+        if candidate.suffix != ".sh":
+            return candidate
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except OSError:
+            return candidate
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("exec "):
+                continue
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                return candidate
+            for token in tokens[1:]:
+                if token.startswith("-"):
+                    continue
+                nested = workspace_root / token
+                if nested.exists():
+                    return nested
+            break
+        return candidate
 
     def _make_empty_repo_copy(self, workspace_root: Path, spec: TaskAgentServiceSpec) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="coursegen_empty_repo_"))
         copy_root = temp_root / "workspace"
         shutil.copytree(workspace_root, copy_root)
         manifest = self.learner_studio_service._runtime_manifest(copy_root)
-        starter_surface = manifest.get("learner_starter_surface") or {}
-        editable_paths = starter_surface.get("primary_editable_paths") or spec.runtime_dependencies.editable_files or ["app.py"]
+        editable_paths = learner_editable_paths_for_manifest(manifest)
         for relative_path in editable_paths:
             target = copy_root / str(relative_path)
             if target.exists():

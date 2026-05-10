@@ -3,7 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from app.domain.course import CreateCourseDeliverableRequest, CreateCourseRunRequest
+from app.domain.ai import AIUsageSummary
+from app.domain.course import CreateCourseDeliverableRequest, CreateCourseRunRequest, CreatorCourseSetupChoices
 from app.domain.registry import PackageType
 from app.domain.task_agent import DataSourceKind, DataSourcePurpose, DataSourceSpec
 from app.services.artifact_materializer import ArtifactMaterializer
@@ -49,9 +50,14 @@ class CourseWorkflowRuntimeContextTests(unittest.TestCase):
                 "Keep reservations correct under concurrency, retries, and stock transfers."
             ),
             implementation_language="python",
+            language_version="3.13",
             application_framework="fastapi",
+            framework_version="0.116",
+            package_manager="uv",
             primary_database="postgres",
+            primary_database_version="17",
             cache_backend="redis",
+            cache_backend_version="8",
             tech_stack=["Python 3.12", "FastAPI", "Postgres 16", "Redis 7"],
             data_sources=[fixture_source],
         )
@@ -67,6 +73,19 @@ class CourseWorkflowRuntimeContextTests(unittest.TestCase):
                     "Keep reservations correct under concurrency, retries, and stock transfers."
                 ),
                 package_type=PackageType.progressive_codebase_course,
+                creator_choices=CreatorCourseSetupChoices(
+                    implementation_language="python",
+                    language_version="3.13",
+                    application_framework="fastapi",
+                    framework_version="0.116",
+                    package_manager="uv",
+                    primary_database="postgres",
+                    primary_database_version="17",
+                    cache_backend="redis",
+                    cache_backend_version="8",
+                    tech_stack=["Python 3.12", "FastAPI", "Postgres 16", "Redis 7"],
+                    data_sources=[fixture_source],
+                ),
                 shared_design_spec=design_spec,
                 deliverables=[
                     CreateCourseDeliverableRequest(
@@ -84,24 +103,38 @@ class CourseWorkflowRuntimeContextTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(course_run.shared_workflow_run_id)
+        self.assertIsNotNone(course_run.creator_choices)
         shared_run = self.workflow_service.get_run(course_run.shared_workflow_run_id)
         assert shared_run is not None
         self.assertEqual(shared_run.intake.implementation_language, "python")
+        self.assertEqual(shared_run.intake.language_version, "3.13")
         self.assertEqual(shared_run.intake.application_framework, "fastapi")
+        self.assertEqual(shared_run.intake.framework_version, "0.116")
+        self.assertEqual(shared_run.intake.package_manager, "uv")
         self.assertEqual(shared_run.intake.primary_database, "postgres")
+        self.assertEqual(shared_run.intake.primary_database_version, "17")
         self.assertEqual(shared_run.intake.cache_backend, "redis")
+        self.assertEqual(shared_run.intake.cache_backend_version, "8")
         self.assertEqual(shared_run.intake.tech_stack, ["Python 3.12", "FastAPI", "Postgres 16", "Redis 7"])
         self.assertEqual(len(shared_run.intake.data_sources), 1)
         self.assertEqual(shared_run.intake.data_sources[0].workspace_path, "data/inventory_seed.json")
 
         creator_view = self.course_workflow_service.creator_view(course_run.id)
         self.assertEqual(creator_view.creator_choices.implementation_language, "python")
+        self.assertEqual(creator_view.creator_choices.language_version, "3.13")
         self.assertEqual(creator_view.creator_choices.application_framework, "fastapi")
+        self.assertEqual(creator_view.creator_choices.framework_version, "0.116")
+        self.assertEqual(creator_view.creator_choices.package_manager, "uv")
         self.assertEqual(creator_view.creator_choices.primary_database, "postgres")
+        self.assertEqual(creator_view.creator_choices.primary_database_version, "17")
         self.assertEqual(creator_view.creator_choices.cache_backend, "redis")
+        self.assertEqual(creator_view.creator_choices.cache_backend_version, "8")
         self.assertEqual(creator_view.creator_choices.tech_stack, ["Python 3.12", "FastAPI", "Postgres 16", "Redis 7"])
         self.assertEqual(len(creator_view.creator_choices.data_sources), 1)
         self.assertEqual(creator_view.creator_choices.data_sources[0].workspace_path, "data/inventory_seed.json")
+        self.assertEqual(course_run.creator_choices.language_version, "3.13")
+        self.assertEqual(course_run.creator_choices.framework_version, "0.116")
+        self.assertEqual(course_run.creator_choices.package_manager, "uv")
 
     def test_progressive_course_uses_authored_workflow_deliverables_as_source_of_truth(self) -> None:
         inferred = infer_assignment_design(
@@ -160,3 +193,47 @@ class CourseWorkflowRuntimeContextTests(unittest.TestCase):
             authored_titles,
         )
         self.assertNotEqual(course_run.deliverables[0].title, "Service contract and durable model")
+
+    def test_get_run_refreshes_linked_workflow_ai_usage(self) -> None:
+        inferred = infer_assignment_design(
+            title="Inventory reservations",
+            problem_statement="Build an inventory reservation service with FastAPI and Postgres.",
+            implementation_language="python",
+            application_framework="fastapi",
+            primary_database="postgres",
+        )
+        assert inferred.design_spec is not None
+
+        course_run = self.course_workflow_service.create_run(
+            CreateCourseRunRequest(
+                title="Inventory reservations",
+                summary="Build an inventory reservation service with FastAPI and Postgres.",
+                package_type=PackageType.progressive_codebase_course,
+                shared_design_spec=inferred.design_spec,
+                deliverables=[
+                    CreateCourseDeliverableRequest(
+                        title="Service contract",
+                        summary="Implement the core reservation surface.",
+                        learning_outcomes=["Keep the contract stable."],
+                    )
+                ],
+            )
+        )
+        shared_run = self.workflow_service.get_run(course_run.shared_workflow_run_id)
+        assert shared_run is not None
+        shared_run.artifacts.ai_usage = AIUsageSummary(
+            request_count=3,
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            estimated_cost_usd=0.123456,
+            models=["gpt-5.4"],
+        )
+        self.store.save_run(shared_run)
+
+        refreshed = self.course_workflow_service.get_run(course_run.id)
+
+        assert refreshed is not None
+        self.assertEqual(refreshed.ai_usage.request_count, 3)
+        self.assertAlmostEqual(refreshed.ai_usage.estimated_cost_usd, 0.123456)
+        self.assertEqual(refreshed.ai_usage.models, ["gpt-5.4"])

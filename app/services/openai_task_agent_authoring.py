@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import threading
 import time
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.ai import AIUsageSummary
+from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.registry import PackageType, RiskClass
 from app.domain.task_agent import (
     AssignmentDesignSpec,
@@ -25,9 +23,11 @@ from app.services.coursegen_logging import log_coursegen_event
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
 from app.services.public_surface_quality import meaningful_domain_entities, normalized_tokens
+from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
 from app.services.openai_runtime_support import (
     extract_openai_usage,
     load_openai_env_file,
+    parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
     strip_quotes,
 )
@@ -77,7 +77,7 @@ class PublicCheckCustomization(BaseModel):
     learner_goal: str | None = None
     request_method: str | None = None
     request_path: str | None = None
-    request_body: dict[str, Any] = Field(default_factory=dict)
+    request_body_json: str | None = None
     expected_status: int | None = None
     expected_response_contains: list[str] = Field(default_factory=list)
 
@@ -129,6 +129,19 @@ def _scenario_identifier(value: str | None, *, fallback_index: int) -> str:
     return f"starter_scenario_{fallback_index}"
 
 
+def _parse_request_body_json(raw_body: str | None) -> dict[str, Any]:
+    if not isinstance(raw_body, str):
+        return {}
+    candidate = raw_body.strip()
+    if not candidate:
+        return {}
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _build_authored_domain_scenarios(
     scenarios: list[StarterScenarioCustomization],
 ) -> list[StarterScenarioSpec]:
@@ -158,8 +171,9 @@ class OpenAITaskAgentAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 90.0,
+        request_timeout_s: float = 240.0,
         max_request_retries: int = 2,
+        max_customization_validation_retries: int = 2,
     ) -> None:
         self.enabled = enabled
         self.env_file = resolve_openai_env_file(env_file)
@@ -167,6 +181,7 @@ class OpenAITaskAgentAuthoringService:
         self.client_factory = client_factory
         self.request_timeout_s = request_timeout_s
         self.max_request_retries = max(0, max_request_retries)
+        self.max_customization_validation_retries = max(0, max_customization_validation_retries)
         self._customization_validation_rejection_count = 0
         self._last_customization_validation_error: str | None = None
 
@@ -255,7 +270,8 @@ class OpenAITaskAgentAuthoringService:
             )
 
         try:
-            customization, usage = self._generate_customization(
+            customized_spec, customization, usage = self._generate_valid_customized_spec(
+                stage="generate",
                 base_spec=base_spec,
                 title=title,
                 summary=summary,
@@ -265,25 +281,13 @@ class OpenAITaskAgentAuthoringService:
                 overlays=design_spec.overlays,
                 model_id=status.model_id or "gpt-5.4",
             )
-            customized_spec = self._apply_customization(base_spec, customization)
-            customized_spec = ensure_task_agent_deliverable_briefs(customized_spec, overwrite=True)
-            validation = validate_task_agent_spec(customized_spec)
-            if not validation.valid:
-                error_message = (
-                    "OpenAI customization produced an invalid spec: "
-                    + "; ".join(error.code for error in validation.errors[:3])
-                )
-                self._record_customization_validation_rejection(
-                    stage="generate",
-                    error_message=error_message,
-                )
-                raise ValueError(error_message)
+            final_status = self.status()
             return TaskAgentAuthoringResult(
                 spec=customized_spec,
                 origin_template=f"openai_customized:{origin_template}",
                 source=TaskAgentAuthoringSource.openai_live,
                 notes=[f"Customized with OpenAI model `{status.model_id}`.", *customization.notes[:3]],
-                status=status,
+                status=final_status,
                 usage=usage,
             )
         except Exception as exc:  # pragma: no cover
@@ -334,7 +338,8 @@ class OpenAITaskAgentAuthoringService:
             )
 
         try:
-            customization, usage = self._generate_customization(
+            revised_spec, customization, usage = self._generate_valid_customized_spec(
+                stage="revise",
                 base_spec=spec,
                 title=title,
                 summary=summary,
@@ -346,25 +351,13 @@ class OpenAITaskAgentAuthoringService:
                 feedback=feedback,
                 failure_context=failure_context,
             )
-            revised_spec = self._apply_customization(spec, customization)
-            revised_spec = ensure_task_agent_deliverable_briefs(revised_spec, overwrite=True)
-            validation = validate_task_agent_spec(revised_spec)
-            if not validation.valid:
-                error_message = (
-                    "OpenAI revision produced an invalid spec: "
-                    + "; ".join(error.code for error in validation.errors[:3])
-                )
-                self._record_customization_validation_rejection(
-                    stage="revise",
-                    error_message=error_message,
-                )
-                raise ValueError(error_message)
+            final_status = self.status()
             return TaskAgentAuthoringResult(
                 spec=revised_spec,
                 origin_template=f"openai_revision:{origin}",
                 source=TaskAgentAuthoringSource.openai_live,
                 notes=[f"Revised with OpenAI model `{status.model_id}`.", *customization.notes[:3]],
-                status=status,
+                status=final_status,
                 usage=usage,
             )
         except Exception as exc:  # pragma: no cover
@@ -387,6 +380,71 @@ class OpenAITaskAgentAuthoringService:
                 status=fallback_status,
                 usage=None,
             )
+
+    def _generate_valid_customized_spec(
+        self,
+        *,
+        stage: str,
+        base_spec: TaskAgentServiceSpec,
+        title: str,
+        summary: str,
+        package_type: PackageType,
+        domain_pack: str | None,
+        risk_class: RiskClass,
+        overlays: list[str],
+        model_id: str,
+        feedback: str | None = None,
+        failure_context: FailureContext | None = None,
+    ) -> tuple[TaskAgentServiceSpec, TaskAgentCustomization, AIUsageSummary | None]:
+        accumulated_usage = AIUsageSummary()
+        latest_feedback = feedback
+        last_error_message: str | None = None
+
+        for validation_attempt in range(1, self.max_customization_validation_retries + 2):
+            customization, usage = self._generate_customization(
+                base_spec=base_spec,
+                title=title,
+                summary=summary,
+                package_type=package_type,
+                domain_pack=domain_pack,
+                risk_class=risk_class,
+                overlays=overlays,
+                model_id=model_id,
+                feedback=latest_feedback,
+                failure_context=failure_context,
+            )
+            accumulated_usage = merge_ai_usage(accumulated_usage, usage)
+            customized_spec = self._apply_customization(base_spec, customization)
+            customized_spec = ensure_task_agent_deliverable_briefs(customized_spec, overwrite=True)
+            validation = validate_task_agent_spec(customized_spec)
+            if validation.valid:
+                return (
+                    customized_spec,
+                    customization,
+                    accumulated_usage if accumulated_usage.request_count else None,
+                )
+
+            last_error_message = self._validation_error_message(stage=stage, validation=validation)
+            self._record_customization_validation_rejection(
+                stage=stage,
+                error_message=last_error_message,
+            )
+            if validation_attempt > self.max_customization_validation_retries:
+                break
+            latest_feedback = self._preflight_feedback(
+                existing_feedback=feedback,
+                validation=validation,
+                stage=stage,
+                validation_attempt=validation_attempt,
+            )
+            log_coursegen_event(
+                "task_agent_authoring_customization_preflight_retry",
+                stage=stage,
+                validation_attempt=validation_attempt + 1,
+                error_codes=[issue.code for issue in validation.errors[:5]],
+            )
+
+        raise ValueError(last_error_message or "OpenAI customization preflight failed.")
 
     def _apply_customization(
         self,
@@ -423,9 +481,10 @@ class OpenAITaskAgentAuthoringService:
             if patch.learning_outcomes:
                 deliverable.learning_outcomes = _normalize_text_list(patch.learning_outcomes)
             if patch.learner_starter_surface is not None:
+                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 authored_surface = deliverable.learner_starter_surface or LearnerStarterSurfaceSpec(
                     starter_summary="",
-                    primary_editable_paths=list(spec.runtime_dependencies.editable_files or ["app.py"]),
+                    primary_editable_paths=list(editable_paths),
                     support_paths=[],
                     required_endpoints=[endpoint.model_copy(deep=True) for endpoint in spec.public_endpoints],
                     implementation_checklist=[],
@@ -444,6 +503,7 @@ class OpenAITaskAgentAuthoringService:
                     authored_surface.domain_scenarios = authored_domain_scenarios
                 deliverable.learner_starter_surface = authored_surface
             if patch.public_checks:
+                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 public_checks: list[PublicCheckSpec] = []
                 for index, check in enumerate(patch.public_checks, start=1):
                     request_method = (check.request_method or "POST").strip().upper()
@@ -457,10 +517,10 @@ class OpenAITaskAgentAuthoringService:
                             learner_goal=(check.learner_goal or deliverable.objective).strip(),
                             request_method=request_method,
                             request_path=request_path,
-                            request_body=dict(check.request_body),
+                            request_body=_parse_request_body_json(check.request_body_json),
                             expected_status=check.expected_status or 200,
                             expected_response_contains=_normalize_text_list(check.expected_response_contains),
-                            files_to_use=list(spec.runtime_dependencies.editable_files or ["app.py"]),
+                            files_to_use=list(editable_paths),
                         )
                     )
                 if public_checks:
@@ -482,9 +542,13 @@ class OpenAITaskAgentAuthoringService:
         failure_context: FailureContext | None = None,
     ) -> tuple[TaskAgentCustomization, AIUsageSummary | None]:
         config = self._config()
-        client = self._client(
-            api_key=config.get("OPENAI_API_KEY", ""),
-            base_url=config.get("OPENAI_BASE_URL"),
+        client = (
+            self._client(
+                api_key=config.get("OPENAI_API_KEY", ""),
+                base_url=config.get("OPENAI_BASE_URL"),
+            )
+            if self.client_factory is not None
+            else None
         )
         prompt_payload = {
             "title": title,
@@ -506,6 +570,8 @@ class OpenAITaskAgentAuthoringService:
         response = self._create_response_with_retries(
             client,
             model=model_id,
+            api_key=config.get("OPENAI_API_KEY", ""),
+            base_url=config.get("OPENAI_BASE_URL"),
             input=[
                 {
                     "role": "system",
@@ -519,17 +585,31 @@ class OpenAITaskAgentAuthoringService:
                         "`service`, `system`, `api`, `backend`, `bot`, or `agent` as the primary public resource path. "
                         "Starter scenarios and visible checks should use concrete domain language, not labels like `Primary request` or `Edge or failure path`. "
                         "Deliverable titles such as `Service contract`, `Operational hardening`, or other generic scaffolding labels are too weak; "
+                        "when a public check needs a body, put a compact JSON object string in `request_body_json` and leave it null for bodyless requests. "
                         "keep the titles grounded in the project's actual resources and workflows."
                     ),
                 },
                 {"role": "user", "content": json.dumps(prompt_payload, indent=2)},
             ],
             temperature=0.2,
+            text_format=TaskAgentCustomization,
         )
-        payload = self._extract_json(getattr(response, "output_text", ""))
-        return TaskAgentCustomization.model_validate(payload), extract_openai_usage(response, model_id)
+        customization = response.output_parsed
+        if customization is None:
+            raise ValueError("OpenAI authoring returned no parsed customization.")
+        return customization, extract_openai_usage(response, model_id)
 
-    def _create_response_with_retries(self, client, *, model: str, input: list[dict[str, Any]], temperature: float):
+    def _create_response_with_retries(
+        self,
+        client,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str | None,
+        input: list[dict[str, Any]],
+        temperature: float,
+        text_format: type[BaseModel],
+    ):
         last_error: Exception | None = None
         for attempt in range(1, self.max_request_retries + 2):
             log_coursegen_event(
@@ -538,12 +618,22 @@ class OpenAITaskAgentAuthoringService:
                 attempt=attempt,
             )
             try:
-                return self._run_with_timeout(
-                    lambda: client.responses.create(
+                if self.client_factory is not None:
+                    return client.responses.parse(
                         model=model,
                         input=input,
                         temperature=temperature,
+                        text_format=text_format,
+                        timeout=self.request_timeout_s,
                     )
+                return parse_structured_openai_response_with_hard_timeout(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    input=input,
+                    text_format=text_format,
+                    request_timeout_s=self.request_timeout_s,
+                    extra_request_kwargs={"temperature": temperature},
                 )
             except Exception as exc:  # pragma: no cover
                 last_error = exc
@@ -559,46 +649,6 @@ class OpenAITaskAgentAuthoringService:
         assert last_error is not None
         raise last_error
 
-    def _run_with_timeout(self, fn):
-        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-        def target() -> None:
-            try:
-                result_queue.put(("ok", fn()))
-            except Exception as exc:  # pragma: no cover
-                result_queue.put(("error", exc))
-
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
-        try:
-            status, payload = result_queue.get(timeout=self.request_timeout_s)
-        except queue.Empty as exc:
-            log_coursegen_event(
-                "task_agent_authoring_request_timeout",
-                timeout_s=self.request_timeout_s,
-            )
-            raise TimeoutError(
-                f"OpenAI authoring request exceeded {self.request_timeout_s:.0f}s."
-            ) from exc
-        if status == "error":
-            raise payload
-        return payload
-
-    def _extract_json(self, raw_text: str) -> dict[str, Any]:
-        text = raw_text.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("OpenAI authoring did not return a JSON object.")
-        return json.loads(text[start : end + 1])
-
     def _record_customization_validation_rejection(self, *, stage: str, error_message: str) -> None:
         self._customization_validation_rejection_count += 1
         self._last_customization_validation_error = error_message
@@ -608,6 +658,36 @@ class OpenAITaskAgentAuthoringService:
             rejection_count=self._customization_validation_rejection_count,
             error=error_message,
         )
+
+    def _validation_error_message(self, *, stage: str, validation) -> str:  # noqa: ANN001
+        prefix = "OpenAI customization produced an invalid spec" if stage == "generate" else "OpenAI revision produced an invalid spec"
+        return prefix + ": " + "; ".join(error.code for error in validation.errors[:3])
+
+    def _preflight_feedback(
+        self,
+        *,
+        existing_feedback: str | None,
+        validation,
+        stage: str,
+        validation_attempt: int,
+    ) -> str:
+        sections: list[str] = []
+        if existing_feedback and existing_feedback.strip():
+            sections.append(existing_feedback.strip())
+        sections.append(
+            (
+                "The last OpenAI customization was rejected by deterministic validation. "
+                if stage == "generate"
+                else "The last OpenAI revision was rejected by deterministic validation. "
+            )
+            + f"Fix these exact issues on preflight attempt {validation_attempt + 1}:"
+        )
+        for issue in validation.errors[:8]:
+            sections.append(f"- {issue.code} at {issue.location}: {issue.message}")
+        sections.append(
+            "Return another full customization JSON response that keeps the creator-selected stack intact and fixes the listed validation issues."
+        )
+        return "\n".join(sections)
 
     def _config(self) -> dict[str, str]:
         config = load_openai_env_file(self.env_file)
@@ -634,7 +714,7 @@ class OpenAITaskAgentAuthoringService:
             return self.client_factory(api_key=api_key, base_url=base_url)
         from openai import OpenAI
 
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if base_url:
             kwargs["base_url"] = base_url
         return OpenAI(**kwargs)

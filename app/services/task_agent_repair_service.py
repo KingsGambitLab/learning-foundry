@@ -45,22 +45,11 @@ class TaskAgentRepairService:
             changed = True
             notes.append("Rebuilt learner briefs, public checks, and derived deliverable guidance from the current spec.")
 
-        if "missing_editable_files" in issue_codes and not spec.runtime_dependencies.editable_files:
-            app_service = next(
-                (service for service in spec.project_contract.runtime_plan.services if service.service_id == "app"),
-                None,
-            )
-            spec.runtime_dependencies.editable_files = [
-                app_service.entrypoint_path if app_service is not None and app_service.entrypoint_path else "app.py"
-            ]
-            changed = True
-            notes.append("Restored the default editable file list for the learner workspace.")
-
         if (
             {"missing_visible_check_command", "public_checks_without_command"} & issue_codes
             and spec.runtime_dependencies.visible_check_command is None
         ):
-            spec.runtime_dependencies.visible_check_command = "python checks/run_visible_checks.py"
+            spec.runtime_dependencies.visible_check_command = "sh .coursegen/runtime/check_visible.sh"
             changed = True
             notes.append("Restored the learner-visible check command.")
 

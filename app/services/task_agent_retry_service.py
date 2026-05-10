@@ -84,6 +84,33 @@ class TaskAgentRetryService:
                 detail=_failure_packet_summary(failure_context),
             )
 
+        if _should_retry_workspace(failure_context, latest_node):
+            run, repaired, repair_detail = self.workspace_authoring_service.repair_workspace(
+                run,
+                latest_node,
+                failure_context=failure_context,
+            )
+            if repaired:
+                run.artifacts.materialized_bundle = None
+                run.artifacts.review_summary = None
+                run.artifacts.notes.append(
+                    (
+                        "Automated retry re-authored the learner workspace from the latest failure packet "
+                        f"({failure_context.owner_hint.value}, signature {failure_context.failure_signature})."
+                    )
+                )
+                return run, TaskAgentRetryResult(
+                    action=TaskAgentRetryAction.revised,
+                    applied=True,
+                    should_continue=True,
+                    owner_hint=failure_context.owner_hint,
+                    failure_signature=failure_context.failure_signature,
+                    before_spec_hash=before_spec_hash,
+                    after_spec_hash=before_spec_hash,
+                    summary="Retry re-authored the learner workspace from the latest failure packet.",
+                    detail=repair_detail,
+                )
+
         feedback = _build_feedback(run, latest_node, failure_context)
         revision = self.authoring_service.revise_spec(
             spec=spec,
@@ -170,6 +197,30 @@ def _spec_hash(spec) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _should_retry_workspace(
+    failure_context: FailureContext,
+    latest_node: WorkflowNodeExecution,
+) -> bool:
+    if failure_context.owner_hint == WorkflowFailureOwnerHint.platform_runtime:
+        return False
+    if latest_node.kind.value in {"authoring_runtime", "reviewer_runtime"}:
+        return True
+    if failure_context.sandbox is not None:
+        return True
+    authored_codes = {
+        "starter_repo_bundle_not_authored",
+        "starter_repo_bundle_incomplete",
+        "runtime_protocol_bundle_not_authored",
+        "runtime_protocol_bundle_incomplete",
+        "starter_entrypoint_embeds_internal_runtime",
+        "starter_entrypoint_simulates_from_manifest",
+        "starter_primary_editable_missing",
+    }
+    if any(finding.code in authored_codes for finding in failure_context.findings):
+        return True
+    return False
+
+
 def _build_feedback(
     run: WorkflowRun,
     latest_node: WorkflowNodeExecution,
@@ -195,6 +246,10 @@ def _build_feedback(
             if failure_context.sandbox is not None
             else None
         ),
+        "dependency_contracts": [
+            contract.model_dump(mode="json")
+            for contract in failure_context.dependency_contracts
+        ],
     }
     return (
         "Revise the learner-ready assignment draft using the failure packet below. "

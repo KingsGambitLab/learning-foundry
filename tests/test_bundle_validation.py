@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -19,8 +20,11 @@ from app.services.learner_brief_builder import (
     render_learner_starter_readme,
 )
 from app.services.spec_validation import validate_task_agent_spec
-from app.services.task_agent_starter_templates import build_task_agent_starter_files, task_agent_entrypoint_path
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+from app.services.task_agent_starter_templates import (
+    HIDDEN_MANIFEST_PATH,
+    RUNTIME_INSTALL_SCRIPT_PATH,
+)
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -248,13 +252,52 @@ def test_bundle_validation_flags_generic_starter_readme_without_domain_entities(
             "Keep the service surface stable while you improve the behavior behind it.\n\n"
             "## Files to edit\n\n- `app.py`\n\n"
             "## Definition of done\n\n- Keep the service surface stable.\n\n"
-            "## Helpful commands\n\n- Preview: `python .coursegen/preview_app.py --host 127.0.0.1`\n",
+            "## Helpful commands\n\n- Preview: `sh .coursegen/runtime/run.sh`\n",
             encoding="utf-8",
         )
 
         result = validate_materialized_bundle(run.artifacts.task_agent_spec, bundle)
         assert not result.valid
         assert any(issue.code == "starter_readme_lacks_domain_grounding" for issue in result.errors)
+
+
+def test_bundle_validation_flags_runtime_protocol_bundle_marked_authored_when_placeholders_remain() -> None:
+    design_spec = _inventory_design()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        store = SQLiteWorkflowStore(db_path=f"{temp_dir}/test.db")
+        workflow_service = WorkflowService(
+            store,
+            materializer=ArtifactMaterializer(base_dir=f"{temp_dir}/generated"),
+        )
+        run = workflow_service.create_run_from_explicit_plan(
+            intake=GenerationIntake(
+                title="Inventory Reservation Service",
+                problem_statement=(
+                    "Build a multi-warehouse inventory reservation service with FastAPI, Postgres, and Redis. "
+                    "Keep reservations correct under concurrency, retries, and stock transfers."
+                ),
+            ),
+            design_spec=design_spec,
+            execute_nodes=False,
+        )
+        bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
+        starter_root = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id
+        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["runtime_protocol_bundle"] = {
+            "source": "openai_live",
+            "generated_for_deliverable": run.artifacts.task_agent_spec.deliverables[0].id,
+            "authored_paths": [RUNTIME_INSTALL_SCRIPT_PATH],
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (starter_root / RUNTIME_INSTALL_SCRIPT_PATH).write_text(
+            "#!/usr/bin/env sh\nset -eu\necho runtime install\n",
+            encoding="utf-8",
+        )
+
+        result = validate_materialized_bundle(run.artifacts.task_agent_spec, bundle)
+        assert not result.valid
+        assert any(issue.code == "runtime_protocol_bundle_incomplete" for issue in result.errors)
 
 
 def test_materialized_starter_surface_stays_honest_for_transactional_bundle() -> None:
@@ -386,9 +429,10 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
             "# Duplicate brief\n",
             encoding="utf-8",
         )
-        starter_files = build_task_agent_starter_files(spec, deliverable.id)
-        workspace_root.joinpath(task_agent_entrypoint_path(spec)).write_text(
-            starter_files[task_agent_entrypoint_path(spec)],
+        assert deliverable.learner_starter_surface is not None
+        primary_editable = deliverable.learner_starter_surface.primary_editable_paths[0]
+        workspace_root.joinpath(primary_editable).write_text(
+            "# learner-owned file\n",
             encoding="utf-8",
         )
 

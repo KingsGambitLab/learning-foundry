@@ -15,23 +15,27 @@ from app.services.task_agent_contract_surface import (
     is_approval_path,
     is_eval_path,
     is_health_path,
+    learner_editable_paths_for_spec,
     primary_submit_endpoint_for_spec,
 )
 from app.services.public_surface_quality import meaningful_domain_entities, pluralize_phrase, starter_surface_markers
-from app.services.task_agent_starter_templates import default_preview_command
+from app.services.task_agent_starter_templates import (
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+    default_preview_command,
+)
 
 
 def _editable_files_for_spec(spec: TaskAgentServiceSpec) -> list[str]:
-    return list(spec.runtime_dependencies.editable_files or ["app.py"])
+    return learner_editable_paths_for_spec(spec)
 
 
-def _primary_editable_file(spec: TaskAgentServiceSpec) -> str:
+def _primary_editable_file(spec: TaskAgentServiceSpec) -> str | None:
     files = _editable_files_for_spec(spec)
-    return files[0] if files else "app.py"
+    return files[0] if files else None
 
 
 def _visible_check_command(spec: TaskAgentServiceSpec) -> str:
-    return spec.runtime_dependencies.visible_check_command or "python checks/run_visible_checks.py"
+    return spec.runtime_dependencies.visible_check_command or f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
 
 
 def _preview_command(spec: TaskAgentServiceSpec) -> str:
@@ -165,7 +169,11 @@ def build_task_agent_deliverable_starter_surface(
                 if endpoint_labels
                 else "Keep the published application contract stable while you implement this deliverable."
             ),
-            f"Make the learner-owned files `{', '.join(editable_paths)}` the source of truth for the core behavior.",
+            (
+                f"Make the learner-owned files `{', '.join(editable_paths)}` the source of truth for the core behavior."
+                if editable_paths
+                else "Make the learner-owned repo files the source of truth for the core behavior."
+            ),
             "Handle the visible scenarios with explicit, readable branching.",
             "Keep `/health` working while you deepen the real service behavior.",
             (
@@ -267,10 +275,16 @@ def build_task_agent_deliverable_brief(
         why_this_deliverable_matters = (
             "This deliverable builds on the earlier working surface and adds one production-facing capability without changing the overall contract."
         )
-    task_to_build = (
-        f"Edit `{primary_file}` so the real service can {deliverable.objective.rstrip('.').lower()}. "
-        f"Keep {_primary_request_surface(starter_surface)} stable while you implement the deliverable in learner-owned code."
-    )
+    if primary_file:
+        task_to_build = (
+            f"Edit `{primary_file}` so the real service can {deliverable.objective.rstrip('.').lower()}. "
+            f"Keep {_primary_request_surface(starter_surface)} stable while you implement the deliverable in learner-owned code."
+        )
+    else:
+        task_to_build = (
+            f"Edit the learner-owned repo files so the real service can {deliverable.objective.rstrip('.').lower()}. "
+            f"Keep {_primary_request_surface(starter_surface)} stable while you implement the deliverable in learner-owned code."
+        )
     definition_of_done = _dedupe(
         [
             f"{_primary_request_surface(starter_surface)} stays available while you implement the deliverable.",
@@ -279,7 +293,11 @@ def build_task_agent_deliverable_brief(
         limit=5,
     )
     implementation_hints = [
-        f"Start in `{primary_file}` and keep the main request path readable in learner-owned code.",
+        (
+            f"Start in `{primary_file}` and keep the main request path readable in learner-owned code."
+            if primary_file
+            else "Start in the learner-owned repo files and keep the main request path readable in learner-owned code."
+        ),
         "Make the smallest change that satisfies this deliverable instead of jumping ahead to later production features.",
         "Prefer explicit, predictable branching over hidden helpers so failures are easier to debug.",
     ]
@@ -384,7 +402,7 @@ def combine_learner_deliverable_briefs(
         return LearnerDeliverableBrief(
             why_this_deliverable_matters=fallback_why,
             task_to_build=fallback_task,
-            files_to_edit=fallback_files_to_edit or ["app.py"],
+            files_to_edit=fallback_files_to_edit or [],
             definition_of_done=["Implement the deliverable goal in the learner-visible workspace and submit it for review."],
             example_scenarios=[],
             implementation_hints=["Start with the learner-visible starter files before making broader refactors."],
@@ -396,7 +414,7 @@ def combine_learner_deliverable_briefs(
         task_to_build=first.task_to_build or fallback_task,
         files_to_edit=_dedupe(
             [item for brief in brief_list for item in brief.files_to_edit]
-            or list(fallback_files_to_edit or ["app.py"]),
+            or list(fallback_files_to_edit or []),
             limit=6,
         ),
         definition_of_done=_dedupe(
@@ -516,8 +534,8 @@ def render_learner_starter_readme(
         lines.extend(["", "## Helpful hints", ""])
         lines.extend(f"- {item}" for item in brief.implementation_hints)
     lines.extend(["", "## Helpful commands", ""])
-    lines.append(f"- Preview: `{preview_command or 'python .coursegen/preview_app.py --host 127.0.0.1'}`")
-    lines.append(f"- Visible checks: `{visible_check_command or 'python checks/run_visible_checks.py'}`")
+    lines.append("- Preview: `" + (preview_command or "sh .coursegen/runtime/run.sh") + "`")
+    lines.append(f"- Visible checks: `{visible_check_command or f'sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}'}`")
     if public_checks:
         lines.extend(["", "## Visible checks", ""])
         for check in public_checks:

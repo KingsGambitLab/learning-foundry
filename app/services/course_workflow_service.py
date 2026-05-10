@@ -114,7 +114,12 @@ class CourseWorkflowService:
         return CourseRunList(runs=refreshed_runs)
 
     def get_run(self, course_run_id: str) -> CourseRun | None:
-        return self.store.get_course_run(course_run_id)
+        run = self.store.get_course_run(course_run_id)
+        if run is None:
+            return None
+        refreshed = self._compute_refreshed_run(run)
+        self.store.save_course_run(refreshed)
+        return refreshed
 
     def list_events(self, course_run_id: str):
         return self.store.list_course_events(course_run_id)
@@ -206,9 +211,14 @@ class CourseWorkflowService:
             package_type_hint=package_type_hint,
             starter_type=(creator_choices.starter_type if creator_choices is not None else None),
             implementation_language=(creator_choices.implementation_language if creator_choices is not None else None),
+            language_version=(creator_choices.language_version if creator_choices is not None else None),
             application_framework=(creator_choices.application_framework if creator_choices is not None else None),
+            framework_version=(creator_choices.framework_version if creator_choices is not None else None),
+            package_manager=(creator_choices.package_manager if creator_choices is not None else None),
             primary_database=(creator_choices.primary_database if creator_choices is not None else None),
+            primary_database_version=(creator_choices.primary_database_version if creator_choices is not None else None),
             cache_backend=(creator_choices.cache_backend if creator_choices is not None else None),
+            cache_backend_version=(creator_choices.cache_backend_version if creator_choices is not None else None),
             tech_stack=(list(creator_choices.tech_stack) if creator_choices is not None else []),
             data_sources=(list(creator_choices.data_sources) if creator_choices is not None else []),
         )
@@ -219,9 +229,14 @@ class CourseWorkflowService:
             package_type_hint=package_type_hint,
             starter_type=intake.starter_type,
             implementation_language=intake.implementation_language,
+            language_version=intake.language_version,
             application_framework=intake.application_framework,
+            framework_version=intake.framework_version,
+            package_manager=intake.package_manager,
             primary_database=intake.primary_database,
+            primary_database_version=intake.primary_database_version,
             cache_backend=intake.cache_backend,
+            cache_backend_version=intake.cache_backend_version,
             tech_stack=intake.tech_stack,
             data_sources=intake.data_sources,
         )
@@ -233,6 +248,7 @@ class CourseWorkflowService:
             title=title,
             summary=goal.strip(),
             package_type=package_type_hint or inferred.package_type,
+            creator_choices=creator_choices.model_copy(deep=True) if creator_choices is not None else None,
             shared_design_spec=inferred.design_spec,
             shared_workflow_run_id=None,
             created_at=now,
@@ -285,6 +301,7 @@ class CourseWorkflowService:
                 title=plan.title,
                 summary=plan.summary,
                 package_type=plan.package_type,
+                creator_choices=existing.creator_choices,
                 shared_design_spec=plan.shared_design_spec,
                 course_family_id=existing.course_family_id,
                 deliverables=plan.deliverables,
@@ -430,6 +447,7 @@ class CourseWorkflowService:
             package_type=package_type,
             pattern_slug=pattern.course_slug if pattern else request.pattern_slug,
             course_family_id=request.course_family_id or course_run_id,
+            creator_choices=request.creator_choices.model_copy(deep=True) if request.creator_choices is not None else None,
             shared_design_spec=shared_design_spec,
             shared_workflow_run_id=shared_workflow_run_id,
             created_at=created_at,
@@ -1482,21 +1500,39 @@ class CourseWorkflowService:
         return "All linked assignment workflow runs must be published before the course can be published."
 
     def _creator_choices(self, course_run: CourseRun):
-        runtime_dependencies = (
-            course_run.shared_design_spec.runtime_dependencies
-            if course_run.shared_design_spec is not None
+        if course_run.creator_choices is not None:
+            return course_run.creator_choices.model_copy(deep=True)
+        shared_design = course_run.shared_design_spec
+        runtime_dependencies = shared_design.runtime_dependencies if shared_design is not None else None
+        runtime_plan = (
+            shared_design.project_contract.runtime_plan
+            if shared_design is not None
             else None
         )
         if runtime_dependencies is None:
             return None
         from app.domain.course import CreatorCourseSetupChoices
 
+        def service_version(service_id: str | None) -> str | None:
+            if runtime_plan is None or not service_id:
+                return None
+            service = next(
+                (candidate for candidate in runtime_plan.services if candidate.service_id == service_id),
+                None,
+            )
+            return service.version_hint if service is not None else None
+
         return CreatorCourseSetupChoices(
             starter_type=runtime_dependencies.starter_type,
             implementation_language=runtime_dependencies.implementation_language,
+            language_version=runtime_dependencies.language_version or (runtime_plan.language_version if runtime_plan else None),
             application_framework=runtime_dependencies.application_framework,
+            framework_version=runtime_dependencies.framework_version or (runtime_plan.framework_version if runtime_plan else None),
+            package_manager=runtime_dependencies.package_manager or (runtime_plan.package_manager if runtime_plan else None),
             primary_database=runtime_dependencies.primary_database,
+            primary_database_version=runtime_dependencies.primary_database_version or service_version(runtime_dependencies.primary_database),
             cache_backend=runtime_dependencies.cache_backend,
+            cache_backend_version=runtime_dependencies.cache_backend_version or service_version(runtime_dependencies.cache_backend),
             tech_stack=list(runtime_dependencies.tech_stack),
             data_sources=list(runtime_dependencies.data_sources),
         )
@@ -1511,6 +1547,17 @@ class CourseWorkflowService:
         design_spec: AssignmentDesignSpec | None,
     ) -> GenerationIntake:
         runtime_dependencies = design_spec.runtime_dependencies if design_spec is not None else None
+        runtime_plan = design_spec.project_contract.runtime_plan if design_spec is not None else None
+
+        def service_version(service_id: str | None) -> str | None:
+            if runtime_plan is None or not service_id:
+                return None
+            service = next(
+                (candidate for candidate in runtime_plan.services if candidate.service_id == service_id),
+                None,
+            )
+            return service.version_hint if service is not None else None
+
         return GenerationIntake(
             title=title,
             problem_statement=problem_statement,
@@ -1520,11 +1567,31 @@ class CourseWorkflowService:
             implementation_language=(
                 runtime_dependencies.implementation_language if runtime_dependencies is not None else None
             ),
+            language_version=(
+                (runtime_dependencies.language_version if runtime_dependencies is not None else None)
+                or (runtime_plan.language_version if runtime_plan is not None else None)
+            ),
             application_framework=(
                 runtime_dependencies.application_framework if runtime_dependencies is not None else None
             ),
+            framework_version=(
+                (runtime_dependencies.framework_version if runtime_dependencies is not None else None)
+                or (runtime_plan.framework_version if runtime_plan is not None else None)
+            ),
+            package_manager=(
+                (runtime_dependencies.package_manager if runtime_dependencies is not None else None)
+                or (runtime_plan.package_manager if runtime_plan is not None else None)
+            ),
             primary_database=(runtime_dependencies.primary_database if runtime_dependencies is not None else None),
+            primary_database_version=(
+                (runtime_dependencies.primary_database_version if runtime_dependencies is not None else None)
+                or service_version(runtime_dependencies.primary_database if runtime_dependencies is not None else None)
+            ),
             cache_backend=(runtime_dependencies.cache_backend if runtime_dependencies is not None else None),
+            cache_backend_version=(
+                (runtime_dependencies.cache_backend_version if runtime_dependencies is not None else None)
+                or service_version(runtime_dependencies.cache_backend if runtime_dependencies is not None else None)
+            ),
             tech_stack=(list(runtime_dependencies.tech_stack) if runtime_dependencies is not None else []),
             data_sources=(list(runtime_dependencies.data_sources) if runtime_dependencies is not None else []),
         )

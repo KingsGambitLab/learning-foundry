@@ -19,7 +19,10 @@ from app.services.openai_task_agent_authoring import (
     TaskAgentAuthoringStatus,
 )
 from app.services.task_agent_retry_service import TaskAgentRetryAction, TaskAgentRetryService
-from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
+from app.services.task_agent_workspace_authoring import (
+    TaskAgentWorkspaceAuthoringService,
+    WorkspaceRepairSmokeResult,
+)
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -79,6 +82,31 @@ class _AlwaysFailSandboxRunner:
 
     def execute(self, run):  # noqa: ANN001
         return _authored_failure_sandbox_result(run.id)
+
+
+class _RepairingWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
+    def __init__(self, workspace_manager: AssignmentWorkspaceManager, *, smoke_passed: bool = True) -> None:
+        super().__init__(workspace_manager)
+        self.repair_calls = 0
+        self.smoke_checks = 0
+        self.smoke_passed = smoke_passed
+
+    def repair_workspace(self, run, latest_node, failure_context=None):  # noqa: ANN001
+        self.repair_calls += 1
+        run = self.ensure_workspace(run)
+        return run, True, "Fake workspace repair rewrote the learner repo."
+
+    def smoke_verify_repair(self, run, latest_node, *, failure_context=None):  # noqa: ANN001
+        self.smoke_checks += 1
+        if self.smoke_passed:
+            return WorkspaceRepairSmokeResult(
+                passed=True,
+                summary="Fake workspace smoke verification passed.",
+            )
+        return WorkspaceRepairSmokeResult(
+            passed=False,
+            summary="Fake workspace smoke verification still fails with the same build blocker.",
+        )
 
 
 def _make_workflow_service(temp_dir: Path, *, node_runtime=None, task_agent_authoring_service=None) -> WorkflowService:
@@ -203,6 +231,28 @@ def _approval_claim_failure_node() -> WorkflowNodeExecution:
     )
 
 
+def _pedagogy_failure_node() -> WorkflowNodeExecution:
+    return WorkflowNodeExecution(
+        node_id="reviewer_pedagogy_1",
+        kind=WorkflowNodeKind.reviewer_pedagogy,
+        status=WorkflowNodeStatus.failed,
+        attempt=1,
+        summary="Reviewer pedagogy node found a weak learner brief.",
+        created_at=datetime.now(UTC),
+        sandbox_result=None,
+        findings=[
+            ReviewerFinding(
+                category="pedagogy_review",
+                severity=ReviewerFindingSeverity.error,
+                title="Learner brief needs a clearer opening task",
+                detail="Deliverable 1 should name the first learner outcome more explicitly in the README.",
+                code="learner_brief_opening_unclear",
+                location="public/starter/deliverable_1/README.md",
+            )
+        ],
+    )
+
+
 def _platform_compiler_failure_node() -> WorkflowNodeExecution:
     return WorkflowNodeExecution(
         node_id="authoring_runtime_1",
@@ -300,7 +350,59 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(result.action, TaskAgentRetryAction.blocked_platform)
             self.assertEqual(result.owner_hint.value, "platform_runtime")
 
-    def test_retry_service_revises_spec_from_failure_packet(self) -> None:
+    def test_retry_service_repairs_workspace_from_runtime_failure_packet(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            reviser = _RevisingAuthoringService()
+            workspace_authoring = _RepairingWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            retry_service = TaskAgentRetryService(
+                authoring_service=reviser,
+                workspace_authoring_service=workspace_authoring,
+            )
+
+            updated_run, result = retry_service.retry(run, _authored_failure_node())
+
+            self.assertTrue(result.should_continue)
+            self.assertTrue(result.applied)
+            self.assertEqual(result.action, TaskAgentRetryAction.revised)
+            self.assertEqual(result.owner_hint.value, "authored_artifact")
+            self.assertEqual(result.before_spec_hash, result.after_spec_hash)
+            self.assertIsNone(reviser.last_failure_context)
+            self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
+            self.assertEqual(workspace_authoring.repair_calls, 1)
+            self.assertEqual(workspace_authoring.smoke_checks, 0)
+            self.assertIn("re-authored the learner workspace", result.summary)
+
+    def test_retry_service_workspace_repair_continues_even_without_smoke_gate(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            reviser = _RevisingAuthoringService()
+            workspace_authoring = _RepairingWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces"),
+                smoke_passed=False,
+            )
+            retry_service = TaskAgentRetryService(
+                authoring_service=reviser,
+                workspace_authoring_service=workspace_authoring,
+            )
+
+            updated_run, result = retry_service.retry(run, _authored_failure_node())
+
+            self.assertTrue(result.applied)
+            self.assertTrue(result.should_continue)
+            self.assertEqual(result.action, TaskAgentRetryAction.revised)
+            self.assertEqual(result.owner_hint.value, "authored_artifact")
+            self.assertIsNone(reviser.last_failure_context)
+            self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
+            self.assertEqual(workspace_authoring.repair_calls, 1)
+            self.assertEqual(workspace_authoring.smoke_checks, 0)
+            self.assertIn("re-authored the learner workspace", result.summary.lower())
+
+    def test_retry_service_revises_spec_from_non_runtime_failure_packet(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             run = _make_run(temp_dir)
@@ -312,7 +414,7 @@ class TaskAgentRetryServiceTests(TestCase):
                 ),
             )
 
-            updated_run, result = retry_service.retry(run, _authored_failure_node())
+            updated_run, result = retry_service.retry(run, _pedagogy_failure_node())
 
             self.assertTrue(result.should_continue)
             self.assertTrue(result.applied)
@@ -449,6 +551,76 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertIsNotNone(failure_context.sandbox)
             assert failure_context.sandbox is not None
             self.assertIn("Starter deliverable verification failed", failure_context.sandbox.error or "")
+
+    def test_failure_context_includes_dependency_contract_facts_for_failed_deliverables(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            assert spec is not None
+            spec.project_contract.runtime_plan.implementation_language = "rust"
+            spec.project_contract.runtime_plan.language_version = "1.82"
+            spec.project_contract.runtime_plan.application_framework = "axum"
+            spec.project_contract.runtime_plan.framework_version = "0.8.9"
+            spec.project_contract.runtime_plan.package_manager = "cargo"
+            if spec.project_contract.runtime_plan.services:
+                spec.project_contract.runtime_plan.services[0].container_image = "rust:1.82-bookworm"
+                spec.project_contract.runtime_plan.services[0].learner_managed = True
+            run.artifacts.task_agent_spec = spec
+
+            workspace_authoring = TaskAgentWorkspaceAuthoringService()
+            run, _ = workspace_authoring.author_workspace(run)
+
+            workspace = run.artifacts.workspace_snapshot
+            assert workspace is not None
+            starter_root = Path(workspace.public_dir) / "starter" / "deliverable_1"
+            (starter_root / "Cargo.toml").write_text(
+                "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2021'\n",
+                encoding="utf-8",
+            )
+            (starter_root / "src").mkdir(parents=True, exist_ok=True)
+            (starter_root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+
+            failure_node = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                iteration=1,
+                attempt=1,
+                status=WorkflowNodeStatus.failed,
+                summary="Rust starter failed to build in Docker.",
+                created_at=datetime.now(UTC),
+                sandbox_result=SandboxExecutionResult(
+                    status=SandboxExecutionStatus.failed,
+                    available=True,
+                    build_succeeded=False,
+                    run_succeeded=False,
+                    generated_at=datetime.now(UTC),
+                    build_stderr="cargo build failed",
+                    error="cargo build failed",
+                    deliverable_reports=[
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_1",
+                            compile_succeeded=False,
+                            runtime_succeeded=False,
+                            error="edition2024 is required",
+                        )
+                    ],
+                ),
+                findings=[],
+            )
+            run.artifacts.node_executions = [failure_node]
+
+            failure_context = build_failure_context(run, failure_node)
+
+            self.assertEqual(len(failure_context.dependency_contracts), 1)
+            contract = failure_context.dependency_contracts[0]
+            self.assertEqual(contract.deliverable_id, "deliverable_1")
+            self.assertEqual(contract.package_manager, "cargo")
+            self.assertEqual(contract.expected_manifest_paths, ["Cargo.toml"])
+            self.assertEqual(contract.present_manifest_paths, ["Cargo.toml"])
+            self.assertEqual(contract.expected_lockfile_paths, ["Cargo.lock"])
+            self.assertEqual(contract.present_lockfile_paths, [])
+            self.assertTrue(contract.runtime_bundle_complete)
 
     def test_langgraph_execute_appends_history_across_iterations(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

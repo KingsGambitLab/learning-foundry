@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import threading
 import time
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 from app.domain.ai import AIUsageSummary
 from app.domain.course import (
@@ -21,6 +21,7 @@ from app.services.assignment_design_inference import infer_assignment_design
 from app.services.openai_runtime_support import (
     extract_openai_usage,
     load_openai_env_file,
+    parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
     strip_quotes,
 )
@@ -34,6 +35,25 @@ class OpenAICourseGenerationError(RuntimeError):
     """Raised when OpenAI course generation fails after fallback attempts."""
 
 
+class _PlannerDeliverablePayload(BaseModel):
+    deliverable_slug: str | None = None
+    title: str
+    summary: str
+    learning_outcomes: list[str] = Field(default_factory=list)
+
+
+class _CoursePlanPayload(BaseModel):
+    title: str
+    summary: str
+    package_type: str | None = None
+    deliverables: list[_PlannerDeliverablePayload] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class _LearningOutcomePayload(BaseModel):
+    learning_outcomes: list[str] = Field(default_factory=list)
+
+
 class OpenAICoursePlanner:
     def __init__(
         self,
@@ -42,7 +62,7 @@ class OpenAICoursePlanner:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 90.0,
+        request_timeout_s: float = 180.0,
         max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
@@ -127,6 +147,8 @@ class OpenAICoursePlanner:
         try:
             response = self._create_response_with_retries(
                 client,
+                api_key=config.get("OPENAI_API_KEY", ""),
+                base_url=config.get("OPENAI_BASE_URL"),
                 model=status.model_id or "gpt-5.4",
                 input=[
                     {
@@ -142,10 +164,12 @@ class OpenAICoursePlanner:
                     {"role": "user", "content": json.dumps(prompt, indent=2)},
                 ],
                 temperature=0.2,
+                text_format=_CoursePlanPayload,
             )
-            raw_text = getattr(response, "output_text", "")
-            raw_plan = self._extract_json(raw_text)
-            plan = self._normalize_raw_plan(request, raw_plan)
+            raw_plan = response.output_parsed
+            if raw_plan is None:
+                raise ValueError("OpenAI course planner returned no parsed course plan.")
+            plan = self._normalize_raw_plan(request, raw_plan.model_dump(mode="json"))
             usage = extract_openai_usage(response, status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
             log_coursegen_event(
@@ -207,6 +231,8 @@ class OpenAICoursePlanner:
         try:
             response = self._create_response_with_retries(
                 client,
+                api_key=config.get("OPENAI_API_KEY", ""),
+                base_url=config.get("OPENAI_BASE_URL"),
                 model=status.model_id or "gpt-5.4",
                 input=[
                     {
@@ -220,11 +246,14 @@ class OpenAICoursePlanner:
                     {"role": "user", "content": json.dumps(prompt, indent=2)},
                 ],
                 temperature=0.2,
+                text_format=_LearningOutcomePayload,
             )
-            payload = self._extract_json(getattr(response, "output_text", ""))
+            payload = response.output_parsed
+            if payload is None:
+                raise ValueError("OpenAI course planner returned no parsed learning outcomes.")
             outcomes = [
                 str(item).strip()
-                for item in payload.get("learning_outcomes", [])
+                for item in payload.learning_outcomes
                 if str(item).strip()
             ][:6]
             if not outcomes:
@@ -280,9 +309,14 @@ class OpenAICoursePlanner:
             package_type_hint=request.package_type_hint,
             starter_type=request.creator_setup.starter_type,
             implementation_language=request.creator_setup.implementation_language,
+            language_version=request.creator_setup.language_version,
             application_framework=request.creator_setup.application_framework,
+            framework_version=request.creator_setup.framework_version,
+            package_manager=request.creator_setup.package_manager,
             primary_database=request.creator_setup.primary_database,
+            primary_database_version=request.creator_setup.primary_database_version,
             cache_backend=request.creator_setup.cache_backend,
+            cache_backend_version=request.creator_setup.cache_backend_version,
             tech_stack=list(request.creator_setup.tech_stack),
             data_sources=list(request.creator_setup.data_sources),
         ).design_spec
@@ -312,9 +346,14 @@ class OpenAICoursePlanner:
                 package_type_hint=request.package_type_hint,
                 starter_type=request.creator_setup.starter_type,
                 implementation_language=request.creator_setup.implementation_language,
+                language_version=request.creator_setup.language_version,
                 application_framework=request.creator_setup.application_framework,
+                framework_version=request.creator_setup.framework_version,
+                package_manager=request.creator_setup.package_manager,
                 primary_database=request.creator_setup.primary_database,
+                primary_database_version=request.creator_setup.primary_database_version,
                 cache_backend=request.creator_setup.cache_backend,
+                cache_backend_version=request.creator_setup.cache_backend_version,
                 tech_stack=list(request.creator_setup.tech_stack),
                 data_sources=list(request.creator_setup.data_sources),
             ).design_spec or shared_design_spec
@@ -350,18 +389,28 @@ class OpenAICoursePlanner:
             package_type_hint=request.package_type_hint,
             starter_type=request.creator_setup.starter_type,
             implementation_language=request.creator_setup.implementation_language,
+            language_version=request.creator_setup.language_version,
             application_framework=request.creator_setup.application_framework,
+            framework_version=request.creator_setup.framework_version,
+            package_manager=request.creator_setup.package_manager,
             primary_database=request.creator_setup.primary_database,
+            primary_database_version=request.creator_setup.primary_database_version,
             cache_backend=request.creator_setup.cache_backend,
+            cache_backend_version=request.creator_setup.cache_backend_version,
             tech_stack=list(request.creator_setup.tech_stack),
             data_sources=list(request.creator_setup.data_sources),
         ).design_spec
         creator_setup = {
             "starter_type": request.creator_setup.starter_type.value if request.creator_setup.starter_type else None,
             "implementation_language": request.creator_setup.implementation_language,
+            "language_version": request.creator_setup.language_version,
             "application_framework": request.creator_setup.application_framework,
+            "framework_version": request.creator_setup.framework_version,
+            "package_manager": request.creator_setup.package_manager,
             "primary_database": request.creator_setup.primary_database,
+            "primary_database_version": request.creator_setup.primary_database_version,
             "cache_backend": request.creator_setup.cache_backend,
+            "cache_backend_version": request.creator_setup.cache_backend_version,
             "tech_stack": list(request.creator_setup.tech_stack),
             "data_sources": [source.model_dump(mode="json") for source in request.creator_setup.data_sources],
         }
@@ -442,7 +491,7 @@ class OpenAICoursePlanner:
             max_retries=0,
         )
 
-    def _create_response_with_retries(self, client, **request_kwargs):
+    def _create_response_with_retries(self, client, *, api_key: str, base_url: str | None, **request_kwargs):
         last_error: Exception | None = None
         for attempt in range(self.max_request_retries + 1):
             try:
@@ -452,7 +501,27 @@ class OpenAICoursePlanner:
                     max_attempts=self.max_request_retries + 1,
                     model=request_kwargs.get("model"),
                 )
-                return self._create_response_with_timeout(client, **request_kwargs)
+                if self.client_factory is not None:
+                    request_kwargs = {**request_kwargs, "timeout": self.request_timeout_s}
+                    return client.responses.parse(**request_kwargs)
+                model = request_kwargs.get("model")
+                text_format = request_kwargs.get("text_format")
+                extra_request_kwargs = {
+                    key: value
+                    for key, value in request_kwargs.items()
+                    if key not in {"model", "input", "text_format"}
+                }
+                if not isinstance(model, str) or text_format is None:
+                    raise RuntimeError("OpenAI course planner is missing model or text_format for structured parsing.")
+                return parse_structured_openai_response_with_hard_timeout(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    input=request_kwargs.get("input"),
+                    text_format=text_format,
+                    request_timeout_s=self.request_timeout_s,
+                    extra_request_kwargs=extra_request_kwargs,
+                )
             except Exception as exc:  # pragma: no cover - network and SDK failures vary
                 last_error = exc
                 log_coursegen_event(
@@ -489,34 +558,6 @@ class OpenAICoursePlanner:
         )
         return any(marker in error_text for marker in retryable_markers)
 
-    def _create_response_with_timeout(self, client, **request_kwargs):
-        outcome_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-        def _worker() -> None:
-            try:
-                response = client.responses.create(**request_kwargs)
-            except Exception as exc:  # pragma: no cover - network and SDK failures vary
-                outcome_queue.put(("error", exc))
-                return
-            outcome_queue.put(("ok", response))
-
-        worker = threading.Thread(target=_worker, daemon=True)
-        worker.start()
-        try:
-            status, payload = outcome_queue.get(timeout=self.request_timeout_s)
-        except queue.Empty as exc:
-            log_coursegen_event(
-                "course_planner_request_timeout",
-                model=request_kwargs.get("model"),
-                timeout_s=self.request_timeout_s,
-            )
-            raise TimeoutError(
-                f"OpenAI course planner request exceeded {self.request_timeout_s:.1f}s."
-            ) from exc
-        if status == "error":
-            raise payload
-        return payload
-
     def _config(self) -> dict[str, str]:
         config: dict[str, str] = {}
         if self.env_file:
@@ -539,19 +580,6 @@ class OpenAICoursePlanner:
 
     def _strip_quotes(self, value: str) -> str:
         return strip_quotes(value)
-
-    def _extract_json(self, text: str) -> dict[str, Any]:
-        text = text.strip()
-        if not text:
-            raise ValueError("OpenAI returned an empty response.")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            return json.loads(text[start : end + 1])
 
     def _openai_sdk_available(self) -> bool:
         try:

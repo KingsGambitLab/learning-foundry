@@ -29,7 +29,10 @@ from app.domain.task_agent import (
 )
 from app.domain.registry import StarterType
 from app.services.public_surface_quality import extract_project_entities, pluralize_phrase
-from app.services.task_agent_starter_templates import PREVIEW_LAUNCHER_PATH
+from app.services.task_agent_starter_templates import (
+    RUNTIME_RUN_SCRIPT_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+)
 
 
 class DesignSupportStatus(str, Enum):
@@ -45,9 +48,14 @@ class GenerationIntake(BaseModel):
     package_type_hint: PackageType | None = None
     starter_type: StarterType | None = None
     implementation_language: str | None = None
+    language_version: str | None = None
     application_framework: str | None = None
+    framework_version: str | None = None
+    package_manager: str | None = None
     primary_database: str | None = None
+    primary_database_version: str | None = None
     cache_backend: str | None = None
+    cache_backend_version: str | None = None
     tech_stack: list[str] = Field(default_factory=list)
     data_sources: list[DataSourceSpec] = Field(default_factory=list)
 
@@ -118,17 +126,6 @@ DOMAIN_PACK_KEYWORDS: dict[str, list[str]] = {
 
 REVIEW_REQUIRED_KEYWORDS = {"clinical", "patient", "medical", "diagnosis"}
 HIGH_STAKES_KEYWORDS = {"legal", "prescription", "financial advice"}
-UNSUPPORTED_KEYWORDS = {
-    "frontend",
-    "mobile app",
-    "ios",
-    "android",
-    "react native",
-    "swiftui",
-    "browser extension",
-    "chrome extension",
-}
-PROTOCOL_KEYWORDS = {"mcp", "protocol server", "handshake", "capability discovery"}
 GROUNDED_RETRIEVAL_KEYWORDS = {
     "rag",
     "citation",
@@ -218,15 +215,57 @@ LANGUAGE_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+def _tokenize_phrase(value: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in value.lower():
+        if character.isalnum():
+            current.append(character)
+            continue
+        if current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
+
+
+def _contains_keyword(text: str, keyword: str) -> bool:
+    keyword_tokens = _tokenize_phrase(keyword)
+    if not keyword_tokens:
+        return False
+    text_tokens = _tokenize_phrase(text)
+    span = len(keyword_tokens)
+    if span > len(text_tokens):
+        return False
+    for start in range(len(text_tokens) - span + 1):
+        if text_tokens[start : start + span] == keyword_tokens:
+            return True
+    return False
+
+
+def _contains_any_keyword(text: str, keywords: list[str] | set[str]) -> bool:
+    return any(_contains_keyword(text, keyword) for keyword in keywords)
+
+
+def _keyword_match_count(text: str, keywords: list[str]) -> int:
+    return sum(1 for keyword in keywords if _contains_keyword(text, keyword))
+
+
 def build_project_contract(
     *,
     family: ProjectFamily,
     title: str,
     problem_statement: str,
     implementation_language: str | None = None,
+    language_version: str | None = None,
     application_framework: str | None = None,
+    framework_version: str | None = None,
+    package_manager: str | None = None,
     primary_database: str | None = None,
+    primary_database_version: str | None = None,
     cache_backend: str | None = None,
+    cache_backend_version: str | None = None,
     tech_stack: list[str] | None = None,
     data_sources: list[DataSourceSpec] | None = None,
 ) -> ProjectContractSpec:
@@ -247,9 +286,14 @@ def build_project_contract(
     runtime_plan = build_project_runtime_plan(
         family=family,
         implementation_language=implementation_language,
+        language_version=language_version,
         application_framework=application_framework,
+        framework_version=framework_version,
+        package_manager=package_manager,
         primary_database=primary_database,
+        primary_database_version=primary_database_version,
         cache_backend=cache_backend,
+        cache_backend_version=cache_backend_version,
         tech_stack=tech_stack or [],
         data_sources=source_specs,
     )
@@ -498,6 +542,32 @@ def _version_hint_for(*, aliases: list[str], tech_stack: list[str]) -> str | Non
     return None
 
 
+def default_language_version_for_stack(implementation_language: str | None) -> str | None:
+    normalized_language = (implementation_language or "").strip().lower() or None
+    defaults = {
+        "python": "3.12",
+        "typescript": "22",
+        "javascript": "22",
+        "go": "1.25",
+        "rust": "1.86",
+    }
+    return defaults.get(normalized_language)
+
+
+def default_dependency_version(technology: str | None) -> str | None:
+    normalized = (technology or "").strip().lower() or None
+    defaults = {
+        "postgres": "16",
+        "postgresql": "16",
+        "mongodb": "7",
+        "mongo": "7",
+        "redis": "7",
+        "mysql": "8",
+        "mariadb": "8",
+    }
+    return defaults.get(normalized)
+
+
 def infer_package_manager(
     *,
     implementation_language: str | None,
@@ -527,80 +597,6 @@ def infer_package_manager(
     return None
 
 
-def runtime_target_commands_for_stack(
-    *,
-    implementation_language: str | None,
-    application_framework: str | None,
-    package_manager: str | None,
-) -> tuple[str | None, str | None, str | None]:
-    normalized_language = (implementation_language or "").strip().lower() or None
-    normalized_framework = (application_framework or "").strip().lower() or None
-    normalized_package_manager = (package_manager or "").strip().lower() or None
-
-    if normalized_language == "python":
-        install_command = "python -m pip install -r requirements.txt"
-        if normalized_framework == "django":
-            run_command = "python manage.py runserver 0.0.0.0:${PORT:-8000}"
-        elif normalized_framework == "flask":
-            run_command = "flask --app app run --host 0.0.0.0 --port ${PORT:-8000}"
-        else:
-            run_command = f"python {PREVIEW_LAUNCHER_PATH} --host 0.0.0.0"
-        return install_command, run_command, "python checks/run_visible_checks.py"
-
-    if normalized_language in {"typescript", "javascript"}:
-        package_manager = normalized_package_manager or "pnpm"
-        install_command = {
-            "npm": "npm install",
-            "yarn": "yarn install",
-            "bun": "bun install",
-        }.get(package_manager, "pnpm install --yes --dangerously-allow-all-builds")
-        if normalized_framework == "nestjs":
-            run_command = {
-                "npm": "npm run start:dev",
-                "yarn": "yarn start:dev",
-                "bun": "bun run start:dev",
-            }.get(package_manager, "pnpm start:dev")
-        else:
-            run_command = {
-                "npm": "npm run dev",
-                "yarn": "yarn dev",
-                "bun": "bun run dev",
-            }.get(package_manager, "pnpm dev")
-        return install_command, run_command, "python checks/run_visible_checks.py"
-
-    if normalized_language == "go":
-        return "go mod tidy", "go run .", "python checks/run_visible_checks.py"
-
-    if normalized_language == "rust":
-        return "cargo fetch", "cargo run", "python checks/run_visible_checks.py"
-
-    return None, None, "python checks/run_visible_checks.py"
-
-
-def runtime_verify_commands_for_stack(
-    *,
-    implementation_language: str | None,
-    application_framework: str | None,
-) -> list[str]:
-    normalized_language = (implementation_language or "").strip().lower() or None
-    normalized_framework = (application_framework or "").strip().lower() or None
-
-    if normalized_language == "python":
-        if normalized_framework == "django":
-            return ["python manage.py check"]
-        return [
-            "python -c \"from app import app as _coursegen_app; print(type(_coursegen_app).__name__)\""
-        ]
-
-    if normalized_language == "go":
-        return ["go build ./..."]
-
-    if normalized_language == "rust":
-        return ["cargo check"]
-
-    return []
-
-
 def runtime_entrypoint_for_stack(
     *,
     implementation_language: str | None,
@@ -628,17 +624,22 @@ def runtime_container_image_for_stack(
     *,
     implementation_language: str | None,
     language_version: str | None,
+    allow_inference: bool = True,
 ) -> str | None:
     normalized_language = (implementation_language or "").strip().lower() or None
-    version = (language_version or "").strip() or None
+    version = (language_version or "").strip() or (
+        default_language_version_for_stack(normalized_language)
+        if allow_inference
+        else None
+    )
     if normalized_language == "python":
-        return f"python:{version or '3.12'}-slim"
+        return f"python:{version}-slim" if version else None
     if normalized_language in {"typescript", "javascript"}:
-        return f"node:{version or '22'}-bookworm-slim"
+        return f"node:{version}-bookworm-slim" if version else None
     if normalized_language == "go":
-        return f"golang:{version or '1.23'}-bookworm"
+        return f"golang:{version}-bookworm" if version else None
     if normalized_language == "rust":
-        return f"rust:{version or '1.86'}-bookworm"
+        return f"rust:{version}-bookworm" if version else None
     return None
 
 
@@ -646,9 +647,14 @@ def dependency_container_image(
     *,
     technology: str | None,
     version_hint: str | None,
+    allow_inference: bool = True,
 ) -> str | None:
     normalized = (technology or "").strip().lower()
-    version = (version_hint or "").strip() or None
+    version = (version_hint or "").strip() or (
+        default_dependency_version(normalized)
+        if allow_inference
+        else None
+    )
     if normalized in {"postgres", "postgresql"}:
         base_version = version or "16"
         return base_version if ":" in base_version else f"postgres:{base_version}-alpine"
@@ -666,32 +672,73 @@ def build_project_runtime_plan(
     *,
     family: ProjectFamily,
     implementation_language: str | None,
+    language_version: str | None,
     application_framework: str | None,
+    framework_version: str | None,
+    package_manager: str | None,
     primary_database: str | None,
+    primary_database_version: str | None,
     cache_backend: str | None,
+    cache_backend_version: str | None,
     tech_stack: list[str],
     data_sources: list[DataSourceSpec],
+    allow_inference: bool = True,
 ) -> ProjectRuntimePlanSpec:
     language_runtime = {
         "typescript": "node",
         "javascript": "node",
     }.get(implementation_language or "", implementation_language)
-    language_version = _version_hint_for(
-        aliases=[language_runtime or "", implementation_language or ""],
-        tech_stack=tech_stack,
+    resolved_language_version = (language_version or "").strip() or (
+        _version_hint_for(
+            aliases=[language_runtime or "", implementation_language or ""],
+            tech_stack=tech_stack,
+        )
+        if allow_inference
+        else None
+    ) or (
+        default_language_version_for_stack(implementation_language)
+        if allow_inference
+        else None
     )
-    framework_version = _version_hint_for(
-        aliases=[application_framework or ""],
-        tech_stack=tech_stack,
+    resolved_framework_version = (framework_version or "").strip() or (
+        _version_hint_for(
+            aliases=[application_framework or ""],
+            tech_stack=tech_stack,
+        )
+        if allow_inference
+        else None
     )
-    package_manager = infer_package_manager(
-        implementation_language=implementation_language,
-        tech_stack=tech_stack,
+    resolved_package_manager = (package_manager or "").strip().lower() or (
+        infer_package_manager(
+            implementation_language=implementation_language,
+            tech_stack=tech_stack,
+        )
+        if allow_inference
+        else None
     )
-    install_command, run_command, check_command = runtime_target_commands_for_stack(
-        implementation_language=implementation_language,
-        application_framework=application_framework,
-        package_manager=package_manager,
+    resolved_primary_database_version = (primary_database_version or "").strip() or (
+        _version_hint_for(
+            aliases=[primary_database or ""],
+            tech_stack=tech_stack,
+        )
+        if allow_inference
+        else None
+    ) or (
+        default_dependency_version(primary_database)
+        if allow_inference
+        else None
+    )
+    resolved_cache_backend_version = (cache_backend_version or "").strip() or (
+        _version_hint_for(
+            aliases=[cache_backend or ""],
+            tech_stack=tech_stack,
+        )
+        if allow_inference
+        else None
+    ) or (
+        default_dependency_version(cache_backend)
+        if allow_inference
+        else None
     )
     entrypoint_path = runtime_entrypoint_for_stack(
         implementation_language=implementation_language,
@@ -703,18 +750,18 @@ def build_project_runtime_plan(
             service_id="app",
             role="learner-facing application",
             technology=application_framework or implementation_language,
-            version_hint=framework_version or language_version,
-            package_manager=package_manager,
-            entrypoint_path=entrypoint_path,
-            container_image=runtime_container_image_for_stack(
-                implementation_language=implementation_language,
-                language_version=language_version,
-            ),
-            learner_managed=True,
-            run_command=run_command,
-            healthcheck_path="/health",
-            default_port=8000,
-        )
+                version_hint=resolved_framework_version or resolved_language_version,
+                package_manager=resolved_package_manager,
+                entrypoint_path=entrypoint_path,
+                container_image=runtime_container_image_for_stack(
+                    implementation_language=implementation_language,
+                    language_version=resolved_language_version,
+                    allow_inference=allow_inference,
+                ),
+                learner_managed=True,
+                healthcheck_path="/health",
+                default_port=8000,
+            )
     ]
 
     if primary_database:
@@ -723,10 +770,11 @@ def build_project_runtime_plan(
                 service_id=primary_database,
                 role="durable state",
                 technology=primary_database,
-                version_hint=_version_hint_for(aliases=[primary_database], tech_stack=tech_stack),
+                version_hint=resolved_primary_database_version,
                 container_image=dependency_container_image(
                     technology=primary_database,
-                    version_hint=_version_hint_for(aliases=[primary_database], tech_stack=tech_stack),
+                    version_hint=resolved_primary_database_version,
+                    allow_inference=allow_inference,
                 ),
                 learner_managed=False,
             )
@@ -737,10 +785,11 @@ def build_project_runtime_plan(
                 service_id=cache_backend,
                 role="cache or fast read path",
                 technology=cache_backend,
-                version_hint=_version_hint_for(aliases=[cache_backend], tech_stack=tech_stack),
+                version_hint=resolved_cache_backend_version,
                 container_image=dependency_container_image(
                     technology=cache_backend,
-                    version_hint=_version_hint_for(aliases=[cache_backend], tech_stack=tech_stack),
+                    version_hint=resolved_cache_backend_version,
+                    allow_inference=allow_inference,
                 ),
                 learner_managed=False,
             )
@@ -766,17 +815,6 @@ def build_project_runtime_plan(
                 )
             )
 
-    setup_steps: list[ProjectRuntimeCommandSpec] = []
-    if install_command:
-        setup_steps.append(
-            ProjectRuntimeCommandSpec(
-                phase="install",
-                command=install_command,
-                target_service_id="app",
-                notes="Install application dependencies for the chosen language and framework.",
-            )
-        )
-
     seed_steps: list[ProjectRuntimeCommandSpec] = []
     if primary_database:
         seed_steps.append(
@@ -796,41 +834,9 @@ def build_project_runtime_plan(
             )
         )
 
-    verify_steps = [
-        ProjectRuntimeCommandSpec(
-            phase="verify",
-            command=command,
-            target_service_id="app",
-            notes="Run a fast framework-native preflight before the preview server boots.",
-        )
-        for command in runtime_verify_commands_for_stack(
-            implementation_language=implementation_language,
-            application_framework=application_framework,
-        )
-    ]
-
-    run_steps: list[ProjectRuntimeCommandSpec] = []
-    if run_command:
-        run_steps.append(
-            ProjectRuntimeCommandSpec(
-                phase="run",
-                command=run_command,
-                target_service_id="app",
-                notes="Boot the learner-facing preview surface.",
-            )
-        )
-
-    check_steps = [
-        ProjectRuntimeCommandSpec(
-            phase="check",
-            command=check_command,
-            target_service_id="app",
-            notes="Run the learner-visible verification command against the booted service.",
-        )
-    ]
-
     notes = [
         f"Target the `{family.value}` runtime shape rather than falling back to a generic app contract.",
+        "Treat runtime plan commands as advisory metadata only; authored runtime protocol files are the execution source of truth.",
     ]
     if tech_stack:
         notes.append(
@@ -841,16 +847,16 @@ def build_project_runtime_plan(
 
     return ProjectRuntimePlanSpec(
         implementation_language=implementation_language,
-        language_version=language_version,
+        language_version=resolved_language_version,
         application_framework=application_framework,
-        framework_version=framework_version,
-        package_manager=package_manager,
+        framework_version=resolved_framework_version,
+        package_manager=resolved_package_manager,
         services=services,
-        setup_steps=setup_steps,
+        setup_steps=[],
         seed_steps=seed_steps,
-        verify_steps=verify_steps,
-        run_steps=run_steps,
-        check_steps=check_steps,
+        verify_steps=[],
+        run_steps=[],
+        check_steps=[],
         notes=notes,
     )
 
@@ -869,7 +875,7 @@ def infer_implementation_stack(
 
     if normalized_framework is None:
         for candidate_framework in sorted(FRAMEWORK_LANGUAGE_HINTS.keys(), key=len, reverse=True):
-            if candidate_framework in text:
+            if _contains_keyword(text, candidate_framework):
                 normalized_framework = candidate_framework
                 break
 
@@ -878,7 +884,7 @@ def infer_implementation_stack(
 
     if normalized_language is None:
         for candidate_language, keywords in LANGUAGE_KEYWORDS.items():
-            if any(keyword in text for keyword in keywords):
+            if _contains_any_keyword(text, keywords):
                 normalized_language = candidate_language
                 break
 
@@ -897,44 +903,36 @@ def runtime_commands_for_stack(
     implementation_language: str | None,
     application_framework: str | None,
 ) -> tuple[str, str, str]:
-    package_manager = infer_package_manager(
-        implementation_language=implementation_language,
-        tech_stack=[],
-    )
-    _install_command, run_command, visible_check_command = runtime_target_commands_for_stack(
-        implementation_language=implementation_language,
-        application_framework=application_framework,
-        package_manager=package_manager,
-    )
-    preview_command = run_command or f"python {PREVIEW_LAUNCHER_PATH} --host 127.0.0.1"
-    local_run_command = preview_command
-    visible_check_command = visible_check_command or "python checks/run_visible_checks.py"
+    _ = (implementation_language, application_framework)
+    local_run_command = f"sh {RUNTIME_RUN_SCRIPT_PATH}"
+    visible_check_command = f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+    preview_command = local_run_command
     return local_run_command, visible_check_command, preview_command
 
 
 def infer_package_type(*, text: str, package_type_hint: PackageType | None) -> PackageType:
     if package_type_hint is not None:
         return package_type_hint
-    if any(
-        phrase in text
-        for phrase in [
+    if _contains_any_keyword(
+        text,
+        [
             "demo to production",
             "inherited demo",
             "progressive",
             "production ready",
             "production-ready",
-        ]
+        ],
     ):
         return PackageType.progressive_codebase_course
-    if any(phrase in text for phrase in ["course", "catalog", "survey", "multiple assignments"]):
+    if _contains_any_keyword(text, ["course", "catalog", "survey", "multiple assignments"]):
         return PackageType.survey_course
     return PackageType.progressive_codebase_course
 
 
 def infer_risk_class(text: str) -> RiskClass:
-    if any(keyword in text for keyword in HIGH_STAKES_KEYWORDS):
+    if _contains_any_keyword(text, HIGH_STAKES_KEYWORDS):
         return RiskClass.high_stakes
-    if any(keyword in text for keyword in REVIEW_REQUIRED_KEYWORDS):
+    if _contains_any_keyword(text, REVIEW_REQUIRED_KEYWORDS):
         return RiskClass.review_required
     return RiskClass.standard
 
@@ -942,7 +940,7 @@ def infer_risk_class(text: str) -> RiskClass:
 def infer_overlays(text: str) -> list[str]:
     overlays: list[str] = []
     for overlay_id, keywords in OVERLAY_KEYWORDS.items():
-        if any(keyword in text for keyword in keywords):
+        if _contains_any_keyword(text, keywords):
             overlays.append(overlay_id)
     return overlays
 
@@ -950,7 +948,7 @@ def infer_overlays(text: str) -> list[str]:
 def infer_domain_pack(text: str) -> str | None:
     scores: list[tuple[int, str]] = []
     for domain_pack_id, keywords in DOMAIN_PACK_KEYWORDS.items():
-        score = sum(1 for keyword in keywords if keyword in text)
+        score = _keyword_match_count(text, keywords)
         if score:
             scores.append((score, domain_pack_id))
     if not scores:
@@ -977,9 +975,14 @@ def build_assignment_design(
     execution_surface: ExecutionSurface = ExecutionSurface.http_service,
     starter_type: StarterType = StarterType.partial_implementation,
     implementation_language: str | None = None,
+    language_version: str | None = None,
     application_framework: str | None = None,
+    framework_version: str | None = None,
+    package_manager: str | None = None,
     primary_database: str | None = None,
+    primary_database_version: str | None = None,
     cache_backend: str | None = None,
+    cache_backend_version: str | None = None,
     tech_stack: list[str] | None = None,
     data_sources: list[DataSourceSpec] | None = None,
 ) -> AssignmentDesignSpec:
@@ -991,27 +994,13 @@ def build_assignment_design(
     )
     runtime_plan = resolved_project_contract.runtime_plan
     app_service = next((service for service in runtime_plan.services if service.service_id == "app"), None)
-    local_run_command = next(
-        (
-            step.command
-            for step in runtime_plan.run_steps
-            if step.target_service_id in {None, "app"}
-        ),
-        None,
-    ) or fallback_local_run_command
-    preview_command = local_run_command or fallback_preview_command
-    visible_check_command = next(
-        (
-            step.command
-            for step in runtime_plan.check_steps
-            if step.target_service_id in {None, "app"}
-        ),
-        None,
-    ) or fallback_visible_check_command
+    local_run_command = fallback_local_run_command
+    preview_command = fallback_preview_command
+    visible_check_command = fallback_visible_check_command
     editable_files = (
         [app_service.entrypoint_path]
         if app_service is not None and app_service.entrypoint_path
-        else ["app.py"]
+        else []
     )
     visible_fixture_files = [
         source.workspace_path
@@ -1036,12 +1025,33 @@ def build_assignment_design(
             execution_surface=execution_surface,
             starter_type=starter_type,
             implementation_language=implementation_language,
+            language_version=language_version or runtime_plan.language_version,
             application_framework=application_framework,
+            framework_version=framework_version or runtime_plan.framework_version,
+            package_manager=package_manager or runtime_plan.package_manager,
             editable_files=editable_files,
             visible_fixture_files=visible_fixture_files,
             data_sources=source_specs,
             primary_database=primary_database,
+            primary_database_version=primary_database_version
+            or next(
+                (
+                    service.version_hint
+                    for service in runtime_plan.services
+                    if service.service_id == primary_database
+                ),
+                None,
+            ),
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version
+            or next(
+                (
+                    service.version_hint
+                    for service in runtime_plan.services
+                    if service.service_id == cache_backend
+                ),
+                None,
+            ),
             tech_stack=list(tech_stack or []),
             local_run_command=local_run_command,
             visible_check_command=visible_check_command,
@@ -1078,9 +1088,14 @@ def infer_assignment_design(
     package_type_hint: PackageType | None = None,
     starter_type: StarterType | None = None,
     implementation_language: str | None = None,
+    language_version: str | None = None,
     application_framework: str | None = None,
+    framework_version: str | None = None,
+    package_manager: str | None = None,
     primary_database: str | None = None,
+    primary_database_version: str | None = None,
     cache_backend: str | None = None,
+    cache_backend_version: str | None = None,
     tech_stack: list[str] | None = None,
     data_sources: list[DataSourceSpec] | None = None,
 ) -> AssignmentDesignInference:
@@ -1113,25 +1128,7 @@ def infer_assignment_design(
     reasons: list[str] = []
     warnings: list[str] = []
 
-    if any(keyword in text for keyword in UNSUPPORTED_KEYWORDS):
-        return AssignmentDesignInference(
-            design_spec=None,
-            package_type=package_type,
-            status=DesignSupportStatus.unsupported,
-            reasons=["The brief emphasizes a learner-facing UI surface that the current backend-first generator does not support."],
-            warnings=["This platform currently generates backend and service assignments, not UI-first implementation projects."],
-        )
-
-    if any(keyword in text for keyword in PROTOCOL_KEYWORDS):
-        return AssignmentDesignInference(
-            design_spec=None,
-            package_type=package_type,
-            status=DesignSupportStatus.unsupported,
-            reasons=["The brief depends on a protocol-specific server surface that is outside the learner-ready generator today."],
-            warnings=["Protocol-oriented assignments should stay blocked until the generator can generate and grade them directly."],
-        )
-
-    if any(keyword in text for keyword in GROUNDED_RETRIEVAL_KEYWORDS):
+    if _contains_any_keyword(text, GROUNDED_RETRIEVAL_KEYWORDS):
         reasons.append("The brief asks for grounded answering over a visible corpus with evidence-aware behavior.")
         family = ProjectFamily.grounded_retrieval_service
         design_spec = build_assignment_design(
@@ -1144,9 +1141,14 @@ def infer_assignment_design(
                 title=title,
                 problem_statement=problem_statement,
                 implementation_language=resolved_language,
+                language_version=language_version,
                 application_framework=resolved_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
                 primary_database=primary_database,
+                primary_database_version=primary_database_version,
                 cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
                 tech_stack=tech_stack,
                 data_sources=data_sources,
             ),
@@ -1160,13 +1162,18 @@ def infer_assignment_design(
             approval_flow_required=False,
             starter_type=starter_type or StarterType.partial_implementation,
             implementation_language=resolved_language,
+            language_version=language_version,
             application_framework=resolved_framework,
+            framework_version=framework_version,
+            package_manager=package_manager,
             primary_database=primary_database,
+            primary_database_version=primary_database_version,
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version,
             tech_stack=tech_stack,
             data_sources=data_sources,
         )
-    elif any(keyword in text for keyword in RANKED_RETRIEVAL_KEYWORDS):
+    elif _contains_any_keyword(text, RANKED_RETRIEVAL_KEYWORDS):
         reasons.append("The brief centers on retrieval quality over a visible corpus.")
         family = ProjectFamily.ranked_retrieval_service
         design_spec = build_assignment_design(
@@ -1179,9 +1186,14 @@ def infer_assignment_design(
                 title=title,
                 problem_statement=problem_statement,
                 implementation_language=resolved_language,
+                language_version=language_version,
                 application_framework=resolved_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
                 primary_database=primary_database,
+                primary_database_version=primary_database_version,
                 cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
                 tech_stack=tech_stack,
                 data_sources=data_sources,
             ),
@@ -1195,13 +1207,18 @@ def infer_assignment_design(
             approval_flow_required=False,
             starter_type=starter_type or StarterType.partial_implementation,
             implementation_language=resolved_language,
+            language_version=language_version,
             application_framework=resolved_framework,
+            framework_version=framework_version,
+            package_manager=package_manager,
             primary_database=primary_database,
+            primary_database_version=primary_database_version,
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version,
             tech_stack=tech_stack,
             data_sources=data_sources,
         )
-    elif any(keyword in text for keyword in CONTROL_PLANE_KEYWORDS):
+    elif _contains_any_keyword(text, CONTROL_PLANE_KEYWORDS):
         reasons.append("The brief describes a control-plane service with low-latency decisions, auditable changes, and safe control updates.")
         family = ProjectFamily.control_plane_service
         design_spec = build_assignment_design(
@@ -1214,9 +1231,14 @@ def infer_assignment_design(
                 title=title,
                 problem_statement=problem_statement,
                 implementation_language=resolved_language,
+                language_version=language_version,
                 application_framework=resolved_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
                 primary_database=primary_database,
+                primary_database_version=primary_database_version,
                 cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
                 tech_stack=tech_stack,
                 data_sources=data_sources,
             ),
@@ -1230,13 +1252,18 @@ def infer_assignment_design(
             approval_flow_required=False,
             starter_type=starter_type or StarterType.partial_implementation,
             implementation_language=resolved_language,
+            language_version=language_version,
             application_framework=resolved_framework,
+            framework_version=framework_version,
+            package_manager=package_manager,
             primary_database=primary_database,
+            primary_database_version=primary_database_version,
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version,
             tech_stack=tech_stack,
             data_sources=data_sources,
         )
-    elif any(keyword in text for keyword in STATEFUL_KEYWORDS):
+    elif _contains_any_keyword(text, STATEFUL_KEYWORDS):
         reasons.append("The brief depends on correctness under persistent mutable state and concurrency.")
         family = ProjectFamily.transactional_stateful_service
         design_spec = build_assignment_design(
@@ -1249,9 +1276,14 @@ def infer_assignment_design(
                 title=title,
                 problem_statement=problem_statement,
                 implementation_language=resolved_language,
+                language_version=language_version,
                 application_framework=resolved_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
                 primary_database=primary_database,
+                primary_database_version=primary_database_version,
                 cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
                 tech_stack=tech_stack,
                 data_sources=data_sources,
             ),
@@ -1265,9 +1297,14 @@ def infer_assignment_design(
             approval_flow_required=False,
             starter_type=starter_type or StarterType.partial_implementation,
             implementation_language=resolved_language,
+            language_version=language_version,
             application_framework=resolved_framework,
+            framework_version=framework_version,
+            package_manager=package_manager,
             primary_database=primary_database,
+            primary_database_version=primary_database_version,
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version,
             tech_stack=tech_stack,
             data_sources=data_sources,
         )
@@ -1275,7 +1312,7 @@ def infer_assignment_design(
         reasons.append("The brief fits the general learner-ready service pipeline with bounded workflows and observable behavior.")
         family = (
             ProjectFamily.workflow_agent_service
-            if bool(domain_pack or any(keyword in text for keyword in TOOL_USE_KEYWORDS))
+            if bool(domain_pack or _contains_any_keyword(text, TOOL_USE_KEYWORDS))
             else ProjectFamily.generic_backend_service
         )
         design_spec = build_assignment_design(
@@ -1288,9 +1325,14 @@ def infer_assignment_design(
                 title=title,
                 problem_statement=problem_statement,
                 implementation_language=resolved_language,
+                language_version=language_version,
                 application_framework=resolved_framework,
+                framework_version=framework_version,
+                package_manager=package_manager,
                 primary_database=primary_database,
+                primary_database_version=primary_database_version,
                 cache_backend=cache_backend,
+                cache_backend_version=cache_backend_version,
                 tech_stack=tech_stack,
                 data_sources=data_sources,
             ),
@@ -1298,15 +1340,20 @@ def infer_assignment_design(
             answer_synthesis_required=False,
             citations_required=False,
             abstention_required=False,
-            tool_use_required=bool(domain_pack or any(keyword in text for keyword in TOOL_USE_KEYWORDS)),
+            tool_use_required=bool(domain_pack or _contains_any_keyword(text, TOOL_USE_KEYWORDS)),
             traceability_required=True,
             durable_state_required="state" in text or "resume" in text or "durable" in text,
             approval_flow_required="approval" in text or "escalat" in text or "handoff" in text,
             starter_type=starter_type or StarterType.partial_implementation,
             implementation_language=resolved_language,
+            language_version=language_version,
             application_framework=resolved_framework,
+            framework_version=framework_version,
+            package_manager=package_manager,
             primary_database=primary_database,
+            primary_database_version=primary_database_version,
             cache_backend=cache_backend,
+            cache_backend_version=cache_backend_version,
             tech_stack=tech_stack,
             data_sources=data_sources,
         )
