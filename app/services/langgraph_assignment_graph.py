@@ -39,7 +39,10 @@ from app.services.task_agent_contract_surface import (
     learner_editable_paths_for_deliverable,
     learner_editable_paths_for_spec,
 )
-from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
+from app.services.task_agent_workspace_authoring import (
+    TaskAgentWorkspaceAuthoringService,
+    WorkspaceAuthoringResult,
+)
 
 
 AuthoringRoute = Literal["authoring_repair", "authoring_tests", "reviewer_runtime", "end"]
@@ -56,6 +59,7 @@ class AssignmentGraphState(TypedDict):
     reviewer_attempt: int
     cached_sandbox_result: SandboxExecutionResult | None
     next_retry_node: str | None
+    skip_workspace_authoring: bool
 
 
 class LangGraphAssignmentGraph:
@@ -119,6 +123,7 @@ class LangGraphAssignmentGraph:
             "reviewer_attempt": 0,
             "cached_sandbox_result": None,
             "next_retry_node": None,
+            "skip_workspace_authoring": False,
         }
         current_node = "authoring_runtime"
         while current_node is not None:
@@ -342,35 +347,51 @@ class LangGraphAssignmentGraph:
 
     def _authoring_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
         attempt = state["authoring_attempt"] + 1
-        log_coursegen_event(
-            "authoring_runtime_workspace_authoring_started",
-            workflow_run_id=state["run"].id,
-            title=state["run"].title,
-            attempt=attempt,
-        )
-        try:
-            run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])
-        except Exception as exc:
+        skip_workspace_authoring = state.get("skip_workspace_authoring", False)
+        if skip_workspace_authoring and state["run"].artifacts.workspace_snapshot is not None:
+            run = state["run"]
+            authoring_result = WorkspaceAuthoringResult(
+                updated_files=[],
+                notes=[],
+                message="Reused the repaired learner workspace for runtime re-verification.",
+            )
             log_coursegen_event(
-                "authoring_runtime_workspace_authoring_failed",
+                "authoring_runtime_workspace_authoring_skipped",
+                workflow_run_id=run.id,
+                title=run.title,
+                attempt=attempt,
+            )
+        else:
+            log_coursegen_event(
+                "authoring_runtime_workspace_authoring_started",
                 workflow_run_id=state["run"].id,
                 title=state["run"].title,
                 attempt=attempt,
-                error=str(exc),
             )
-            raise
-        log_coursegen_event(
-            "authoring_runtime_workspace_authoring_completed",
-            workflow_run_id=run.id,
-            title=run.title,
-            attempt=attempt,
-            updated_file_count=len(authoring_result.updated_files),
-            updated_files=authoring_result.updated_files[:10],
-        )
+            try:
+                run, authoring_result = self.workspace_authoring_service.author_workspace(state["run"])
+            except Exception as exc:
+                log_coursegen_event(
+                    "authoring_runtime_workspace_authoring_failed",
+                    workflow_run_id=state["run"].id,
+                    title=state["run"].title,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+                raise
+            log_coursegen_event(
+                "authoring_runtime_workspace_authoring_completed",
+                workflow_run_id=run.id,
+                title=run.title,
+                attempt=attempt,
+                updated_file_count=len(authoring_result.updated_files),
+                updated_files=authoring_result.updated_files[:10],
+            )
         state_with_workspace = {
             **state,
             "run": run,
             "cached_sandbox_result": None,
+            "skip_workspace_authoring": False,
         }
         log_coursegen_event(
             "authoring_runtime_sandbox_started",
@@ -573,6 +594,7 @@ class LangGraphAssignmentGraph:
             sandbox_result=None,
             cached_sandbox_result=None,
             next_retry_node="authoring_runtime" if retry_result.should_continue else None,
+            skip_workspace_authoring=retry_result.skip_workspace_authoring if retry_result.should_continue else False,
         )
 
     def _reviewer_runtime_node(self, state: AssignmentGraphState) -> AssignmentGraphState:
@@ -667,6 +689,7 @@ class LangGraphAssignmentGraph:
             sandbox_result=None,
             cached_sandbox_result=None,
             next_retry_node="authoring_runtime" if retry_result.should_continue else None,
+            skip_workspace_authoring=retry_result.skip_workspace_authoring if retry_result.should_continue else False,
         )
 
     def _repair_generated_tests(
@@ -1455,6 +1478,7 @@ class LangGraphAssignmentGraph:
         reviewer_attempt: int | None = None,
         cached_sandbox_result: SandboxExecutionResult | None | object = _UNSET,
         next_retry_node: str | None | object = _UNSET,
+        skip_workspace_authoring: bool | object = _UNSET,
     ) -> AssignmentGraphState:
         executions = list(state["node_executions"])
         executions.append(
@@ -1485,5 +1509,10 @@ class LangGraphAssignmentGraph:
                 state.get("next_retry_node")
                 if next_retry_node is _UNSET
                 else next_retry_node
+            ),
+            "skip_workspace_authoring": (
+                state.get("skip_workspace_authoring", False)
+                if skip_workspace_authoring is _UNSET
+                else skip_workspace_authoring
             ),
         }

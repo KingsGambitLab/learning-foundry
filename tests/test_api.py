@@ -2287,6 +2287,11 @@ class CourseGenCodexApiTests(unittest.TestCase):
         source = starter_path.read_text(encoding="utf-8")
         self.assertNotIn("BROKEN_STARTER_SENTINEL", source)
         self.assertNotIn("def broken(:", source)
+        self.assertEqual(
+            broken_workspace_authoring.author_calls,
+            1,
+            "The repaired workspace should go straight back to sandbox verification without re-authoring the whole workspace.",
+        )
 
     def test_workspace_repair_full_repair_rematerializes_learner_artifacts(self) -> None:
         run = app.state.workflow_service.create_run_from_explicit_plan(

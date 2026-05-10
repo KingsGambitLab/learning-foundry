@@ -85,23 +85,7 @@ class TaskAgentWorkspaceAuthoringService:
             latest_node=latest_node,
             failure_context=failure_context,
         )
-        finding_text = " ".join(
-            f"{finding.title} {finding.detail}"
-            for finding in (failure_context.findings if failure_context is not None else latest_node.findings)
-        ).lower()
-        full_repair = (
-            not failed_deliverables
-            or "placeholder starter" in finding_text
-            or "starter endpoints remain" in finding_text
-            or (
-                failure_context is not None
-                and failure_context.sandbox is not None
-                and bool(
-                    failure_context.sandbox.build_stderr_excerpt
-                    or failure_context.sandbox.run_stderr_excerpt
-                )
-            )
-        )
+        full_repair = not failed_deliverables
         if full_repair:
             before_fingerprint = self._workspace_fingerprint(run, deliverable_ids=sorted(failed_deliverables))
             run = self.sync_workspace(run)

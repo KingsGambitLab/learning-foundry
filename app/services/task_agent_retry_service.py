@@ -34,6 +34,7 @@ class TaskAgentRetryResult(BaseModel):
     action: TaskAgentRetryAction
     applied: bool
     should_continue: bool
+    skip_workspace_authoring: bool = False
     owner_hint: WorkflowFailureOwnerHint
     failure_signature: str | None = None
     before_spec_hash: str | None = None
@@ -103,6 +104,7 @@ class TaskAgentRetryService:
                     action=TaskAgentRetryAction.revised,
                     applied=True,
                     should_continue=True,
+                    skip_workspace_authoring=True,
                     owner_hint=failure_context.owner_hint,
                     failure_signature=failure_context.failure_signature,
                     before_spec_hash=before_spec_hash,

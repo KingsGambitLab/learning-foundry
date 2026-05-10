@@ -109,6 +109,32 @@ class _RepairingWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
         )
 
 
+class _RepoRepairResult:
+    def __init__(self, updated_files: list[str]) -> None:
+        self.updated_files = updated_files
+        self.notes: list[str] = []
+
+
+class _RecordingRepoAuthoringService:
+    def __init__(self) -> None:
+        self.calls: list[list[str] | None] = []
+
+    def author_workspace_repo(self, run, *, deliverable_ids=None, failure_context=None):  # noqa: ANN001
+        self.calls.append(list(deliverable_ids) if deliverable_ids is not None else None)
+        workspace = run.artifacts.workspace_snapshot
+        assert workspace is not None
+        spec = run.artifacts.task_agent_spec
+        assert spec is not None
+        updated_files: list[str] = []
+        target_ids = deliverable_ids or [deliverable.id for deliverable in spec.deliverables]
+        for deliverable_id in target_ids:
+            target = Path(workspace.public_dir) / "starter" / deliverable_id / "repair_scope_marker.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"repaired {deliverable_id}\n", encoding="utf-8")
+            updated_files.append(str(target.relative_to(workspace.root_dir)))
+        return run, _RepoRepairResult(updated_files)
+
+
 def _make_workflow_service(temp_dir: Path, *, node_runtime=None, task_agent_authoring_service=None) -> WorkflowService:
     store = SQLiteWorkflowStore(db_path=temp_dir / "course_gen.db")
     workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
@@ -370,6 +396,7 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(result.action, TaskAgentRetryAction.revised)
             self.assertEqual(result.owner_hint.value, "authored_artifact")
             self.assertEqual(result.before_spec_hash, result.after_spec_hash)
+            self.assertTrue(result.skip_workspace_authoring)
             self.assertIsNone(reviser.last_failure_context)
             self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
             self.assertEqual(workspace_authoring.repair_calls, 1)
@@ -396,6 +423,7 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertTrue(result.should_continue)
             self.assertEqual(result.action, TaskAgentRetryAction.revised)
             self.assertEqual(result.owner_hint.value, "authored_artifact")
+            self.assertTrue(result.skip_workspace_authoring)
             self.assertIsNone(reviser.last_failure_context)
             self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
             self.assertEqual(workspace_authoring.repair_calls, 1)
@@ -420,10 +448,91 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertTrue(result.applied)
             self.assertEqual(result.action, TaskAgentRetryAction.revised)
             self.assertEqual(result.owner_hint.value, "authored_artifact")
+            self.assertFalse(result.skip_workspace_authoring)
             self.assertNotEqual(result.before_spec_hash, result.after_spec_hash)
             self.assertIsNotNone(reviser.last_failure_context)
             self.assertTrue(updated_run.artifacts.task_agent_spec.deliverables[0].title.endswith("Revised"))
             self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
+
+    def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Generated assignment failed to boot in Docker.",
+                created_at=datetime.now(UTC),
+                sandbox_result=SandboxExecutionResult(
+                    status=SandboxExecutionStatus.failed,
+                    available=True,
+                    build_succeeded=False,
+                    run_succeeded=False,
+                    generated_at=datetime.now(UTC),
+                    build_stderr="docker build failed",
+                    error="sandbox failed",
+                    deliverable_reports=[
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_1",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_2",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_3",
+                            compile_succeeded=True,
+                            runtime_succeeded=True,
+                        ),
+                        DeliverableSandboxReport(
+                            deliverable_id="deliverable_4",
+                            compile_succeeded=False,
+                            runtime_succeeded=False,
+                            error="docker build failed",
+                        ),
+                    ],
+                ),
+                findings=[
+                    ReviewerFinding(
+                        category="runtime",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Sandbox verification failed",
+                        detail="deliverable_4 failed to boot in Docker.",
+                    )
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+
+            repaired_run, repaired, message = workspace_authoring.repair_workspace(
+                run,
+                latest_node,
+                failure_context=failure_context,
+            )
+
+            self.assertTrue(repaired)
+            self.assertIn("failed workspace deliverables", message)
+            self.assertEqual(repo_authoring.calls, [["deliverable_4"]])
+            repaired_workspace = repaired_run.artifacts.workspace_snapshot
+            assert repaired_workspace is not None
+            self.assertFalse(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+            )
+            self.assertTrue(
+                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+            )
 
     def test_retry_service_blocks_platform_owned_starter_compiler_failure(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
