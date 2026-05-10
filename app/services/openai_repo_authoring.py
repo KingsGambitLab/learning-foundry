@@ -19,6 +19,7 @@ from app.services.openai_runtime_support import (
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
 )
+from app.services.starter_authoring_payload import build_starter_authoring_payload
 from app.services.task_agent_contract_surface import learner_editable_paths_for_manifest
 from app.services.task_agent_starter_templates import (
     HIDDEN_GRADER_SCRIPT_PATH,
@@ -226,26 +227,22 @@ class OpenAIStarterRepoAuthoringService:
         manifest: dict[str, Any],
         failure_context: FailureContext | None,
     ) -> dict[str, Any]:
-        file_payload = self._starter_text_files(starter_root)
+        prompt_files = build_starter_authoring_payload(
+            starter_root=starter_root,
+            manifest=manifest,
+        )
         return {
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "deliverable_id": deliverable_id,
             "starter_root": starter_root.name,
             "manifest": manifest,
-            "current_files": file_payload,
+            "current_files": prompt_files["learner_files"],
+            "dependency_contract_files": prompt_files["dependency_contract_files"],
+            "runtime_protocol_files": prompt_files["runtime_protocol_files"],
+            "public_endpoints": prompt_files["public_endpoints"],
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
-
-    def _starter_text_files(self, starter_root: Path) -> dict[str, str]:
-        file_payload: dict[str, str] = {}
-        for path in sorted(p for p in starter_root.rglob("*") if p.is_file()):
-            relative_path = path.relative_to(starter_root).as_posix()
-            try:
-                file_payload[relative_path] = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-        return file_payload
 
     def _generate_bundle(
         self,
@@ -270,12 +267,14 @@ class OpenAIStarterRepoAuthoringService:
                         "You are authoring the actual learner-owned repo files for one starter workspace. "
                         "Return JSON only with keys `files` and optional `notes`. "
                         "Each file must have `path` and `content`. "
-                        "Return the complete current snapshot for every non-reserved repo file inside the starter workspace, "
+                        "Return the complete current snapshot for every learner-owned file, dependency-contract file, and runtime protocol file that belongs in the starter workspace, "
                         "not just the files you changed in this attempt. "
                         "Author the real repo files needed to boot under the creator-owned stack contract, including "
                         "`Dockerfile` and `.coursegen/runtime/*.sh` when needed. "
                         "Do not write `README.md`, `.coursegen/grader/*`, `checks/*`, or `.vscode/*`; those belong to the harness protocol. "
-                        "Use the current files in the prompt as the editable baseline during retries; preserve or revise them intentionally rather than starting over blindly. "
+                        "Use `current_files` as the learner-owned editable baseline, `dependency_contract_files` for manifests/toolchain files, "
+                        "and `runtime_protocol_files` for the authored Docker/install/verify/run bundle during retries; preserve or revise them intentionally rather than starting over blindly. "
+                        "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
                         "Write a believable partial implementation, not a hidden simulator. "
                         "Use the exact stack contract and public endpoints from the prompt. "
                         "When `failure_context.dependency_contracts` is present, treat those repo/runtime facts as authoritative for the failed deliverables and repair the dependency contract coherently instead of guessing from stderr alone. "
@@ -371,7 +370,15 @@ class OpenAIStarterRepoAuthoringService:
         default_starter_files: dict[str, str],
         visible_fixture_files: set[str],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        existing_files = self._starter_text_files(starter_root)
+        prompt_files = build_starter_authoring_payload(
+            starter_root=starter_root,
+            manifest=manifest,
+        )
+        existing_files = {
+            **prompt_files["learner_files"],
+            **prompt_files["dependency_contract_files"],
+            **prompt_files["runtime_protocol_files"],
+        }
         repo_files = sorted(
             relative_path
             for relative_path in existing_files

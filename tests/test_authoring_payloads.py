@@ -259,9 +259,24 @@ class AuthoringPayloadTests(unittest.TestCase):
             deliverable = spec.deliverables[0]
             starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
             manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            manifest["learner_starter_surface"] = {
+                **(manifest.get("learner_starter_surface") or {}),
+                "primary_editable_paths": ["src/main.rs"],
+            }
+            manifest["runtime_plan"] = {
+                **(manifest.get("runtime_plan") or {}),
+                "package_manager": "cargo",
+            }
 
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
+            (starter_root / "Cargo.toml").write_text(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                encoding="utf-8",
+            )
+            (starter_root / "Cargo.lock").write_text("# lockfile\n", encoding="utf-8")
+            (starter_root / "target" / "debug").mkdir(parents=True, exist_ok=True)
+            (starter_root / "target" / "debug" / "demo").write_text("binary\n", encoding="utf-8")
             (starter_root / "Dockerfile").write_text("FROM rust:1.86-bookworm\n", encoding="utf-8")
             (starter_root / RUNTIME_INSTALL_SCRIPT_PATH).write_text(
                 "#!/usr/bin/env sh\nset -eu\ncargo fetch\n",
@@ -271,6 +286,10 @@ class AuthoringPayloadTests(unittest.TestCase):
                 "#!/usr/bin/env sh\nset -eu\ncargo run\n",
                 encoding="utf-8",
             )
+            (starter_root / "checks").mkdir(parents=True, exist_ok=True)
+            (starter_root / "checks" / "run_visible_checks.py").write_text("# generated\n", encoding="utf-8")
+            (starter_root / ".coursegen" / "grader").mkdir(parents=True, exist_ok=True)
+            (starter_root / ".coursegen" / "grader" / "run_hidden_checks.py").write_text("# hidden\n", encoding="utf-8")
 
             service = OpenAIStarterRepoAuthoringService(enabled=False)
             payload = service._prompt_payload(
@@ -281,13 +300,22 @@ class AuthoringPayloadTests(unittest.TestCase):
                 failure_context=None,
             )
 
-        files = payload["current_files"]
-        assert "src/main.rs" in files
-        assert "Dockerfile" in files
-        assert RUNTIME_INSTALL_SCRIPT_PATH in files
-        assert RUNTIME_RUN_SCRIPT_PATH in files
-        assert "README.md" in files
-        assert HIDDEN_MANIFEST_PATH in files
+        learner_files = payload["current_files"]
+        dependency_files = payload["dependency_contract_files"]
+        runtime_files = payload["runtime_protocol_files"]
+        assert learner_files == {"src/main.rs": "// learner repo file\n"}
+        assert dependency_files == {
+            "Cargo.toml": "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        }
+        assert "Dockerfile" in runtime_files
+        assert RUNTIME_INSTALL_SCRIPT_PATH in runtime_files
+        assert RUNTIME_RUN_SCRIPT_PATH in runtime_files
+        assert "README.md" not in learner_files
+        assert HIDDEN_MANIFEST_PATH not in learner_files
+        assert "Cargo.lock" not in dependency_files
+        assert "target/debug/demo" not in learner_files
+        assert "target/debug/demo" not in dependency_files
+        assert "checks/run_visible_checks.py" not in runtime_files
 
     def test_repo_authoring_prompt_payload_includes_dependency_contract_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -352,9 +380,24 @@ class AuthoringPayloadTests(unittest.TestCase):
             deliverable = spec.deliverables[0]
             starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
             manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            manifest["learner_starter_surface"] = {
+                **(manifest.get("learner_starter_surface") or {}),
+                "primary_editable_paths": ["src/main.rs"],
+            }
+            manifest["runtime_plan"] = {
+                **(manifest.get("runtime_plan") or {}),
+                "package_manager": "cargo",
+            }
 
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")
+            (starter_root / "Cargo.toml").write_text(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                encoding="utf-8",
+            )
+            (starter_root / "Cargo.lock").write_text("# lockfile\n", encoding="utf-8")
+            (starter_root / "target" / "debug").mkdir(parents=True, exist_ok=True)
+            (starter_root / "target" / "debug" / "demo").write_text("binary\n", encoding="utf-8")
             (starter_root / "Dockerfile").write_text("FROM rust:1.86-bookworm\n", encoding="utf-8")
             (starter_root / RUNTIME_INSTALL_SCRIPT_PATH).write_text(
                 "#!/usr/bin/env sh\nset -eu\ncargo fetch\n",
@@ -373,13 +416,20 @@ class AuthoringPayloadTests(unittest.TestCase):
                 failure_context=None,
             )
 
-        files = payload["files"]
-        assert "src/main.rs" in files
-        assert "Dockerfile" in files
-        assert RUNTIME_INSTALL_SCRIPT_PATH in files
-        assert RUNTIME_RUN_SCRIPT_PATH in files
-        assert "README.md" in files
-        assert HIDDEN_MANIFEST_PATH in files
+        learner_files = payload["files"]
+        dependency_files = payload["dependency_contract_files"]
+        runtime_files = payload["runtime_protocol_files"]
+        assert learner_files == {"src/main.rs": "// learner repo file\n"}
+        assert dependency_files == {
+            "Cargo.toml": "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        }
+        assert "Dockerfile" in runtime_files
+        assert RUNTIME_INSTALL_SCRIPT_PATH in runtime_files
+        assert RUNTIME_RUN_SCRIPT_PATH in runtime_files
+        assert "README.md" not in learner_files
+        assert HIDDEN_MANIFEST_PATH not in learner_files
+        assert "Cargo.lock" not in dependency_files
+        assert "target/debug/demo" not in learner_files
 
     def test_repo_bundle_state_uses_final_workspace_completeness_not_changed_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -391,6 +441,10 @@ class AuthoringPayloadTests(unittest.TestCase):
             deliverable = spec.deliverables[0]
             starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
             manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            manifest["learner_starter_surface"] = {
+                **(manifest.get("learner_starter_surface") or {}),
+                "primary_editable_paths": ["src/main.rs"],
+            }
 
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("// learner repo file\n", encoding="utf-8")

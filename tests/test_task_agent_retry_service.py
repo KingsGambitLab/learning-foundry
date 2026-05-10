@@ -687,8 +687,11 @@ class TaskAgentRetryServiceTests(TestCase):
                 "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2021'\n",
                 encoding="utf-8",
             )
+            (starter_root / "Cargo.lock").write_text("# lockfile\n", encoding="utf-8")
             (starter_root / "src").mkdir(parents=True, exist_ok=True)
             (starter_root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+            (starter_root / "target" / "debug").mkdir(parents=True, exist_ok=True)
+            (starter_root / "target" / "debug" / "demo").write_text("binary\n", encoding="utf-8")
 
             failure_node = WorkflowNodeExecution(
                 node_id="authoring_runtime_1",
@@ -728,7 +731,10 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(contract.expected_manifest_paths, ["Cargo.toml"])
             self.assertEqual(contract.present_manifest_paths, ["Cargo.toml"])
             self.assertEqual(contract.expected_lockfile_paths, ["Cargo.lock"])
-            self.assertEqual(contract.present_lockfile_paths, [])
+            self.assertEqual(contract.present_lockfile_paths, ["Cargo.lock"])
+            self.assertIn("Cargo.toml", contract.root_files)
+            self.assertNotIn("Cargo.lock", contract.root_files)
+            self.assertNotIn("target/debug/demo", contract.root_files)
             self.assertTrue(contract.runtime_bundle_complete)
 
     def test_langgraph_execute_appends_history_across_iterations(self) -> None:

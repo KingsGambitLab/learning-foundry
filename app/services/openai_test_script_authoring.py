@@ -18,6 +18,7 @@ from app.services.openai_runtime_support import (
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
 )
+from app.services.starter_authoring_payload import build_starter_authoring_payload
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
@@ -180,25 +181,21 @@ class OpenAITestScriptAuthoringService:
         manifest: dict[str, Any],
         failure_context: FailureContext | None,
     ) -> dict[str, Any]:
-        file_payload = self._starter_text_files(starter_root)
+        prompt_files = build_starter_authoring_payload(
+            starter_root=starter_root,
+            manifest=manifest,
+        )
         return {
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "starter_root": starter_root.name,
             "manifest": manifest,
-            "files": file_payload,
+            "files": prompt_files["learner_files"],
+            "dependency_contract_files": prompt_files["dependency_contract_files"],
+            "runtime_protocol_files": prompt_files["runtime_protocol_files"],
+            "public_endpoints": prompt_files["public_endpoints"],
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
-
-    def _starter_text_files(self, starter_root: Path) -> dict[str, str]:
-        file_payload: dict[str, str] = {}
-        for path in sorted(p for p in starter_root.rglob("*") if p.is_file()):
-            relative_path = path.relative_to(starter_root).as_posix()
-            try:
-                file_payload[relative_path] = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-        return file_payload
 
     def _generate_scripts(
         self,
@@ -231,7 +228,8 @@ class OpenAITestScriptAuthoringService:
                         "Visible tests should be learner-friendly and basic. Hidden tests should be materially stronger. "
                         "For `partial_implementation` starters, visible tests should still fail the untouched starter when core behavior is missing. "
                         "For `working_buggy` starters, visible tests may pass but hidden tests should expose the deeper bug. "
-                        "Use only the published endpoints and the actual learner files in the prompt, including the authored runtime protocol when present. "
+                        "Use only the published endpoints and the actual learner files in the prompt, plus any dependency-contract or runtime protocol files provided separately. "
+                        "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
                         "Do not import the learner application directly."
                     ),
                 },

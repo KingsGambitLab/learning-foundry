@@ -99,15 +99,17 @@ def dependency_contract_facts_for_deliverables(
         starter_root = public_dir / "starter" / deliverable_id
         if not starter_root.exists():
             continue
-        root_files = sorted(
-            path.relative_to(starter_root).as_posix()
-            for path in starter_root.rglob("*")
-            if path.is_file()
-        )
         present_manifests = [path for path in expected.get("manifests", []) if (starter_root / path).exists()]
         present_lockfiles = [path for path in expected.get("lockfiles", []) if (starter_root / path).exists()]
         present_toolchains = [path for path in expected.get("toolchains", []) if (starter_root / path).exists()]
         runtime_paths_present = [path for path in _RUNTIME_PROTOCOL_PATHS if (starter_root / path).exists()]
+        root_files = sorted(
+            {
+                *present_manifests,
+                *present_toolchains,
+                *runtime_paths_present,
+            }
+        )
         facts.append(
             FailureContextDependencyContract(
                 deliverable_id=deliverable_id,
