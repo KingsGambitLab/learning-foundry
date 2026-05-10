@@ -229,7 +229,7 @@
   const submitProgressSteps = [
     {
       title: "Starting review",
-      message: "Preparing your shared project files for the hidden grader.",
+      message: "Preparing your shared project files for the learner review run.",
       delayMs: 0,
     },
     {
@@ -238,7 +238,7 @@
       delayMs: 1500,
     },
     {
-      title: "Running hidden checks",
+      title: "Running review checks",
       message: "Review is in progress now. First boots can take a little longer.",
       delayMs: 7000,
     },
@@ -731,12 +731,6 @@
         ? "Resume your project"
         : `Project review areas: ${progress.total}`;
 
-    const visibleFiles = [...new Set(deliverables.flatMap((item) => item.visible_files || []))];
-    const visibleFilesPreview = visibleFiles.slice(0, 3);
-    const visibleFilesExtra = Math.max(0, visibleFiles.length - visibleFilesPreview.length);
-    const visibleFilesText = visibleFilesPreview.length
-      ? `${visibleFilesPreview.map((f) => `<code>${escapeHtml(f)}</code>`).join(", ")}${visibleFilesExtra ? ` <span class="quickref-more">+${visibleFilesExtra} more</span>` : ""}`
-      : `<span class="quickref-empty">No visible files listed yet</span>`;
     const latestReviewText = latestSubmission
       ? `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed`
       : "Not submitted yet";
@@ -751,16 +745,12 @@
 
           <dl class="deliverable-quickref" aria-label="Project at a glance">
             <div class="quickref-row">
-              <dt>Files to edit</dt>
-              <dd>${visibleFilesText}</dd>
-            </div>
-            <div class="quickref-row">
               <dt>Run visible checks</dt>
               <dd>Inside the VS Code workspace, while you iterate.</dd>
             </div>
             <div class="quickref-row">
               <dt>Submit</dt>
-              <dd>Use <strong>Submit project for review</strong> below — runs the hidden grader.</dd>
+              <dd>Use <strong>Submit project for review</strong> below — runs the full learner review checks.</dd>
             </div>
             <div class="quickref-row">
               <dt>Latest review</dt>
@@ -818,9 +808,9 @@
               <div class="learner-flow-body">
                 <div class="learner-flow-head">
                   <h3>Submit the project</h3>
-                  <span class="info-pill warn"><strong>Hidden grader</strong></span>
+                  <span class="info-pill warn"><strong>Full review</strong></span>
                 </div>
-                <p>The hidden grader is deeper than the visible checks. Feedback comes back grouped by deliverable.</p>
+                <p>Submit the whole project to run the learner review checks. Feedback comes back grouped by deliverable.</p>
                 <div class="focus-actions">
                   <button
                     class="button"
@@ -858,7 +848,7 @@
     submissionHistory.classList.remove("hidden");
     deliverablesTitle.textContent = `${progress.total} deliverable${progress.total === 1 ? "" : "s"}`;
     deliverablesCaption.textContent = latestReport
-      ? `${latestReport.passed_tests}/${latestReport.total_tests} hidden checks are passing in the latest review run.`
+      ? `${latestReport.passed_tests}/${latestReport.total_tests} review checks are passing in the latest review run.`
       : "Submit the full project to get a scorecard for each deliverable.";
 
     deliverablesBody.innerHTML = deliverables.map((deliverable) => {

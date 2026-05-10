@@ -150,10 +150,14 @@ class CourseGenerationAsyncTests(unittest.TestCase):
 
         authored_titles = [
             deliverable.title
-            for deliverable in shared_run.artifacts.task_agent_spec.deliverables[: len(course_run.deliverables)]
+            for deliverable in shared_run.artifacts.task_agent_spec.deliverables
         ]
         self.assertEqual(
             [deliverable.title for deliverable in course_run.deliverables],
             authored_titles,
+        )
+        self.assertEqual(
+            len(course_run.deliverables),
+            len(shared_run.artifacts.task_agent_spec.deliverables),
         )
         self.assertNotIn("Service contract and durable model", authored_titles)

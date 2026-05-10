@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 from app.domain.course import CourseRun
@@ -103,14 +104,46 @@ class PublishSnapshotService:
 
         deliverable_packages: list[LearnerDeliverablePackage] = []
         spec_deliverables = list(spec.deliverables)
-        for index, course_deliverable in enumerate(course_run.deliverables, start=1):
-            spec_deliverable = spec_deliverables[index - 1] if index - 1 < len(spec_deliverables) else None
-            gate = spec.gate_for(spec_deliverable.id) if spec_deliverable is not None else None
+        course_deliverables = list(course_run.deliverables)
+        for index, spec_deliverable in enumerate(spec_deliverables, start=1):
+            course_deliverable = (
+                course_deliverables[index - 1]
+                if index - 1 < len(course_deliverables)
+                else None
+            )
+            deliverable_title = (
+                course_deliverable.title if course_deliverable is not None else spec_deliverable.title
+            )
+            deliverable_summary = (
+                course_deliverable.summary if course_deliverable is not None else spec_deliverable.objective
+            )
+            deliverable_slug = (
+                course_deliverable.deliverable_slug
+                if course_deliverable is not None
+                else spec_deliverable.id.replace("_", "-")
+            )
+            learning_outcomes = list(
+                course_deliverable.learning_outcomes
+                if course_deliverable is not None
+                else spec_deliverable.learning_outcomes
+            )
+            course_deliverable_view = (
+                course_deliverable
+                if course_deliverable is not None
+                else SimpleNamespace(
+                    title=deliverable_title,
+                    summary=deliverable_summary,
+                    learning_outcomes=learning_outcomes,
+                )
+            )
+            gate = spec.gate_for(spec_deliverable.id)
             learner_brief = combine_learner_deliverable_briefs(
                 fallback_task=(
-                    f"Extend the learner-visible starter so it satisfies {course_deliverable.summary.rstrip('.').lower()}."
+                    "Extend the learner-visible starter so it satisfies "
+                    + deliverable_summary.rstrip(".").lower()
+                    + "."
                 ),
-                fallback_why=course_deliverable.summary,
+                fallback_why=deliverable_summary,
                 briefs=[
                     aligned_deliverable.learner_brief
                     for aligned_deliverable in [spec_deliverable]
@@ -124,16 +157,16 @@ class PublishSnapshotService:
                 for check in aligned_deliverable.public_checks
             )
             content_markdown = self._learner_deliverable_markdown(
-                course_deliverable=course_deliverable,
+                course_deliverable=course_deliverable_view,
                 deliverable_index=index,
                 learner_brief=learner_brief,
                 public_checks=public_checks,
             )
             starter_readme = self._learner_starter_readme(
                 spec=spec,
-                course_deliverable_title=course_deliverable.title,
-                course_deliverable_summary=course_deliverable.summary,
-                learning_outcomes=list(course_deliverable.learning_outcomes),
+                course_deliverable_title=deliverable_title,
+                course_deliverable_summary=deliverable_summary,
+                learning_outcomes=learning_outcomes,
                 learner_brief=learner_brief,
                 public_checks=public_checks,
             )
@@ -147,21 +180,21 @@ class PublishSnapshotService:
             )
             deliverable_packages.append(
                 LearnerDeliverablePackage(
-                    deliverable_id=course_deliverable.deliverable_slug,
-                    course_deliverable_slug=course_deliverable.deliverable_slug,
-                    title=course_deliverable.title,
-                    objective=course_deliverable.summary,
+                    deliverable_id=deliverable_slug,
+                    course_deliverable_slug=deliverable_slug,
+                    title=deliverable_title,
+                    objective=deliverable_summary,
                     deliverable_index=index,
                     learner_brief=learner_brief,
                     public_checks=public_checks,
                     content_markdown=content_markdown,
                     starter_readme=starter_readme,
-                    learning_outcomes=list(course_deliverable.learning_outcomes),
+                    learning_outcomes=learning_outcomes,
                     active_test_ids=list(gate.active_test_ids) if gate is not None else [],
                     completion_rule=(
                         learner_brief.definition_of_done[0]
                         if learner_brief.definition_of_done
-                        else f"Complete {course_deliverable.title}."
+                        else f"Complete {deliverable_title}."
                     ),
                     visible_files=[file.relative_path for file in seed_files],
                     workspace_seed_files=seed_files,

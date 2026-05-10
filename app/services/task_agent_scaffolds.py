@@ -6,7 +6,6 @@ from app.domain.task_agent import (
     DeliverableSpec,
     EndpointSpec,
     ProjectFamily,
-    ProgressionMode,
     TaskAgentServiceSpec,
 )
 from app.services.learner_brief_builder import ensure_task_agent_deliverable_briefs
@@ -185,8 +184,6 @@ def build_task_agent_scaffold(
         public_endpoints=_public_endpoints(slug, design_spec),
         deliverables=_family_deliverables(design_spec),
     )
-    if spec.course_structure.progression_mode == ProgressionMode.independent_deliverables:
-        spec.course_structure.shared_codebase = False
     spec = ensure_task_agent_deliverable_briefs(spec, overwrite=True)
     origin_template = design_spec.project_contract.family.value
     return spec, origin_template

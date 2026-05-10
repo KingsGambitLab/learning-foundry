@@ -317,6 +317,16 @@ class TaskAgentServiceSpec(BaseModel):
         ):
             raise ValueError("progressive codebase courses need at least two deliverables")
         if (
+            self.package_type == PackageType.progressive_codebase_course
+            and not self.course_structure.shared_codebase
+        ):
+            raise ValueError("progressive codebase courses require a shared codebase")
+        if (
+            self.package_type == PackageType.progressive_codebase_course
+            and self.course_structure.workspace_scope != WorkspaceScope.shared_course_workspace
+        ):
+            raise ValueError("progressive codebase courses require a shared course workspace")
+        if (
             self.course_structure.progression_mode == ProgressionMode.cumulative_deliverable_gates
             and not self.course_structure.shared_codebase
         ):

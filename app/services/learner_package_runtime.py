@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 from app.domain.grading import AssignmentGradeReport, GradeStatus, DeliverableGradeReport, ReviewAreaGradeReport
+from app.domain.registry import PackageType
 from app.domain.learner import LearnerDeliverableProgress
-from app.domain.publish import LearnerDeliverablePackage, PublishSnapshot
+from app.domain.publish import LearnerDeliverablePackage, LearnerPackageFile, PublishSnapshot
 
 
 def project_brief_markdown(snapshot: PublishSnapshot) -> str:
@@ -80,9 +81,8 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
         raise ValueError("This publish snapshot is missing learner workspace seed files.")
 
     files_to_write: dict[str, str] = {}
-    for deliverable in learner_package.deliverables:
-        for file in deliverable.workspace_seed_files:
-            files_to_write.setdefault(file.relative_path, file.content)
+    for file in _workspace_seed_source_files(learner_package.deliverables, learner_package.package_type):
+        files_to_write[file.relative_path] = file.content
     brief = project_brief_markdown(snapshot)
     files_to_write["README.md"] = brief
     files_to_write["project_brief.md"] = brief
@@ -100,6 +100,21 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     return root
+
+
+def _workspace_seed_source_files(
+    deliverables: list[LearnerDeliverablePackage],
+    package_type: PackageType,
+) -> list[LearnerPackageFile]:
+    if not deliverables:
+        return []
+    if package_type == PackageType.progressive_codebase_course:
+        first_deliverable = min(deliverables, key=lambda deliverable: deliverable.deliverable_index)
+        return list(first_deliverable.workspace_seed_files)
+    files: list[LearnerPackageFile] = []
+    for deliverable in deliverables:
+        files.extend(deliverable.workspace_seed_files)
+    return files
 
 
 def remap_assignment_report_to_deliverables(

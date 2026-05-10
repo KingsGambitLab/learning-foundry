@@ -1451,23 +1451,32 @@ class CourseWorkflowService:
         deliverables: list[CreateCourseDeliverableRequest],
         shared_run: WorkflowRun,
     ) -> list[CreateCourseDeliverableRequest]:
-        if shared_run.artifacts.task_agent_spec is None or not deliverables:
+        if shared_run.artifacts.task_agent_spec is None:
             return deliverables
         authored_deliverables = list(shared_run.artifacts.task_agent_spec.deliverables)
         aligned: list[CreateCourseDeliverableRequest] = []
-        for index, deliverable in enumerate(deliverables):
-            if index >= len(authored_deliverables):
-                aligned.append(deliverable)
-                continue
-            authored = authored_deliverables[index]
+        for index, authored in enumerate(authored_deliverables):
+            deliverable = deliverables[index] if index < len(deliverables) else None
             aligned.append(
-                deliverable.model_copy(
-                    update={
-                        "deliverable_slug": deliverable.deliverable_slug or authored.id,
-                        "title": authored.title.strip(),
-                        "summary": authored.objective.strip(),
-                        "learning_outcomes": list(authored.learning_outcomes or deliverable.learning_outcomes),
-                    }
+                CreateCourseDeliverableRequest(
+                    deliverable_slug=(
+                        deliverable.deliverable_slug
+                        if deliverable is not None and deliverable.deliverable_slug
+                        else authored.id.replace("_", "-")
+                    ),
+                    title=authored.title.strip(),
+                    summary=authored.objective.strip(),
+                    learning_outcomes=list(
+                        authored.learning_outcomes
+                        or (
+                            deliverable.learning_outcomes
+                            if deliverable is not None
+                            else []
+                        )
+                    ),
+                    design_spec=deliverable.design_spec if deliverable is not None else None,
+                    domain_pack_hint=deliverable.domain_pack_hint if deliverable is not None else None,
+                    overlays_hint=deliverable.overlays_hint if deliverable is not None else None,
                 )
             )
         return aligned
