@@ -81,7 +81,28 @@ from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 from app.services.learner_studio_service import LearnerStudioError
+from app.domain.task_agent import DeliverableSpec
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+
+
+def _default_planner_deliverables_test(titles: list[str] | None = None) -> list[DeliverableSpec]:
+    """Minimal four-deliverable planner list for tests building scaffolds directly."""
+    titles = titles or [
+        "Public surface contract",
+        "Core read/write correctness",
+        "Observability and recovery",
+        "Production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
     HIDDEN_MANIFEST_PATH,
@@ -363,11 +384,12 @@ class FakeTaskAgentAuthoringService:
             env_file="/tmp/fake-openai.env",
         )
 
-    def generate_scaffold(self, *, title, summary, design_spec) -> TaskAgentAuthoringResult:
+    def generate_scaffold(self, *, title, summary, design_spec, planner_deliverables) -> TaskAgentAuthoringResult:
         spec, origin_template = build_task_agent_scaffold(
             title=title,
             summary=summary,
             design_spec=design_spec,
+            planner_deliverables=planner_deliverables,
         )
         spec.deliverables[0].title = "OpenAI-authored foundation"
         spec.summary = f"{summary} Generated with fake OpenAI."
@@ -852,6 +874,7 @@ class OpenAILearnerFeedbackServiceTests(unittest.TestCase):
                 problem_statement="Build a grounded internal docs assistant with citations and abstention.",
                 learning_outcomes=["retrieval", "grounded answers", "abstention"],
             ),
+            planner_deliverables=_default_planner_deliverables_test(),
         )
 
         failed_deliverable = spec.deliverables[0]
@@ -1088,6 +1111,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             title="Build a feature flag control plane",
             summary="Feature flag runtime",
             design_spec=inferred.design_spec,
+            planner_deliverables=_default_planner_deliverables_test(),
         )
         starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
         starter_manifest = json.loads(starter_files["starter_manifest.json"])
@@ -2750,6 +2774,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 problem_statement="Return grounded answers with citations.",
                 learning_outcomes=["grounded answers", "citations"],
             ),
+            planner_deliverables=_default_planner_deliverables_test(),
         )
         deliverable = spec.deliverables[0]
         original_checks = [check.model_dump(mode="json") for check in deliverable.public_checks]

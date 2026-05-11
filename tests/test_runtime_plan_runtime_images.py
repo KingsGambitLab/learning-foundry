@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.domain.registry import PackageType
+from app.domain.task_agent import DeliverableSpec
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import (
     dependency_container_image,
@@ -13,6 +14,25 @@ from app.services.assignment_design_inference import (
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+
+
+def _default_planner_deliverables(entity: str = "service") -> list[DeliverableSpec]:
+    titles = [
+        f"{entity.title()} contract and public surface",
+        f"{entity.title()} core read and write paths",
+        f"{entity.title()} observability and recovery",
+        f"{entity.title()} production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
     HIDDEN_MANIFEST_PATH,
@@ -45,10 +65,14 @@ def _build_spec(
     # the scaffold builder has something to bind primary_editable_paths to.
     if not inferred.design_spec.runtime_dependencies.editable_files:
         inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
+    from app.services.public_surface_quality import meaningful_domain_entities
+    entities = meaningful_domain_entities(inferred.design_spec.project_contract.core_entities)
+    entity = entities[0] if entities else (inferred.design_spec.project_contract.system_kind or "service")
     spec, _origin = build_task_agent_scaffold(
         title=title,
         summary=summary,
         design_spec=inferred.design_spec,
+        planner_deliverables=_default_planner_deliverables(entity=entity),
     )
     return spec
 

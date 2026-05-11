@@ -123,10 +123,22 @@ def _materialized_run(temp_dir: str):
     # before the run is created — every downstream artifact (manifest, brief,
     # starter surface) reads from this.
     inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
+    from app.domain.task_agent import DeliverableSpec
+    planner_deliverables = [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=f"Inventory reservation deliverable {index}",
+            objective=f"Build deliverable {index} of the inventory reservation surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index in range(1, 5)
+    ]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
         execute_nodes=False,
+        planner_deliverables=planner_deliverables,
     )
     workflow_service.materialize_run(run.id, MaterializeBundleRequest(overwrite=True))
     run = workflow_service.get_run(run.id)

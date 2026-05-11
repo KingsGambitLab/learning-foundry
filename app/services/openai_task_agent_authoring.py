@@ -12,6 +12,7 @@ from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.registry import PackageType, RiskClass
 from app.domain.task_agent import (
     AssignmentDesignSpec,
+    DeliverableSpec,
     EndpointSpec,
     LearnerStarterSurfaceSpec,
     PublicCheckSpec,
@@ -245,6 +246,7 @@ class OpenAITaskAgentAuthoringService:
         title: str,
         summary: str,
         design_spec: AssignmentDesignSpec,
+        planner_deliverables: list[DeliverableSpec],
     ) -> TaskAgentAuthoringResult:
         log_coursegen_event(
             "task_agent_authoring_generate_started",
@@ -257,6 +259,7 @@ class OpenAITaskAgentAuthoringService:
             title=title,
             summary=summary,
             design_spec=design_spec,
+            planner_deliverables=planner_deliverables,
         )
         base_spec = ensure_task_agent_deliverable_briefs(base_spec, overwrite=True)
         status = self.status()

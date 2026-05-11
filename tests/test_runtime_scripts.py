@@ -5,9 +5,29 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.domain.registry import PackageType
+from app.domain.task_agent import DeliverableSpec
 from app.services.assignment_design_inference import infer_assignment_design
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+
+
+def _default_planner_deliverables() -> list[DeliverableSpec]:
+    titles = [
+        "Public surface contract",
+        "Core read/write correctness",
+        "Observability and recovery",
+        "Production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_INSTALL_SCRIPT_PATH,
@@ -42,6 +62,7 @@ def _build_spec(
         title=title,
         summary=summary,
         design_spec=inferred.design_spec,
+        planner_deliverables=_default_planner_deliverables(),
     )
     return spec
 

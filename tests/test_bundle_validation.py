@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from app.domain.task_agent import EndpointSpec
+from app.domain.task_agent import DeliverableSpec, EndpointSpec
 from app.domain.workflow import MaterializeBundleRequest
 from app.domain.registry import PackageType
 from app.services.artifact_materializer import ArtifactMaterializer
@@ -29,6 +29,26 @@ from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
 
+def _inventory_planner_deliverables() -> list[DeliverableSpec]:
+    """Minimal four-deliverable planner list used by tests for the inventory service."""
+    titles = [
+        "Inventory reservation contract and state model",
+        "Inventory reservation read/write correctness",
+        "Inventory reservation observability and recovery",
+        "Inventory reservation production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
+
+
 def _inventory_design():
     inferred = infer_assignment_design(
         title="Inventory Reservation Service",
@@ -49,6 +69,7 @@ def test_transactional_scaffold_is_family_specific_not_agentic() -> None:
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
 
     assert origin_template == "transactional_stateful_service"
@@ -107,6 +128,7 @@ def test_validation_rejects_title_slug_public_endpoints() -> None:
         title="Build a concurrency-safe multi-warehouse inventory reservation service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     spec.public_endpoints[1].path = "/build-a-concurrency-safe-multi-warehouse-inventory-reservation-service"
 
@@ -121,6 +143,7 @@ def test_validation_rejects_generic_deliverable_titles_when_entities_are_known()
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     spec.deliverables[0].title = "Service contract and durable model"
 
@@ -337,6 +360,7 @@ def test_ensure_task_agent_deliverable_briefs_normalizes_stale_required_endpoint
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -367,6 +391,7 @@ def test_ensure_task_agent_deliverable_briefs_falls_back_when_only_health_surviv
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -394,6 +419,7 @@ def test_validation_rejects_stale_required_endpoint_not_in_public_surface() -> N
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -412,6 +438,7 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     brief = deliverable.learner_brief or build_task_agent_deliverable_brief(spec, deliverable)

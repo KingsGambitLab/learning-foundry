@@ -29,7 +29,8 @@ from app.domain.workflow import (
     WorkflowStage,
     WorkflowStatus,
 )
-from app.domain.task_agent import AssignmentDesignSpec, TaskAgentServiceSpec
+from app.domain.task_agent import AssignmentDesignSpec, DeliverableSpec, TaskAgentServiceSpec
+from app.services.public_surface_quality import meaningful_domain_entities
 from app.services.assignment_design_inference import (
     DesignSupportStatus,
     GenerationIntake,
@@ -67,6 +68,44 @@ _GRAPH_EXECUTION_NODE_KINDS = {
 
 class WorkflowConflictError(ValueError):
     """Raised when a workflow transition is invalid."""
+
+
+def _default_planner_deliverables(design_spec: AssignmentDesignSpec) -> list[DeliverableSpec]:
+    """Build a minimal planner deliverable list when no planner is wired in.
+
+    Pass 10 Job A: ``build_task_agent_scaffold`` always needs a planner-shaped
+    deliverable list. Callers that come directly through ``WorkflowService``
+    without going through the course planner (legacy single-assignment flows,
+    most direct tests) get a small default list derived from the design
+    spec's primary domain entity. Progressive courses still need at least
+    two deliverables to satisfy the spec validator, so the default size is
+    based on the package type.
+    """
+    entities = meaningful_domain_entities(design_spec.project_contract.core_entities)
+    entity = entities[0] if entities else (design_spec.project_contract.system_kind or "resource")
+    package_type = design_spec.course_structure.package_type
+    titles = [
+        f"{entity.title()} contract and public surface",
+    ]
+    if package_type.value == "progressive_codebase_course":
+        titles.append(f"{entity.title()} production hardening")
+    objectives = {
+        titles[0]: f"Define and implement a stable public surface for {entity}.",
+    }
+    if len(titles) > 1:
+        objectives[titles[1]] = (
+            f"Raise the {entity} service to a production-minded bar for reliability, latency, and diagnostics."
+        )
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=objectives[title],
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 
 
 class WorkflowService:
@@ -165,6 +204,7 @@ class WorkflowService:
         warnings: list[str] | None = None,
         notes: list[str] | None = None,
         execute_nodes: bool = True,
+        planner_deliverables: list[DeliverableSpec] | None = None,
     ) -> WorkflowRun:
         reasons = reasons or []
         warnings = warnings or []
@@ -182,6 +222,7 @@ class WorkflowService:
             warnings=warnings,
             notes=notes,
             execute_nodes=execute_nodes,
+            planner_deliverables=planner_deliverables,
         )
 
     def list_task_agent_grader_plans(self, run_id: str) -> TaskAgentGraderPlanCollection:
@@ -229,7 +270,13 @@ class WorkflowService:
         )
         return report
 
-    def create_run(self, intake: GenerationIntake, *, execute_nodes: bool = True) -> WorkflowRun:
+    def create_run(
+        self,
+        intake: GenerationIntake,
+        *,
+        execute_nodes: bool = True,
+        planner_deliverables: list[DeliverableSpec] | None = None,
+    ) -> WorkflowRun:
         inferred = infer_assignment_design(
             title=intake.title,
             problem_statement=intake.problem_statement,
@@ -263,6 +310,7 @@ class WorkflowService:
             warnings=inferred.warnings,
             notes=[],
             execute_nodes=execute_nodes,
+            planner_deliverables=planner_deliverables,
         )
 
     def create_revision_from_run(self, run_id: str) -> WorkflowRun:
@@ -340,6 +388,7 @@ class WorkflowService:
         warnings: list[str],
         notes: list[str],
         execute_nodes: bool = True,
+        planner_deliverables: list[DeliverableSpec] | None = None,
     ) -> WorkflowRun:
         now = datetime.now(UTC)
         run_id = f"run_{uuid4().hex[:12]}"
@@ -351,10 +400,16 @@ class WorkflowService:
             implementation_language=design_spec.runtime_dependencies.implementation_language,
             application_framework=design_spec.runtime_dependencies.application_framework,
         )
+        resolved_planner_deliverables = (
+            planner_deliverables
+            if planner_deliverables is not None
+            else _default_planner_deliverables(design_spec)
+        )
         authoring_result = self.task_agent_authoring_service.generate_scaffold(
             title=intake.title,
             summary=intake.problem_statement,
             design_spec=design_spec,
+            planner_deliverables=resolved_planner_deliverables,
         )
         log_coursegen_event(
             "workflow_authoring_scaffold_generated",

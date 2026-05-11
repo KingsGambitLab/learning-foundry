@@ -35,7 +35,7 @@ from app.domain.course import (
     QueueCourseRevisionResponse,
 )
 from app.domain.registry import PackageType, RiskClass
-from app.domain.task_agent import AssignmentDesignSpec, RetrievalMode
+from app.domain.task_agent import AssignmentDesignSpec, DeliverableSpec, RetrievalMode
 from app.domain.publish import PublishSnapshot, PublishedVersionList, PublishedVersionSummary
 from app.domain.publish import PublishCertificationCheckStatus, PublishCertificationFailureOrigin, PublishLearnerCertificationReport
 from app.domain.testing import (
@@ -81,6 +81,31 @@ class CourseWorkflowConflictError(ValueError):
 
 
 ASSIGNMENT_PACKAGE_TYPE = PackageType.progressive_codebase_course
+
+
+def _planner_deliverables_from_course_deliverables(
+    deliverables: list[CreateCourseDeliverableRequest],
+) -> list[DeliverableSpec]:
+    """Convert planner-emitted ``CreateCourseDeliverableRequest`` rows into
+    ``DeliverableSpec`` instances suitable for ``build_task_agent_scaffold``.
+
+    Pass 10 Job A: the scaffold builder consumes whatever the planner emits
+    (no fixed-size template). The OpenAI customization step refines the
+    learner-facing fields on top of this base.
+    """
+    planner: list[DeliverableSpec] = []
+    for index, deliverable in enumerate(deliverables, start=1):
+        objective = (deliverable.summary or deliverable.title).strip()
+        planner.append(
+            DeliverableSpec(
+                id=f"deliverable_{index}",
+                title=deliverable.title,
+                objective=objective,
+                learning_outcomes=list(deliverable.learning_outcomes),
+                overlay_ids=[],
+            )
+        )
+    return planner
 
 
 class CourseWorkflowService:
@@ -1335,15 +1360,20 @@ class CourseWorkflowService:
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
             design_spec=deliverable.design_spec,
         )
+        planner_deliverables = _planner_deliverables_from_course_deliverables([deliverable])
         if deliverable.design_spec is not None:
             child_run = self.workflow_service.create_run_from_explicit_plan(
                 intake=intake,
                 design_spec=deliverable.design_spec,
                 reasons=[f"Seeded from course deliverable '{deliverable.title}'."],
                 notes=["Created from the survey-course deliverable planner."],
+                planner_deliverables=planner_deliverables,
             )
         else:
-            child_run = self.workflow_service.create_run(intake)
+            child_run = self.workflow_service.create_run(
+                intake,
+                planner_deliverables=planner_deliverables,
+            )
 
         return self._deliverable_draft_from_workflow(
             deliverable,
@@ -1371,6 +1401,7 @@ class CourseWorkflowService:
             package_type_hint=ASSIGNMENT_PACKAGE_TYPE,
             design_spec=shared_design_spec,
         )
+        planner_deliverables = _planner_deliverables_from_course_deliverables(deliverables)
         if shared_design_spec is not None:
             return self.workflow_service.create_run_from_explicit_plan(
                 intake=course_intake,
@@ -1378,9 +1409,14 @@ class CourseWorkflowService:
                 reasons=["Created from the progressive course planner."],
                 notes=["This workflow run is shared across all course deliverables."],
                 execute_nodes=execute_nodes,
+                planner_deliverables=planner_deliverables,
             )
 
-        return self.workflow_service.create_run(course_intake, execute_nodes=execute_nodes)
+        return self.workflow_service.create_run(
+            course_intake,
+            execute_nodes=execute_nodes,
+            planner_deliverables=planner_deliverables,
+        )
 
     def _deliverable_draft_from_workflow(
         self,

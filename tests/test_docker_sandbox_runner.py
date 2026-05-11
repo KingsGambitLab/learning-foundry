@@ -51,10 +51,22 @@ def _make_run(temp_dir: Path):
     assert inferred.design_spec is not None
     if not inferred.design_spec.runtime_dependencies.editable_files:
         inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
+    from app.domain.task_agent import DeliverableSpec
+    planner_deliverables = [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=f"Inventory reservation deliverable {index}",
+            objective=f"Build deliverable {index} of the reservation surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index in range(1, 5)
+    ]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
         execute_nodes=False,
+        planner_deliverables=planner_deliverables,
     )
     run.artifacts.workspace_snapshot = workspace_manager.prepare_run_workspace(run, overwrite=True)
     return run

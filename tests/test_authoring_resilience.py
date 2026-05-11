@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from app.domain.ai import AIUsageSummary
-from app.domain.task_agent import AssignmentDesignSpec, EndpointSpec
+from app.domain.task_agent import AssignmentDesignSpec, DeliverableSpec, EndpointSpec
 from app.domain.workflow import (
     DecisionOutcome,
     GateDecisionRequest,
@@ -39,6 +39,25 @@ from app.services.learner_brief_builder import ensure_task_agent_deliverable_bri
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.workflow_service import WorkflowConflictError, WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
+
+
+def _default_planner_deliverables(titles: list[str] | None = None) -> list[DeliverableSpec]:
+    titles = titles or [
+        "Public surface contract",
+        "Core read/write correctness",
+        "Observability and recovery",
+        "Production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 
 
 def _grounded_design_spec() -> AssignmentDesignSpec:
@@ -121,11 +140,12 @@ class _FailedLiveAuthoringService:
             env_file="/tmp/fake-openai.env",
         )
 
-    def generate_scaffold(self, *, title, summary, design_spec) -> TaskAgentAuthoringResult:
+    def generate_scaffold(self, *, title, summary, design_spec, planner_deliverables) -> TaskAgentAuthoringResult:
         spec, origin_template = build_task_agent_scaffold(
             title=title,
             summary=summary,
             design_spec=design_spec,
+            planner_deliverables=planner_deliverables,
         )
         return TaskAgentAuthoringResult(
             spec=spec,
@@ -224,6 +244,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             title="Build a Grounded Internal Docs Assistant",
             summary="Answer docs questions with citations and abstention.",
             design_spec=_grounded_design_spec(),
+            planner_deliverables=_default_planner_deliverables(),
         )
 
         self.assertEqual(fake_client.calls, 2)
@@ -244,6 +265,7 @@ class AuthoringResilienceTests(unittest.TestCase):
                 title="Build a Grounded Internal Docs Assistant",
                 summary="Answer docs questions with citations and abstention.",
                 design_spec=_grounded_design_spec(),
+                planner_deliverables=_default_planner_deliverables(),
             )
 
         mocked_parse.assert_called_once()
@@ -297,6 +319,7 @@ class AuthoringResilienceTests(unittest.TestCase):
                 primary_database="postgres",
                 cache_backend="redis",
             ).design_spec,
+            planner_deliverables=_default_planner_deliverables(),
         )
         base_spec = ensure_task_agent_deliverable_briefs(base_spec, overwrite=True)
         service = OpenAITaskAgentAuthoringService(enabled=False)
@@ -392,6 +415,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             title="Build a Concurrent Inventory Reservation Service",
             summary="Keep reservations correct under concurrent requests and retries.",
             design_spec=inferred.design_spec,
+            planner_deliverables=_default_planner_deliverables(),
         )
 
         validation = validate_task_agent_spec(spec)
@@ -428,6 +452,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             title="Build a Concurrent Inventory Reservation Service",
             summary="Keep reservations correct under concurrent requests and retries.",
             design_spec=inferred.design_spec,
+            planner_deliverables=_default_planner_deliverables(),
         )
 
         self.assertFalse(spec.capabilities.approval_flow_required)
@@ -489,6 +514,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             title="Build a Grounded Internal Docs Assistant",
             summary="Answer docs questions with citations and abstention.",
             design_spec=_grounded_design_spec(),
+            planner_deliverables=_default_planner_deliverables(),
         )
         status = service.status()
 
@@ -509,6 +535,7 @@ class AuthoringResilienceTests(unittest.TestCase):
             title="Build a Grounded Internal Docs Assistant",
             summary="Answer docs questions with citations and abstention.",
             design_spec=_grounded_design_spec(),
+            planner_deliverables=_default_planner_deliverables(),
         )
 
         self.assertEqual(result.source, TaskAgentAuthoringSource.openai_live)

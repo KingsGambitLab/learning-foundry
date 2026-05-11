@@ -8,6 +8,7 @@ import json
 
 from app.domain.ai import AIUsageSummary
 from app.domain.sandbox import DeliverableSandboxReport, SandboxExecutionResult, SandboxExecutionStatus, SandboxFailureStage
+from app.domain.task_agent import DeliverableSpec
 from app.domain.workflow import ReviewerFinding, ReviewerFindingSeverity, WorkflowNodeExecution, WorkflowNodeKind, WorkflowNodeStatus
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
@@ -184,10 +185,21 @@ def _make_run(temp_dir: Path):
     # and brief.files_to_edit from runtime_dependencies.editable_files.
     if not inferred.design_spec.runtime_dependencies.editable_files:
         inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
+    planner_deliverables = [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=f"Inventory reservation deliverable {index}",
+            objective=f"Build deliverable {index} of the reservation surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index in range(1, 5)
+    ]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
         execute_nodes=False,
+        planner_deliverables=planner_deliverables,
     )
     return run
 

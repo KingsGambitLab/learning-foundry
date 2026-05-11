@@ -160,4 +160,9 @@ class CourseGenerationAsyncTests(unittest.TestCase):
             len(course_run.deliverables),
             len(shared_run.artifacts.task_agent_spec.deliverables),
         )
-        self.assertNotIn("Service contract and durable model", authored_titles)
+        # Pass 10 Job A: the planner's deliverable titles flow through 1:1.
+        # The course-plan fallback emits "Service contract and durable model" for
+        # transactional-stateful-service families, so it is now expected to land
+        # in the authored workflow deliverables instead of being replaced by an
+        # entity-templated family-specific title.
+        self.assertIn("Service contract and durable model", authored_titles)
