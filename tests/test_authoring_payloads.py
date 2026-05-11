@@ -661,6 +661,34 @@ class AuthoringPayloadTests(unittest.TestCase):
             "Repo authoring system prompt must forbid the model from installing or starting dependency services inside the app container.",
         )
 
+    def test_repo_authoring_prompt_points_at_pass8_diagnostic_fields(self) -> None:
+        """The repair-side system prompt must explicitly call out the Pass-8
+        per-deliverable diagnostic surface so the model knows to read
+        ``stdout_excerpt`` (framework logs), ``exit_state.oom_killed``
+        (raise memory cap), ``sidecar_diagnostics`` (postgres/redis
+        stderr — check first on 'connection refused'), and
+        ``http_response`` (contract-probe response bodies). Without
+        these pointers the model keeps treating the headline ``error``
+        as authoritative and ignores the much richer structured fields.
+        """
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        lowered = source.lower()
+        self.assertIn("stdout_excerpt", lowered)
+        self.assertIn("exit_state", lowered)
+        self.assertIn("oom_killed", lowered)
+        self.assertIn("sidecar_diagnostics", lowered)
+        self.assertIn("http_response", lowered)
+        # The prompt should explicitly steer the model to read the
+        # structured fields instead of the headline label.
+        self.assertTrue(
+            "headline" in lowered or "label" in lowered,
+            "Prompt must explain that the headline `error` is just a label "
+            "and the structured fields are the canonical diagnostic.",
+        )
+
     def test_repo_authoring_prompt_warns_about_structured_output_binary_constraint(self) -> None:
         """Structured outputs can only carry text. The system prompt must warn
         the model that binary-wrapper files (e.g. `.mvn/wrapper/maven-wrapper.jar`,
