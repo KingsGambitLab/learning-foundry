@@ -113,11 +113,38 @@ class OpenAITestScriptAuthoringService:
         )
         model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
 
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
             if deliverable.id not in requested_ids:
                 continue
-            starter_root = public_root / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            if shared_codebase:
+                # Shared layout: one starter root, per-deliverable manifest in
+                # private/grader/<id>/deliverable.json, per-deliverable scripts at
+                # public/checks/<id>/run_visible_checks.py and
+                # private/grader/<id>/run_hidden_checks.py.
+                starter_root = public_root / "starter"
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+                visible_path = (
+                    public_root / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                hidden_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+                visible_path = starter_root / VISIBLE_TEST_SCRIPT_PATH
+                hidden_path = starter_root / HIDDEN_TEST_SCRIPT_PATH
             if not starter_root.exists() or not manifest_path.exists():
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -134,8 +161,7 @@ class OpenAITestScriptAuthoringService:
             compile(scripts.visible_script, f"{deliverable.id}:{VISIBLE_TEST_SCRIPT_PATH}", "exec")
             compile(scripts.hidden_script, f"{deliverable.id}:{HIDDEN_TEST_SCRIPT_PATH}", "exec")
 
-            visible_path = starter_root / VISIBLE_TEST_SCRIPT_PATH
-            hidden_path = starter_root / HIDDEN_TEST_SCRIPT_PATH
+            visible_path.parent.mkdir(parents=True, exist_ok=True)
             hidden_path.parent.mkdir(parents=True, exist_ok=True)
             updated_files.extend(self._write_if_changed(visible_path, scripts.visible_script, workspace_root))
             updated_files.extend(self._write_if_changed(hidden_path, scripts.hidden_script, workspace_root))

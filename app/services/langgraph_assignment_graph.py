@@ -508,15 +508,31 @@ class LangGraphAssignmentGraph:
                 )
             )
         else:
-            # TODO(pass-5): paths still resolve to the legacy per-deliverable
-            # starter layout. Pass 3 leaves this site untouched; Pass 5 will
-            # rewire the authoring-tests node to the shared starter + per-
-            # deliverable public/checks/<id>/ and private/grader/<id>/ layout.
+            # Shared-codebase layout: visible script at public/checks/<id>/run_visible_checks.py
+            # and hidden script at private/grader/<id>/run_hidden_checks.py.
+            # Legacy non-shared courses keep the per-deliverable starter layout.
+            spec_for_paths = run.artifacts.task_agent_spec
+            shared_codebase = bool(
+                spec_for_paths is not None and spec_for_paths.course_structure.shared_codebase
+            )
             public_dir = Path(workspace.public_dir)
+            workspace_root = Path(workspace.root_dir)
             for deliverable in run.artifacts.task_agent_spec.deliverables:  # type: ignore[union-attr]
-                starter_root = public_dir / "starter" / deliverable.id
-                visible_path = starter_root / "checks" / "run_visible_checks.py"
-                hidden_path = starter_root / HIDDEN_GRADER_SCRIPT_PATH
+                if shared_codebase:
+                    visible_path = (
+                        public_dir / "checks" / deliverable.id / "run_visible_checks.py"
+                    )
+                    hidden_path = (
+                        workspace_root
+                        / "private"
+                        / "grader"
+                        / deliverable.id
+                        / "run_hidden_checks.py"
+                    )
+                else:
+                    starter_root = public_dir / "starter" / deliverable.id
+                    visible_path = starter_root / "checks" / "run_visible_checks.py"
+                    hidden_path = starter_root / HIDDEN_GRADER_SCRIPT_PATH
                 if not visible_path.exists() or not hidden_path.exists():
                     status = WorkflowNodeStatus.failed
                     findings.append(
@@ -942,8 +958,17 @@ class LangGraphAssignmentGraph:
         if state["run"].artifacts.workspace_snapshot is not None:
             placeholder_deliverables = []
             wrapper_deliverables = []
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            shared_starter_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter"
             for deliverable in spec.deliverables:
-                deliverable_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter" / deliverable.id
+                # Shared-codebase courses keep one shared starter root at
+                # public/starter/; legacy non-shared courses use the
+                # per-deliverable subtree public/starter/<deliverable.id>/.
+                deliverable_dir = (
+                    shared_starter_dir
+                    if shared_codebase
+                    else shared_starter_dir / deliverable.id
+                )
                 editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 deliverable_has_placeholder = False
                 deliverable_has_wrapper = False
