@@ -21,7 +21,13 @@ from app.domain.sandbox import (
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.domain.workflow import WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
-from app.services.artifact_materializer import ArtifactMaterializer
+from app.services.artifact_materializer import (
+    ArtifactMaterializer,
+    DELIVERABLE_MANIFEST_RELATIVE_PATH,
+    VISIBLE_CHECK_SCRIPT_RELATIVE_PATH,
+    deliverable_grader_dir,
+    deliverable_visible_checks_dir,
+)
 from app.services.coursegen_logging import log_coursegen_event
 from app.services.dependency_contract_materializer import DependencyContractMaterializer
 from app.services.generated_test_harness import GeneratedTestScriptRunner
@@ -344,24 +350,21 @@ class DockerSandboxRunner:
 
         shared_codebase = bool(spec.course_structure.shared_codebase)
         shared_starter_root = workspace_root / "starter"
-        # TODO(sandbox-share-boot): For shared-codebase courses, this loop still
-        # builds and boots the runtime ONCE per deliverable, against the same
-        # shared starter root. The correct shape is to boot once and execute
-        # each deliverable's per-deliverable visible check script
-        # (public/checks/<id>/run_visible_checks.py) against the single running
-        # process, then collect per-deliverable reports. The current visible
-        # check command pattern (`sh .coursegen/runtime/check_visible.sh`)
-        # routes to `checks/run_visible_checks.py` under the cwd; for shared
-        # courses, the per-deliverable visible script lives outside the cwd
-        # at public/checks/<id>/, so this loop only exercises the default
-        # template stub and not the authored per-deliverable suites. The
-        # single-boot rewrite is its own change; this pass only repairs
-        # path-correctness for non-sandbox callers.
+
+        if shared_codebase:
+            return self._execute_shared_starter_harness(
+                workspace_root=workspace_root,
+                shared_starter_root=shared_starter_root,
+                spec=spec,
+                workflow_run_id=workflow_run_id,
+                now=now,
+                started=started,
+                fail_fast=fail_fast,
+            )
+
         for deliverable in spec.deliverables:
-            if shared_codebase:
-                starter_root = shared_starter_root
-            else:
-                starter_root = workspace_root / "starter" / deliverable.id
+            # Non-shared (legacy) path: one starter per deliverable.
+            starter_root = workspace_root / "starter" / deliverable.id
             log_coursegen_event(
                 "sandbox_deliverable_started",
                 workflow_run_id=workflow_run_id,
@@ -753,6 +756,706 @@ class DockerSandboxRunner:
                 )
                 break
 
+        success = all_builds_succeeded and all_runs_succeeded and bool(deliverable_reports)
+        result = SandboxExecutionResult(
+            status=SandboxExecutionStatus.passed if success else SandboxExecutionStatus.failed,
+            available=True,
+            build_succeeded=all_builds_succeeded,
+            build_cached=any_cached,
+            run_succeeded=all_runs_succeeded,
+            generated_at=now,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            workspace_root=str(workspace_root),
+            build_command=build_command,
+            run_command=run_command,
+            build_stdout="\n\n".join(part for part in build_stdout_parts if part),
+            build_stderr="\n\n".join(part for part in build_stderr_parts if part),
+            run_stdout="\n\n".join(part for part in run_stdout_parts if part),
+            run_stderr="\n\n".join(part for part in run_stderr_parts if part),
+            deliverable_reports=deliverable_reports,
+            error=None
+            if success
+            else self._summarize_failed_deliverables(deliverable_reports),
+        )
+        log_coursegen_event(
+            "sandbox_starter_harness_completed",
+            workflow_run_id=workflow_run_id,
+            workspace_root=str(workspace_root),
+            sandbox_status=result.status.value,
+            deliverable_report_count=len(result.deliverable_reports),
+            duration_ms=result.duration_ms,
+            error=result.error,
+        )
+        return result
+
+    def _execute_shared_starter_harness(
+        self,
+        *,
+        workspace_root: Path,
+        shared_starter_root: Path,
+        spec: TaskAgentServiceSpec,
+        workflow_run_id: str,
+        now: datetime,
+        started: float,
+        fail_fast: bool,
+    ) -> SandboxExecutionResult:
+        """Shared-codebase variant: build the runtime image and boot the shared
+        starter ONCE, then run each deliverable's visible suite + contract
+        probe against the single running app."""
+        build_stdout_parts: list[str] = []
+        build_stderr_parts: list[str] = []
+        run_stdout_parts: list[str] = []
+        run_stderr_parts: list[str] = []
+        deliverable_reports: list[DeliverableSandboxReport] = []
+        build_command: list[str] = []
+        run_command: list[str] = []
+        all_builds_succeeded = True
+        all_runs_succeeded = True
+        any_cached = False
+        private_root = workspace_root.parent / "private"
+
+        # Sanity: shared starter must exist.
+        if not shared_starter_root.exists():
+            for deliverable in spec.deliverables:
+                deliverable_reports.append(
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
+                        compile_succeeded=False,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.missing_workspace,
+                        error="Shared starter workspace is missing.",
+                    )
+                )
+            return self._finalize_starter_result(
+                workspace_root=workspace_root,
+                now=now,
+                started=started,
+                deliverable_reports=deliverable_reports,
+                build_command=build_command,
+                run_command=run_command,
+                build_stdout_parts=build_stdout_parts,
+                build_stderr_parts=build_stderr_parts,
+                run_stdout_parts=run_stdout_parts,
+                run_stderr_parts=run_stderr_parts,
+                all_builds_succeeded=False,
+                all_runs_succeeded=False,
+                any_cached=False,
+                workflow_run_id=workflow_run_id,
+            )
+
+        # Materialize the dependency contract ONCE against the shared starter.
+        try:
+            materialization = self.dependency_contract_materializer.materialize(
+                starter_root=shared_starter_root,
+                runtime_plan=spec.project_contract.runtime_plan,
+                deliverable_id="shared",
+            )
+        except Exception as exc:  # noqa: BLE001
+            for deliverable in spec.deliverables:
+                deliverable_reports.append(
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
+                        compile_succeeded=False,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.dependency_materialization,
+                        error=str(exc),
+                    )
+                )
+            return self._finalize_starter_result(
+                workspace_root=workspace_root,
+                now=now,
+                started=started,
+                deliverable_reports=deliverable_reports,
+                build_command=build_command,
+                run_command=run_command,
+                build_stdout_parts=build_stdout_parts,
+                build_stderr_parts=build_stderr_parts,
+                run_stdout_parts=run_stdout_parts,
+                run_stderr_parts=run_stderr_parts,
+                all_builds_succeeded=False,
+                all_runs_succeeded=False,
+                any_cached=False,
+                workflow_run_id=workflow_run_id,
+            )
+        if materialization.attempted:
+            log_coursegen_event(
+                "sandbox_dependency_contract_materialized",
+                workflow_run_id=workflow_run_id,
+                deliverable_id="shared",
+                image_name=materialization.image_name,
+                synced_paths=materialization.synced_paths,
+                success=materialization.succeeded,
+                error=materialization.error,
+            )
+            if materialization.stdout:
+                build_stdout_parts.append(
+                    f"[shared] Dependency contract materialization stdout:\n{materialization.stdout}".strip()
+                )
+            if materialization.stderr:
+                build_stderr_parts.append(
+                    f"[shared] Dependency contract materialization stderr:\n{materialization.stderr}".strip()
+                )
+        if not materialization.succeeded:
+            # Fail every deliverable with the same materialization error and
+            # short-circuit (no per-deliverable boot).
+            for deliverable in spec.deliverables:
+                deliverable_reports.append(
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
+                        compile_succeeded=False,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.dependency_materialization,
+                        stage_command=list(materialization.command),
+                        stage_exit_code=materialization.return_code,
+                        stdout=materialization.stdout,
+                        stderr=materialization.stderr,
+                        error=materialization.error
+                        or "Dependency contract materialization failed before runtime boot.",
+                    )
+                )
+            return self._finalize_starter_result(
+                workspace_root=workspace_root,
+                now=now,
+                started=started,
+                deliverable_reports=deliverable_reports,
+                build_command=build_command,
+                run_command=run_command,
+                build_stdout_parts=build_stdout_parts,
+                build_stderr_parts=build_stderr_parts,
+                run_stdout_parts=run_stdout_parts,
+                run_stderr_parts=run_stderr_parts,
+                all_builds_succeeded=False,
+                all_runs_succeeded=False,
+                any_cached=False,
+                workflow_run_id=workflow_run_id,
+            )
+
+        host_port = self.runtime_harness._allocate_port()
+        container_name = f"course-gen-sandbox-shared-{uuid4().hex[:8]}".lower()
+        network_name = f"{container_name}-net"
+        base_url = f"http://127.0.0.1:{host_port}"
+        logs = ""
+        runtime_image_ready = False
+        current_runtime_workspace: Path | None = None
+        boot_failure_reported = False
+
+        try:
+            with self.runtime_harness._ephemeral_runtime_workspace(
+                shared_starter_root
+            ) as runtime_workspace:
+                current_runtime_workspace = runtime_workspace
+                try:
+                    image_name = self.runtime_harness._workspace_runtime_image_name(
+                        runtime_workspace
+                    )
+                except RuntimeImageBuildError as build_exc:
+                    all_builds_succeeded = False
+                    all_runs_succeeded = False
+                    build_stderr_tail = self._tail_lines(build_exc.stderr, max_lines=80)
+                    build_stdout_tail = self._tail_lines(build_exc.stdout, max_lines=40)
+                    combined_log = "\n".join(
+                        part for part in (build_stderr_tail, build_stdout_tail) if part
+                    )
+                    if build_stderr_tail:
+                        build_stderr_parts.append(f"[shared] {build_stderr_tail}".strip())
+                    if build_stdout_tail:
+                        build_stdout_parts.append(f"[shared] {build_stdout_tail}".strip())
+                    for deliverable in spec.deliverables:
+                        deliverable_reports.append(
+                            DeliverableSandboxReport(
+                                deliverable_id=deliverable.id,
+                                compile_succeeded=False,
+                                runtime_succeeded=False,
+                                failed_stage=SandboxFailureStage.image_build,
+                                stage_command=list(build_exc.command),
+                                stage_exit_code=build_exc.returncode,
+                                stdout=build_stdout_tail,
+                                stderr=combined_log,
+                                error=self._summarize_stage_failure(
+                                    deliverable_id=deliverable.id,
+                                    failed_stage=SandboxFailureStage.image_build,
+                                    error_text=str(build_exc),
+                                    logs=combined_log,
+                                    default="Could not build the starter runtime image.",
+                                ),
+                            )
+                        )
+                    return self._finalize_starter_result(
+                        workspace_root=workspace_root,
+                        now=now,
+                        started=started,
+                        deliverable_reports=deliverable_reports,
+                        build_command=build_command,
+                        run_command=run_command,
+                        build_stdout_parts=build_stdout_parts,
+                        build_stderr_parts=build_stderr_parts,
+                        run_stdout_parts=run_stdout_parts,
+                        run_stderr_parts=run_stderr_parts,
+                        all_builds_succeeded=all_builds_succeeded,
+                        all_runs_succeeded=all_runs_succeeded,
+                        any_cached=any_cached,
+                        workflow_run_id=workflow_run_id,
+                    )
+
+                build_stdout_parts.append(
+                    f"[shared] Using runtime image {image_name} from the authored runtime plan."
+                )
+                if materialization.synced_paths:
+                    build_stdout_parts.append(
+                        f"[shared] Materialized dependency contract paths: {', '.join(materialization.synced_paths)}"
+                    )
+                self.runtime_harness._ensure_runtime_image_available(image_name)
+                runtime_image_ready = True
+                if self.runtime_harness._image_exists(image_name):
+                    any_cached = True
+
+                dependency_services = self.runtime_harness._dependency_services(
+                    runtime_workspace
+                )
+                log_coursegen_event(
+                    "sandbox_shared_support_services_starting",
+                    workflow_run_id=workflow_run_id,
+                    dependency_service_count=len(dependency_services),
+                    network_name=network_name,
+                )
+                self.runtime_harness._start_runtime_support_services(
+                    runtime_workspace,
+                    network_name=network_name,
+                    container_prefix=container_name,
+                )
+                log_coursegen_event(
+                    "sandbox_shared_support_services_started",
+                    workflow_run_id=workflow_run_id,
+                    dependency_service_count=len(dependency_services),
+                )
+                local_run_command = [
+                    self.docker_binary,
+                    "run",
+                    "-d",
+                    "--name",
+                    container_name,
+                    "-p",
+                    f"{host_port}:8000",
+                    "-v",
+                    f"{runtime_workspace}:/workspace",
+                    "-w",
+                    "/workspace",
+                    *(
+                        [
+                            "--network",
+                            network_name,
+                            "--network-alias",
+                            "app",
+                        ]
+                        if dependency_services
+                        else []
+                    ),
+                    *self.runtime_harness._docker_env_args(
+                        self.runtime_harness._app_runtime_environment(runtime_workspace)
+                    ),
+                    image_name,
+                    *self.runtime_harness._runtime_shell_command(
+                        self.runtime_harness._runtime_launch_script(
+                            workspace_path=runtime_workspace,
+                            spec=spec,
+                            include_setup=True,
+                        )
+                    ),
+                ]
+                run_command = local_run_command
+                log_coursegen_event(
+                    "sandbox_shared_runtime_launching",
+                    workflow_run_id=workflow_run_id,
+                    image_name=image_name,
+                    host_port=host_port,
+                    container_name=container_name,
+                )
+                run_result = subprocess.run(
+                    local_run_command,
+                    cwd=shared_starter_root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.run_timeout_s,
+                )
+                if run_result.returncode != 0:
+                    all_runs_succeeded = False
+                    logs = self.runtime_harness._container_logs(container_name) or ""
+                    failed_stage = self._deliverable_runtime_stage(
+                        logs=logs,
+                        error_text="\n".join(
+                            part for part in (run_result.stderr, run_result.stdout) if part
+                        ),
+                        default=SandboxFailureStage.container_launch,
+                    )
+                    run_stdout_parts.append(f"[shared] {run_result.stdout}".strip())
+                    run_stderr_parts.append(
+                        f"[shared] {run_result.stderr}\n{logs}".strip()
+                    )
+                    for deliverable in spec.deliverables:
+                        deliverable_reports.append(
+                            DeliverableSandboxReport(
+                                deliverable_id=deliverable.id,
+                                compile_succeeded=self._compile_succeeded_for_stage(
+                                    failed_stage
+                                ),
+                                runtime_succeeded=False,
+                                failed_stage=failed_stage,
+                                stage_command=self._stage_command_for_report(
+                                    workspace_path=runtime_workspace,
+                                    spec=spec,
+                                    failed_stage=failed_stage,
+                                    fallback=local_run_command,
+                                ),
+                                stage_exit_code=run_result.returncode,
+                                stdout=run_result.stdout,
+                                stderr="\n".join(
+                                    part for part in [run_result.stderr, logs] if part
+                                ),
+                                error=self._summarize_stage_failure(
+                                    deliverable_id=deliverable.id,
+                                    failed_stage=failed_stage,
+                                    error_text=run_result.stderr,
+                                    logs=logs,
+                                    default="Could not start the starter runtime container.",
+                                ),
+                            )
+                        )
+                    return self._finalize_starter_result(
+                        workspace_root=workspace_root,
+                        now=now,
+                        started=started,
+                        deliverable_reports=deliverable_reports,
+                        build_command=build_command,
+                        run_command=run_command,
+                        build_stdout_parts=build_stdout_parts,
+                        build_stderr_parts=build_stderr_parts,
+                        run_stdout_parts=run_stdout_parts,
+                        run_stderr_parts=run_stderr_parts,
+                        all_builds_succeeded=all_builds_succeeded,
+                        all_runs_succeeded=all_runs_succeeded,
+                        any_cached=any_cached,
+                        workflow_run_id=workflow_run_id,
+                    )
+
+                healthcheck_path = self.runtime_harness._healthcheck_path(
+                    runtime_workspace, spec
+                )
+                log_coursegen_event(
+                    "sandbox_shared_healthcheck_wait_started",
+                    workflow_run_id=workflow_run_id,
+                    healthcheck_url=f"{base_url}{healthcheck_path}",
+                )
+                try:
+                    self.runtime_harness._wait_for_http(
+                        f"{base_url}{healthcheck_path}",
+                        container_name=container_name,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    all_runs_succeeded = False
+                    boot_failure_reported = True
+                    logs = self.runtime_harness._container_logs(container_name) or ""
+                    failed_stage = self._deliverable_runtime_stage(
+                        logs=logs,
+                        error_text=str(exc),
+                        default=SandboxFailureStage.boot,
+                    )
+                    run_stderr_parts.append(f"[shared] {exc}\n{logs}".strip())
+                    # On boot failure, fail-fast: emit a single report for the
+                    # first deliverable so the operator sees the failure
+                    # without N copies of the same boot error.
+                    primary = spec.deliverables[0]
+                    deliverable_reports.append(
+                        DeliverableSandboxReport(
+                            deliverable_id=primary.id,
+                            compile_succeeded=self._compile_succeeded_for_stage(failed_stage),
+                            runtime_succeeded=False,
+                            failed_stage=failed_stage,
+                            stage_command=self._stage_command_for_report(
+                                workspace_path=runtime_workspace,
+                                spec=spec,
+                                failed_stage=failed_stage,
+                                fallback=run_command,
+                            ),
+                            stdout="",
+                            stderr=logs,
+                            error=self._summarize_stage_failure(
+                                deliverable_id=primary.id,
+                                failed_stage=failed_stage,
+                                error_text=str(exc),
+                                logs=logs,
+                                default=str(exc),
+                            ),
+                        )
+                    )
+                    return self._finalize_starter_result(
+                        workspace_root=workspace_root,
+                        now=now,
+                        started=started,
+                        deliverable_reports=deliverable_reports,
+                        build_command=build_command,
+                        run_command=run_command,
+                        build_stdout_parts=build_stdout_parts,
+                        build_stderr_parts=build_stderr_parts,
+                        run_stdout_parts=run_stdout_parts,
+                        run_stderr_parts=run_stderr_parts,
+                        all_builds_succeeded=all_builds_succeeded,
+                        all_runs_succeeded=all_runs_succeeded,
+                        any_cached=any_cached,
+                        workflow_run_id=workflow_run_id,
+                    )
+                log_coursegen_event(
+                    "sandbox_shared_healthcheck_wait_completed",
+                    workflow_run_id=workflow_run_id,
+                    healthcheck_url=f"{base_url}{healthcheck_path}",
+                )
+
+                # The runtime is up. Walk each deliverable against the single
+                # running app.
+                for deliverable in spec.deliverables:
+                    log_coursegen_event(
+                        "sandbox_deliverable_started",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        deliverable_title=deliverable.title,
+                        starter_root=str(shared_starter_root),
+                    )
+                    manifest = self._load_per_deliverable_manifest(
+                        private_root=private_root,
+                        deliverable_id=deliverable.id,
+                    )
+                    visible_script = (
+                        deliverable_visible_checks_dir(workspace_root, deliverable.id)
+                        / VISIBLE_CHECK_SCRIPT_RELATIVE_PATH
+                    )
+
+                    log_coursegen_event(
+                        "sandbox_deliverable_public_checks_started",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        base_url=base_url,
+                    )
+                    contract_passed, contract_output, contract_error = (
+                        self._probe_contract_smoke(manifest, base_url)
+                    )
+
+                    visible_script_missing = not visible_script.exists()
+                    if visible_script_missing:
+                        checks_passed = False
+                        check_output = ""
+                        check_error = (
+                            f"Visible check script not found: "
+                            f"public/checks/{deliverable.id}/run_visible_checks.py"
+                        )
+                        visible_command_for_report = (
+                            f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
+                        )
+                    else:
+                        visible_command_for_report = (
+                            f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
+                        )
+                        suite_report = self.test_script_runner.run_suite(
+                            workspace_root=shared_starter_root,
+                            command=visible_command_for_report,
+                            base_url=base_url,
+                            suite_type="visible",
+                        )
+                        lines = [f"Visible suite: {suite_report.summary}"]
+                        for case in suite_report.tests:
+                            marker = "PASS" if case.status == "passed" else "FAIL"
+                            lines.append(f"[{marker}] {case.title}: {case.summary}")
+                            for diagnostic in case.diagnostics[:3]:
+                                lines.append(f"  - {diagnostic}")
+                        check_output = "\n".join(lines)
+                        if not suite_report.valid:
+                            checks_passed = False
+                            check_error = "Visible test script did not emit a valid report."
+                        else:
+                            checks_passed = suite_report.passed
+                            check_error = (
+                                None
+                                if checks_passed
+                                else f"Visible suite failed for {deliverable.id}."
+                            )
+
+                    combined_output = "\n\n".join(
+                        part
+                        for part in (contract_output, check_output)
+                        if part and part.strip()
+                    )
+                    run_stdout_parts.append(
+                        f"[{deliverable.id}] {combined_output}".strip()
+                    )
+                    if not contract_passed:
+                        all_runs_succeeded = False
+                    if not checks_passed:
+                        all_runs_succeeded = False
+                    failed_stage: SandboxFailureStage | None = None
+                    if not contract_passed:
+                        failed_stage = SandboxFailureStage.contract
+                    elif not checks_passed:
+                        failed_stage = SandboxFailureStage.checks
+                    log_coursegen_event(
+                        "sandbox_deliverable_public_checks_completed",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        contract_passed=contract_passed,
+                        checks_passed=checks_passed,
+                        error=check_error,
+                    )
+                    deliverable_reports.append(
+                        DeliverableSandboxReport(
+                            deliverable_id=deliverable.id,
+                            compile_succeeded=True,
+                            runtime_succeeded=contract_passed,
+                            failed_stage=failed_stage,
+                            stage_command=(
+                                [visible_command_for_report]
+                                if failed_stage == SandboxFailureStage.checks
+                                else []
+                            ),
+                            public_checks_passed=checks_passed,
+                            health_status_code=200,
+                            stdout=combined_output,
+                            stderr="",
+                            error=contract_error or check_error,
+                        )
+                    )
+                    log_coursegen_event(
+                        "sandbox_deliverable_completed",
+                        workflow_run_id=workflow_run_id,
+                        deliverable_id=deliverable.id,
+                        sandbox_status="passed" if contract_passed and checks_passed else "failed",
+                        error=check_error,
+                    )
+                    # Fail-fast triggers on a contract probe failure or a real
+                    # visible-suite failure, but NOT on a missing per-deliverable
+                    # visible script (which is an authoring gap on a single
+                    # deliverable, not a runtime regression of the shared app).
+                    if fail_fast and not contract_passed:
+                        log_coursegen_event(
+                            "sandbox_fail_fast_stopped_after_deliverable",
+                            workflow_run_id=workflow_run_id,
+                            deliverable_id=deliverable.id,
+                            shared_codebase=True,
+                        )
+                        break
+                    if fail_fast and not checks_passed and not visible_script_missing:
+                        log_coursegen_event(
+                            "sandbox_fail_fast_stopped_after_deliverable",
+                            workflow_run_id=workflow_run_id,
+                            deliverable_id=deliverable.id,
+                            shared_codebase=True,
+                        )
+                        break
+
+                # Collect container logs for forensic context.
+                logs = self.runtime_harness._container_logs(container_name) or ""
+                if logs:
+                    run_stderr_parts.append(f"[shared] {logs}".strip())
+        except Exception as exc:  # noqa: BLE001
+            if not runtime_image_ready:
+                all_builds_succeeded = False
+            all_runs_succeeded = False
+            logs = self.runtime_harness._container_logs(container_name) or ""
+            failed_stage = self._deliverable_runtime_stage(
+                logs=logs,
+                error_text=str(exc),
+                default=(
+                    SandboxFailureStage.boot if runtime_image_ready else SandboxFailureStage.runtime
+                ),
+            )
+            run_stderr_parts.append(f"[shared] {exc}\n{logs}".strip())
+            if not deliverable_reports and not boot_failure_reported:
+                primary = spec.deliverables[0]
+                deliverable_reports.append(
+                    DeliverableSandboxReport(
+                        deliverable_id=primary.id,
+                        compile_succeeded=self._compile_succeeded_for_stage(failed_stage),
+                        runtime_succeeded=False,
+                        failed_stage=failed_stage,
+                        stage_command=self._stage_command_for_report(
+                            workspace_path=(
+                                current_runtime_workspace
+                                if current_runtime_workspace is not None
+                                and current_runtime_workspace.exists()
+                                else shared_starter_root
+                            ),
+                            spec=spec,
+                            failed_stage=failed_stage,
+                            fallback=run_command,
+                        ),
+                        stdout="",
+                        stderr=logs,
+                        error=self._summarize_stage_failure(
+                            deliverable_id=primary.id,
+                            failed_stage=failed_stage,
+                            error_text=str(exc),
+                            logs=logs,
+                            default=str(exc),
+                        ),
+                    )
+                )
+        finally:
+            self.runtime_harness._remove_runtime_support(
+                shared_starter_root,
+                network_name=network_name,
+                container_prefix=container_name,
+            )
+
+        return self._finalize_starter_result(
+            workspace_root=workspace_root,
+            now=now,
+            started=started,
+            deliverable_reports=deliverable_reports,
+            build_command=build_command,
+            run_command=run_command,
+            build_stdout_parts=build_stdout_parts,
+            build_stderr_parts=build_stderr_parts,
+            run_stdout_parts=run_stdout_parts,
+            run_stderr_parts=run_stderr_parts,
+            all_builds_succeeded=all_builds_succeeded,
+            all_runs_succeeded=all_runs_succeeded,
+            any_cached=any_cached,
+            workflow_run_id=workflow_run_id,
+        )
+
+    def _load_per_deliverable_manifest(
+        self,
+        *,
+        private_root: Path,
+        deliverable_id: str,
+    ) -> dict:
+        """Load <private>/grader/<id>/deliverable.json. Returns {} if absent."""
+        manifest_path = (
+            deliverable_grader_dir(private_root, deliverable_id)
+            / DELIVERABLE_MANIFEST_RELATIVE_PATH
+        )
+        if not manifest_path.exists():
+            return {}
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _finalize_starter_result(
+        self,
+        *,
+        workspace_root: Path,
+        now: datetime,
+        started: float,
+        deliverable_reports: list[DeliverableSandboxReport],
+        build_command: list[str],
+        run_command: list[str],
+        build_stdout_parts: list[str],
+        build_stderr_parts: list[str],
+        run_stdout_parts: list[str],
+        run_stderr_parts: list[str],
+        all_builds_succeeded: bool,
+        all_runs_succeeded: bool,
+        any_cached: bool,
+        workflow_run_id: str,
+    ) -> SandboxExecutionResult:
         success = all_builds_succeeded and all_runs_succeeded and bool(deliverable_reports)
         result = SandboxExecutionResult(
             status=SandboxExecutionStatus.passed if success else SandboxExecutionStatus.failed,

@@ -504,6 +504,86 @@ class DockerSandboxRunnerTests(unittest.TestCase):
                 len(spec.deliverables) - 1,
             )
 
+    def test_non_shared_codebase_runs_legacy_per_deliverable_boot_loop(self) -> None:
+        """Non-shared courses must still go through the per-deliverable boot
+        loop. The dispatcher must not route them to the single-boot variant.
+        """
+        from app.services.learner_studio_service import RuntimeImageBuildError
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+
+            # Flip to non-shared and create per-deliverable starter dirs so the
+            # legacy path finds something to operate on.
+            spec.course_structure.shared_codebase = False
+            shared_starter = Path(workspace.public_dir) / "starter"
+            for deliverable in spec.deliverables:
+                per_dir = shared_starter / deliverable.id
+                per_dir.mkdir(parents=True, exist_ok=True)
+
+            runner = DockerSandboxRunner()
+            runner.runtime_harness = Mock()
+            runner.runtime_harness._allocate_port.return_value = 18001
+            runner.runtime_harness._runtime_manifest.return_value = {}
+            # Make image build raise so we don't have to mock the entire boot.
+            # We only need to confirm the LEGACY path is taken — i.e., the loop
+            # body runs per-deliverable, not the single-boot variant.
+            runner.runtime_harness._ephemeral_runtime_workspace.side_effect = (
+                lambda starter_root: nullcontext(starter_root)
+            )
+            runner.runtime_harness._workspace_runtime_image_name.side_effect = (
+                RuntimeImageBuildError(
+                    "build failed",
+                    command=["docker", "build"],
+                    returncode=1,
+                    stdout="",
+                    stderr="ERROR: build failed",
+                )
+            )
+            runner.runtime_harness._remove_runtime_support.return_value = None
+            runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
+                "[coursegen-runtime-stage] "
+            )
+            runner.dependency_contract_materializer.materialize = Mock(
+                return_value=SimpleNamespace(
+                    attempted=False,
+                    succeeded=True,
+                    stdout="",
+                    stderr="",
+                    image_name=None,
+                    synced_paths=[],
+                    command=[],
+                    return_code=0,
+                    error=None,
+                )
+            )
+
+            result = runner._execute_starter_harness(
+                workspace_root=Path(workspace.public_dir),
+                spec=spec,
+                workflow_run_id=run.id,
+                now=datetime.now(UTC),
+                started=time.perf_counter(),
+            )
+
+            # Legacy path: per-deliverable boot loop calls materialize once per
+            # deliverable (in contrast to the shared-codebase single-boot
+            # variant which only calls it once total).
+            self.assertEqual(
+                runner.dependency_contract_materializer.materialize.call_count,
+                len(spec.deliverables),
+                "Non-shared course must use the legacy per-deliverable loop "
+                "(one materialize call per deliverable).",
+            )
+            # All deliverable reports show image build failure (the same mock).
+            self.assertEqual(len(result.deliverable_reports), len(spec.deliverables))
+
     def test_shared_codebase_runtime_stops_after_first_failed_deliverable(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
