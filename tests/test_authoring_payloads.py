@@ -607,6 +607,39 @@ class AuthoringPayloadTests(unittest.TestCase):
         self.assertEqual(last_attempted["verified_files"][0]["content"], "FROM eclipse-temurin:21\n")
         self.assertTrue(last_attempted["verified_files"][0]["preserve_verbatim"])
 
+    def test_repo_authoring_prompt_explains_harness_provided_sidecars(self) -> None:
+        """Dependency services like postgres and redis are provided by the
+        harness as separate sidecar containers on a shared Docker network,
+        reachable from the app container via the service_id as the hostname
+        (e.g. `postgres:5432`, `redis:6379`). Without this directive the model
+        keeps authoring install/run scripts that try to install or start those
+        services locally (e.g. running `initdb` in run.sh, or `docker run
+        postgres` in install.sh) which always fails because the app container
+        has neither.
+        """
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        # The prompt must explicitly tell the model the harness provides the
+        # dependency services as sidecars.
+        self.assertIn(
+            "sidecar",
+            source.lower(),
+            "Repo authoring system prompt must call out that dependency services are harness-provided sidecars.",
+        )
+        # The directive must name the connectivity contract (service_id as hostname)
+        # so the model knows how the app reaches them.
+        self.assertTrue(
+            "postgres:5432" in source or "service_id" in source,
+            "Repo authoring system prompt must explain that dependency services are reachable by service_id hostname (e.g. postgres:5432).",
+        )
+        # The directive must forbid local installation/startup of dependency services.
+        self.assertTrue(
+            "initdb" in source.lower() or "do not install" in source.lower() or "do not start" in source.lower(),
+            "Repo authoring system prompt must forbid the model from installing or starting dependency services inside the app container.",
+        )
+
     def test_repo_authoring_prompt_warns_about_structured_output_binary_constraint(self) -> None:
         """Structured outputs can only carry text. The system prompt must warn
         the model that binary-wrapper files (e.g. `.mvn/wrapper/maven-wrapper.jar`,
