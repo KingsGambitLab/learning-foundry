@@ -1550,16 +1550,30 @@ class DockerSandboxRunner:
                 for diagnostic in case.diagnostics[:3]:
                     lines.append(f"  - {diagnostic}")
             check_output = "\n".join(lines)
+            # `checks_passed` reflects whether the visible script ran cleanly
+            # (emitted a parseable JSON report). It does NOT reflect whether
+            # individual tests passed.
+            #
+            # The visible suite is run for TWO purposes elsewhere in the
+            # platform with opposite expectations:
+            #   - The baseline matrix verifier (generated_test_harness.verify_course)
+            #     EXPECTS visible tests to FAIL against partial/empty starters —
+            #     handlers raise NotImplementedError by design and the test
+            #     strength should detect that.
+            #   - The sandbox runner just needs to confirm the harness
+            #     machinery (script, JSON emission, HTTP path) is intact.
+            #
+            # Gating on `suite_report.passed` makes a perfectly-authored partial
+            # starter fail authoring_runtime because every test fails — exactly
+            # the state the baseline matrix demands. Decouple: at sandbox time
+            # we only care that the script ran. Pass/fail counts still flow
+            # into the report stdout for the baseline matrix to consume.
             if not suite_report.valid:
                 checks_passed = False
                 check_error = "Visible test script did not emit a valid report."
             else:
-                checks_passed = suite_report.passed
-                check_error = (
-                    None
-                    if checks_passed
-                    else f"Visible suite failed for {deliverable.id}."
-                )
+                checks_passed = True
+                check_error = None
 
         combined_output = "\n\n".join(
             part for part in (contract_output, check_output) if part and part.strip()
@@ -1805,6 +1819,17 @@ class DockerSandboxRunner:
         manifest: dict,
         base_url: str,
     ) -> tuple[bool, str, str | None]:
+        """Run the visible suite as a smoke check.
+
+        The returned bool reflects whether the script EXECUTED CLEANLY
+        (emitted a parseable JSON report). It does NOT gate on individual
+        test pass/fail — that's the baseline matrix verifier's job, which
+        is starter-type-aware and correctly expects visible tests to fail
+        against partial/empty starters.
+
+        See ``_run_one_deliverable_against_shared_runtime`` for the long
+        rationale; both call sites share the same contract.
+        """
         command = str(manifest.get("visible_check_command") or "sh .coursegen/runtime/check_visible.sh")
         report = self.test_script_runner.run_suite(
             workspace_root=starter_root,
@@ -1822,7 +1847,7 @@ class DockerSandboxRunner:
                 lines.append(f"  - {diagnostic}")
         if not report.valid:
             return False, "\n".join(lines), "Visible test script did not emit a valid report."
-        return report.passed, "\n".join(lines), None
+        return True, "\n".join(lines), None
 
     def _deliverable_runtime_stage(
         self,

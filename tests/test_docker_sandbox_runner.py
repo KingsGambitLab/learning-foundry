@@ -1217,6 +1217,145 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             self.assertEqual(runner.runtime_harness._wait_for_http.call_count, 1)
 
 
+class CheckSuiteExecutionSignalTests(unittest.TestCase):
+    """The sandbox runner's `checks` stage should verify the visible script
+    EXECUTED (emitted a valid JSON report), not that every test inside it
+    passed. Test pass/fail is the baseline matrix verifier's job — it's
+    starter-type-aware and correctly demands that visible tests FAIL
+    against partial/empty starters.
+
+    Today the sandbox runner conflates these two concerns: it gates on
+    `suite_report.passed` (all tests must pass), which makes a partial
+    starter — where handlers raise NotImplementedError by design — fail
+    authoring_runtime even though the harness machinery worked perfectly.
+
+    These tests pin the new contract: `checks_passed` reflects script
+    validity, not aggregate test pass/fail. The pass/fail counts still
+    appear in the deliverable report's stdout for downstream consumers.
+    """
+
+    def test_run_visible_suite_treats_valid_report_with_failed_tests_as_success(self) -> None:
+        """When the script ran cleanly and emitted a parseable JSON report,
+        ``_run_visible_suite`` must return ``checks_passed=True`` regardless
+        of whether individual test cases passed. A partial starter that
+        responds with 500 to every endpoint is the expected
+        pre-implementation state; the script's job is to record that, not
+        to gate the build on it.
+        """
+        from app.services.generated_test_harness import (
+            GeneratedTestCaseReport,
+            GeneratedTestSuiteReport,
+        )
+        runner = DockerSandboxRunner()
+        valid_but_failing = GeneratedTestSuiteReport(
+            suite_type="visible",
+            command="sh .coursegen/runtime/check_visible.sh",
+            exit_code=1,
+            valid=True,
+            passed=False,
+            tests=[
+                GeneratedTestCaseReport(
+                    id="t1", title="POST /tasks returns 200",
+                    status="failed", summary="got 500 Internal Server Error",
+                    diagnostics=["NotImplementedError"],
+                )
+            ],
+            summary="1 visible test failed.",
+            stderr="",
+        )
+        with patch.object(runner.test_script_runner, "run_suite", return_value=valid_but_failing):
+            with TemporaryDirectory() as tmp:
+                starter = Path(tmp)
+                checks_passed, _output, check_error = runner._run_visible_suite(
+                    starter_root=starter, manifest={}, base_url="http://x",
+                )
+        self.assertTrue(
+            checks_passed,
+            "Script ran and emitted a valid report → checks stage must pass. "
+            "Test pass/fail is signal, not gate.",
+        )
+        self.assertIsNone(check_error)
+
+    def test_run_visible_suite_still_fails_when_script_crashed(self) -> None:
+        """If the visible script crashed before emitting a JSON report,
+        ``checks_passed`` must be False — that's the actual platform
+        failure (FileNotFoundError, syntax error, etc.).
+        """
+        from app.services.generated_test_harness import GeneratedTestSuiteReport
+        runner = DockerSandboxRunner()
+        invalid_report = GeneratedTestSuiteReport(
+            suite_type="visible", command="x", exit_code=2, valid=False,
+            passed=False, tests=[], summary="non-JSON output",
+            stderr="Traceback ...",
+        )
+        with patch.object(runner.test_script_runner, "run_suite", return_value=invalid_report):
+            with TemporaryDirectory() as tmp:
+                checks_passed, _output, check_error = runner._run_visible_suite(
+                    starter_root=Path(tmp), manifest={}, base_url="http://x",
+                )
+        self.assertFalse(checks_passed)
+        self.assertIn("valid report", (check_error or "").lower())
+
+    def test_shared_runner_treats_failing_visible_tests_as_check_success(self) -> None:
+        """Same invariant in the shared-codebase code path: a valid report
+        with failed individual tests must mark the deliverable's `checks`
+        stage as passed.
+        """
+        from app.services.generated_test_harness import (
+            GeneratedTestCaseReport,
+            GeneratedTestSuiteReport,
+        )
+        runner = DockerSandboxRunner()
+        valid_but_failing = GeneratedTestSuiteReport(
+            suite_type="visible", command="python3 ../checks/d1/run_visible_checks.py",
+            exit_code=1, valid=True, passed=False,
+            tests=[
+                GeneratedTestCaseReport(
+                    id="t", title="GET /tasks", status="failed",
+                    summary="endpoint not implemented", diagnostics=["NotImplementedError"],
+                )
+            ],
+            summary="visible suite failed", stderr="",
+        )
+        with TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "public"
+            private_root = Path(tmp) / "private"
+            starter_root = workspace_root / "starter"
+            starter_root.mkdir(parents=True)
+            (workspace_root / "checks" / "deliverable_1").mkdir(parents=True)
+            (private_root / "grader" / "deliverable_1").mkdir(parents=True)
+            (workspace_root / "checks" / "deliverable_1" / "run_visible_checks.py").write_text("# stub")
+            (private_root / "grader" / "deliverable_1" / "deliverable.json").write_text("{}")
+            deliverable = SimpleNamespace(id="deliverable_1", title="d")
+            with (
+                patch.object(runner, "_load_per_deliverable_manifest", return_value={}),
+                patch.object(runner, "_probe_contract_smoke",
+                             return_value=(True, "ok", None, None)),
+                patch.object(runner.test_script_runner, "run_suite",
+                             return_value=valid_but_failing),
+                patch.object(runner, "_collect_failure_diagnostics",
+                             return_value=(None, None, None)),
+            ):
+                report, _output, runtime_ok, _stop = runner._run_one_deliverable_against_shared_runtime(
+                    deliverable=deliverable,
+                    workspace_root=workspace_root,
+                    private_root=private_root,
+                    shared_starter_root=starter_root,
+                    base_url="http://x",
+                    workflow_run_id="run_t",
+                    fail_fast=False,
+                    app_container_name="c",
+                    dependency_services=[],
+                    starter_type="partial",
+                )
+        self.assertTrue(report.public_checks_passed,
+                        "Shared runner must treat valid-but-failing visible suite as checks-passed.")
+        self.assertIsNone(report.failed_stage,
+                          "No stage failed — script ran, contract probed cleanly, "
+                          "test pass/fail is signal not gate.")
+        self.assertTrue(runtime_ok)
+
+
 class ContractProbeRespectsPartialStarterTests(unittest.TestCase):
     """Pass 11 Job A.
 
