@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import subprocess
 import time
 import urllib.error
@@ -1645,9 +1644,9 @@ class DockerSandboxRunner:
         deliverable failed at which stage, plus a ~3-line tail teaser. The
         full stderr is the canonical diagnostic.
 
-        Replaces the previous per-stage heuristics (``_first_useful_line`` /
-        ``_last_useful_line``) which had to be patched for every new
-        ecosystem footer (buildkit, maven, Go toolchain, etc.).
+        Replaces previous per-stage line-picking heuristics that had to be
+        patched for every new ecosystem footer (buildkit, maven, Go
+        toolchain, etc.).
         """
         stage_label = (
             failed_stage.value.replace("_", " ")
@@ -1686,76 +1685,6 @@ class DockerSandboxRunner:
             logs=primary.stderr,
             default="Starter deliverable verification failed on the authored runtime harness.",
         )
-
-    def _first_useful_line(self, *texts: str | None) -> str | None:
-        ignored_prefixes = (self.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX,)
-        ignored_substrings = (
-            "timed out waiting for 'http://",
-            "stopped before 'http://",
-            "last error:",
-            "container logs:",
-        )
-        for text in texts:
-            cleaned = (text or "").strip()
-            if not cleaned:
-                continue
-            for line in cleaned.splitlines():
-                candidate = line.strip()
-                if not candidate:
-                    continue
-                if any(candidate.startswith(prefix) for prefix in ignored_prefixes):
-                    continue
-                if any(fragment in candidate.lower() for fragment in ignored_substrings):
-                    continue
-                return candidate
-        return None
-
-    def _last_useful_line(self, *texts: str | None) -> str | None:
-        ignored_prefixes = (self.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX,)
-        ignored_substrings = (
-            "timed out waiting for 'http://",
-            "stopped before 'http://",
-            "last error:",
-            "container logs:",
-        )
-        # Docker buildkit always ends with generic wrapper lines that hide the
-        # actual diagnostic. The real cause is the command output (e.g. a line
-        # starting with a timestamp like "1.060 ...") several lines up.
-        buildkit_noise_fragments = (
-            "failed to solve",
-            "failed to build",
-            "did not complete successfully",
-            "exit code:",
-        )
-        for text in texts:
-            cleaned = (text or "").strip()
-            if not cleaned:
-                continue
-            for line in reversed(cleaned.splitlines()):
-                candidate = line.strip()
-                if not candidate:
-                    continue
-                if any(candidate.startswith(prefix) for prefix in ignored_prefixes):
-                    continue
-                if any(fragment in candidate.lower() for fragment in ignored_substrings):
-                    continue
-                if any(fragment in candidate.lower() for fragment in buildkit_noise_fragments):
-                    continue
-                if candidate.startswith("---") or candidate.startswith(">>>") or candidate.startswith("^^^"):
-                    continue
-                # Skip Dockerfile context lines like "  12 | >>> RUN ..." or "  10 |     ".
-                if re.match(r"^\s*\d+\s*\|", candidate):
-                    continue
-                # Skip buildkit step headers like "#10 [6/8] RUN ..." or
-                # " > [6/8] RUN ...": these are command-stage labels, not the
-                # diagnostic itself.
-                if re.match(r"^(#\d+\s+\[|\s*>\s*\[)", candidate):
-                    continue
-                # Skip the buildkit Dockerfile-context header like "Dockerfile:12".
-                if re.match(r"^Dockerfile:\d+$", candidate):
-                    continue
-                return candidate
-        return None
 
     def _tail_lines(self, text: str | None, *, max_lines: int) -> str:
         if not text:
