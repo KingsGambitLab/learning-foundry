@@ -67,7 +67,7 @@ def test_infer_assignment_design_prefers_explicit_stack_contract_over_tech_stack
         title="Feature Flag Control Plane",
         problem_statement="Build a feature flag control plane backend with safe rollout controls and audit logs.",
         package_type_hint=PackageType.progressive_codebase_course,
-        starter_type=StarterType.partial_implementation,
+        starter_type=StarterType.partial,
         implementation_language="typescript",
         language_version="24",
         application_framework="nestjs",
@@ -105,7 +105,7 @@ def test_infer_assignment_design_does_not_treat_scenarios_as_ios_ui_work() -> No
             "focusing on correctness for reservation writes under concurrency, retries, and failure scenarios."
         ),
         package_type_hint=PackageType.progressive_codebase_course,
-        starter_type=StarterType.partial_implementation,
+        starter_type=StarterType.partial,
         implementation_language="rust",
         language_version="1.82",
         application_framework="axum",
@@ -158,7 +158,7 @@ def test_course_generation_service_rebuilds_runtime_plan_from_creator_contract()
         assert inferred.design_spec is not None
 
         creator_choices = CreatorCourseSetupChoices(
-            starter_type=StarterType.working_buggy,
+            starter_type=StarterType.partial,
             implementation_language="go",
             language_version="1.25",
             application_framework="gin",
@@ -178,7 +178,7 @@ def test_course_generation_service_rebuilds_runtime_plan_from_creator_contract()
         runtime_plan = updated.project_contract.runtime_plan
         app_service = next(service for service in runtime_plan.services if service.service_id == "app")
 
-        assert runtime_dependencies.starter_type == StarterType.working_buggy
+        assert runtime_dependencies.starter_type == StarterType.partial
         assert runtime_dependencies.implementation_language == "go"
         assert runtime_dependencies.language_version == "1.25"
         assert runtime_dependencies.application_framework == "gin"
@@ -211,7 +211,7 @@ def test_create_course_run_from_creator_plan_keeps_creator_contract_fixed() -> N
         assert inferred.design_spec is not None
 
         creator_choices = CreatorCourseSetupChoices(
-            starter_type=StarterType.partial_implementation,
+            starter_type=StarterType.partial,
             implementation_language="go",
             language_version="1.25",
             application_framework="gin",

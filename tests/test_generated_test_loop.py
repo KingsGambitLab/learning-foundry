@@ -113,7 +113,7 @@ class GeneratedTestLoopTests(unittest.TestCase):
             result = verifier.verify_deliverable(
                 workspace_root=deliverable_root,
                 spec=spec,
-                starter_type=deliverable.starter_type,
+                starter_type=spec.runtime_dependencies.starter_type,
             )
 
         self.assertFalse(result.valid)

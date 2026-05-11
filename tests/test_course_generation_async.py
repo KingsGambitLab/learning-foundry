@@ -50,7 +50,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
                     "Keep reservations correct under concurrency, retries, and stock transfers."
                 ),
                 creator_choices={
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "implementation_language": "python",
                     "application_framework": "fastapi",
                     "primary_database": "postgres",
@@ -102,7 +102,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
         plan_response = self.course_generation_service.generate_creator_plan(
             GenerateCreatorCoursePlanRequest(
                 goal="Build an inventory reservation service.",
-                creator_choices={"starter_type": "partial_implementation"},
+                creator_choices={"starter_type": "partial"},
             )
         )
         queued = self.course_generation_service.queue_course_run_from_creator_plan(
@@ -131,7 +131,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
                     "Keep reservations correct under concurrency, retries, and stock transfers."
                 ),
                 creator_choices={
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "implementation_language": "python",
                     "application_framework": "fastapi",
                     "primary_database": "postgres",

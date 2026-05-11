@@ -1451,7 +1451,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "primary_database": "postgres",
                     "cache_backend": "redis",
                 },
@@ -1525,7 +1525,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "bare_stub",
+                    "starter_type": "empty",
                     "implementation_language": "go",
                     "language_version": "1.25",
                     "application_framework": "gin",
@@ -1546,7 +1546,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 200)
         body = created.json()
-        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "bare_stub")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "empty")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["implementation_language"], "go")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["language_version"], "1.25")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["application_framework"], "gin")
@@ -1596,7 +1596,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["plan"]["creator_choices"]["starter_type"], "partial_implementation")
+        self.assertEqual(body["plan"]["creator_choices"]["starter_type"], "partial")
         self.assertEqual(len(body["plan"]["creator_choices"]["data_sources"]), 1)
         source = body["plan"]["creator_choices"]["data_sources"][0]
         self.assertEqual(source["purpose"], "retrieval")
@@ -1649,7 +1649,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             json={
                 "goal": "Build a production-ready internal docs RAG system that answers from uploaded airline policies with citations.",
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "data_sources": [asset["data_source"]],
                 },
             },
@@ -1705,7 +1705,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "primary_database": "postgres",
                     "cache_backend": "redis",
                 },
@@ -1764,7 +1764,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             json={
                 "goal": "Build a grounded internal docs assistant that answers from a visible corpus with citations and abstains when support is weak.",
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                 },
             },
         )
@@ -1810,7 +1810,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Return citations for every supported answer.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                 },
             },
         )
