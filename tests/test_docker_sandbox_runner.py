@@ -1217,5 +1217,176 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             self.assertEqual(runner.runtime_harness._wait_for_http.call_count, 1)
 
 
+class ContractProbeRespectsPartialStarterTests(unittest.TestCase):
+    """Pass 11 Job A.
+
+    A `partial` starter ships handlers that raise NotImplementedError-equivalents
+    (per Pass 4's authoring prompt). The contract probe must treat a reachable
+    handler that returns a non-2xx response as `endpoint reachable` (passing
+    contract smoke), since the handler body will be exercised after the learner
+    implements it. Only 404 (route missing) should still fail.
+    """
+
+    def _manifest_with_check(self, *, path: str = "/task-queues") -> dict:
+        return {
+            "public_checks": [
+                {
+                    "title": "create task queue",
+                    "request_method": "POST",
+                    "request_path": path,
+                    "request_body": {"x": 1},
+                    "expected_status": 200,
+                }
+            ]
+        }
+
+    def _http_error(self, *, code: int, body: bytes, path: str) -> "urllib.error.HTTPError":
+        import urllib.error
+        return urllib.error.HTTPError(
+            url=f"http://127.0.0.1:18001{path}",
+            code=code,
+            msg="Test",
+            hdrs=None,
+            fp=SimpleNamespace(read=lambda: body),
+        )
+
+    def test_partial_starter_treats_500_as_reachable(self) -> None:
+        runner = DockerSandboxRunner()
+        manifest = self._manifest_with_check()
+        err = self._http_error(code=500, body=b"Internal Server Error", path="/task-queues")
+        with patch.object(runner, "_json_request", side_effect=err):
+            passed, _, _, response = runner._probe_contract_smoke(
+                manifest, "http://127.0.0.1:18001", starter_type="partial"
+            )
+        self.assertTrue(passed, "partial starter 500 should pass contract smoke (endpoint reachable)")
+        self.assertIsNone(response, "no failure ⇒ no first_failure to report")
+
+    def test_partial_starter_treats_501_as_reachable(self) -> None:
+        runner = DockerSandboxRunner()
+        manifest = self._manifest_with_check()
+        err = self._http_error(code=501, body=b'{"detail":"not implemented"}', path="/task-queues")
+        with patch.object(runner, "_json_request", side_effect=err):
+            passed, _, _, _ = runner._probe_contract_smoke(
+                manifest, "http://127.0.0.1:18001", starter_type="partial"
+            )
+        self.assertTrue(passed)
+
+    def test_partial_starter_still_fails_on_404(self) -> None:
+        """Route missing is a structural authoring bug, not 'not implemented'."""
+        runner = DockerSandboxRunner()
+        manifest = self._manifest_with_check()
+        err = self._http_error(code=404, body=b"Not Found", path="/task-queues")
+        with patch.object(runner, "_json_request", side_effect=err):
+            passed, _, _, response = runner._probe_contract_smoke(
+                manifest, "http://127.0.0.1:18001", starter_type="partial"
+            )
+        self.assertFalse(passed)
+        self.assertIsNotNone(response)
+        self.assertEqual(response["response_status"], 404)
+
+    def test_non_partial_starter_keeps_strict_behavior(self) -> None:
+        """When starter_type is None / unset (legacy behavior), 500 still fails."""
+        runner = DockerSandboxRunner()
+        manifest = self._manifest_with_check()
+        err = self._http_error(code=500, body=b'{"x":1}', path="/task-queues")
+        with patch.object(runner, "_json_request", side_effect=err):
+            passed, _, _, _ = runner._probe_contract_smoke(
+                manifest, "http://127.0.0.1:18001"
+            )
+        self.assertFalse(passed)
+
+
+class SharedRunnerThreadsContractFailureDiagnosticsTests(unittest.TestCase):
+    """Pass 11 Job B.
+
+    For shared-codebase courses, `_run_one_deliverable_against_shared_runtime`
+    builds `DeliverableSandboxReport` directly without calling
+    `_collect_failure_diagnostics`, so contract/checks failures end up with
+    `stdout_tail=None`, `exit_state=None`, `sidecar_diagnostics={}`. The Python
+    Pass-10 validation surfaced this: a partial-starter 500 produced no app
+    traceback for the model to read. Fix: thread the diagnostic helpers into
+    the shared runner the same way Pass 8 wired them for the legacy per-
+    deliverable path.
+    """
+
+    def test_shared_runner_populates_stdout_and_sidecar_diagnostics_on_contract_failure(self) -> None:
+        runner = DockerSandboxRunner()
+
+        # Force contract probe to fail with a captured HTTP response.
+        http_response = {
+            "request_method": "POST",
+            "request_path": "/links",
+            "request_body": {"x": 1},
+            "response_status": 500,
+            "response_headers": None,
+            "response_body_text": "Internal Server Error",
+        }
+
+        # _load_per_deliverable_manifest just returns a manifest with no checks
+        # — _probe_contract_smoke is stubbed below anyway.
+        manifest = {"public_checks": [{"request_method": "POST", "request_path": "/links"}]}
+
+        sidecar_diag = {
+            "postgres": {
+                "stderr_tail": "FATAL: database does not exist",
+                "stdout_tail": None,
+                "exit_state": {"exit_code": 1, "status": "exited"},
+            }
+        }
+
+        with TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "public"
+            private_root = Path(tmp) / "private"
+            starter_root = workspace_root / "starter"
+            starter_root.mkdir(parents=True)
+            (workspace_root / "checks" / "deliverable_1").mkdir(parents=True)
+            (private_root / "grader" / "deliverable_1").mkdir(parents=True)
+            (workspace_root / "checks" / "deliverable_1" / "run_visible_checks.py").write_text("# stub")
+            (private_root / "grader" / "deliverable_1" / "deliverable.json").write_text("{}")
+
+            deliverable = SimpleNamespace(id="deliverable_1", title="Make it work")
+
+            with (
+                patch.object(runner, "_load_per_deliverable_manifest", return_value=manifest),
+                patch.object(
+                    runner,
+                    "_probe_contract_smoke",
+                    return_value=(False, "[FAIL] create", "smoke failed", http_response),
+                ),
+                patch.object(
+                    runner,
+                    "_collect_failure_diagnostics",
+                    return_value=(
+                        "uvicorn boot logs here\nINFO: 127.0.0.1 - POST /links",
+                        {"exit_code": 0, "status": "running"},
+                        sidecar_diag,
+                    ),
+                ) as collect,
+            ):
+                report, _output, runtime_ok, _stop = runner._run_one_deliverable_against_shared_runtime(
+                    deliverable=deliverable,
+                    workspace_root=workspace_root,
+                    private_root=private_root,
+                    shared_starter_root=starter_root,
+                    base_url="http://127.0.0.1:18001",
+                    workflow_run_id="run_test",
+                    fail_fast=False,
+                    app_container_name="course-gen-sandbox-shared-test",
+                    dependency_services=[{"service_id": "postgres", "container_image": "postgres"}],
+                )
+
+        self.assertFalse(runtime_ok)
+        self.assertEqual(report.failed_stage, SandboxFailureStage.contract)
+        self.assertEqual(
+            report.stdout_tail,
+            "uvicorn boot logs here\nINFO: 127.0.0.1 - POST /links",
+            "shared runner must call _collect_failure_diagnostics and "
+            "thread app stdout_tail into the report",
+        )
+        self.assertEqual(report.exit_state, {"exit_code": 0, "status": "running"})
+        self.assertIn("postgres", report.sidecar_diagnostics or {})
+        collect.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

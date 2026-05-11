@@ -617,7 +617,11 @@ class DockerSandboxRunner:
                     deliverable_id=deliverable.id,
                     base_url=base_url,
                 )
-                contract_passed, contract_output, contract_error, contract_http_response = self._probe_contract_smoke(manifest, base_url)
+                contract_passed, contract_output, contract_error, contract_http_response = self._probe_contract_smoke(
+                    manifest,
+                    base_url,
+                    starter_type=spec.runtime_dependencies.starter_type.value,
+                )
                 checks_passed, check_output, check_error = self._run_visible_suite(
                     starter_root=starter_root,
                     manifest=manifest,
@@ -1310,6 +1314,9 @@ class DockerSandboxRunner:
                             base_url=base_url,
                             workflow_run_id=workflow_run_id,
                             fail_fast=fail_fast,
+                            app_container_name=container_name,
+                            dependency_services=dependency_services,
+                            starter_type=spec.runtime_dependencies.starter_type.value,
                         )
                     )
                     deliverable_reports.append(report)
@@ -1486,6 +1493,9 @@ class DockerSandboxRunner:
         base_url: str,
         workflow_run_id: str,
         fail_fast: bool,
+        app_container_name: str | None = None,
+        dependency_services: list[dict] | None = None,
+        starter_type: str | None = None,
     ) -> tuple[DeliverableSandboxReport, str, bool, bool]:
         """Run one deliverable's contract probe + visible suite against the
         shared running app. Returns (report, combined_stdout, runtime_succeeded,
@@ -1514,7 +1524,7 @@ class DockerSandboxRunner:
             base_url=base_url,
         )
         contract_passed, contract_output, contract_error, contract_http_response = self._probe_contract_smoke(
-            manifest, base_url
+            manifest, base_url, starter_type=starter_type,
         )
 
         visible_command = f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
@@ -1567,6 +1577,26 @@ class DockerSandboxRunner:
             checks_passed=checks_passed,
             error=check_error,
         )
+        # Pass 11 Job B: on contract/checks failure the app container is
+        # still running (the live container responded — just with a 500 or
+        # a failing test). Capture its diagnostics the same way the legacy
+        # per-deliverable path does, so the model sees the FastAPI/Spring/
+        # uvicorn traceback in stdout_tail and the sidecar errors in
+        # sidecar_diagnostics. Without this the model only sees the HTTP
+        # response body and has to guess at the cause.
+        app_stdout_tail = None
+        app_exit_state = None
+        sidecar_diagnostics: dict[str, dict] | None = None
+        if not contract_passed or not checks_passed:
+            (
+                app_stdout_tail,
+                app_exit_state,
+                sidecar_diagnostics,
+            ) = self._collect_failure_diagnostics(
+                app_container_name=app_container_name,
+                dependency_services=dependency_services,
+                sidecar_container_prefix=app_container_name,
+            )
         report = DeliverableSandboxReport(
             deliverable_id=deliverable.id,
             compile_succeeded=True,
@@ -1590,6 +1620,9 @@ class DockerSandboxRunner:
                 contract_http_response=contract_http_response,
             ),
             http_response=contract_http_response,
+            stdout_tail=app_stdout_tail,
+            exit_state=app_exit_state,
+            sidecar_diagnostics=sidecar_diagnostics,
         )
         log_coursegen_event(
             "sandbox_deliverable_completed",
@@ -1621,17 +1654,35 @@ class DockerSandboxRunner:
         return f"{self.cache_namespace}:{cache_key[:24]}"
 
     def _probe_contract_smoke(
-        self, manifest: dict, base_url: str
+        self,
+        manifest: dict,
+        base_url: str,
+        *,
+        starter_type: str | None = None,
     ) -> tuple[bool, str, str | None, dict | None]:
         """Run each manifest-declared public check against the booted app.
 
         Returns ``(passed, summary_text, error_message, http_response)``.
-        The last element (Pass 8) captures the FIRST failed HTTP exchange
-        verbatim so the LLM sees the response body — not just the
+
+        Pass 11 Job A: when ``starter_type == "partial"`` the published
+        contract handlers are intentionally stubbed (Pass 4 directive:
+        ``raise NotImplementedError`` / language-equivalent). A reachable
+        but unimplemented handler returns a non-2xx response — that's the
+        author's intent for the pre-implementation state. We treat any
+        non-404 HTTP response as ``endpoint reachable``: contract smoke
+        passes for partial starters when the route exists, regardless of
+        what the stub returns. Only 404 (route missing) still fails,
+        because a missing route is a structural authoring bug, not the
+        documented stub behavior. For non-partial starters (e.g. a future
+        ``working`` mode), strict 2xx-or-fail semantics remain in effect.
+
+        The fourth return element (Pass 8) captures the FIRST failed HTTP
+        exchange verbatim so the LLM sees the response body — not just the
         ``HTTP 500`` status. Body / headers / status / request_method /
         request_path / request_body are all preserved so repair has the
         full canonical diagnostic for contract failures.
         """
+        partial_starter = (starter_type or "").strip().lower() == "partial"
         public_checks = manifest.get("public_checks") or []
         if not public_checks:
             return (
@@ -1657,6 +1708,16 @@ class DockerSandboxRunner:
             try:
                 self._json_request(method, f"{base_url}{request_path}", request_body)
             except urllib.error.HTTPError as exc:
+                # Pass 11 Job A: for a partial starter, any non-404 HTTP response
+                # means "route exists; handler is a documented stub" — that
+                # passes contract smoke (the handler body will be exercised
+                # after the learner implements it).
+                if partial_starter and exc.code != 404:
+                    lines.append(
+                        f"[PASS-PARTIAL] {title}: HTTP {exc.code} "
+                        f"(endpoint reachable; stub will be exercised after learner work)"
+                    )
+                    continue
                 contract_passed = False
                 response_body = self._read_http_error_body(exc)
                 response_headers = self._http_error_headers(exc)
