@@ -310,6 +310,75 @@ class LearnerStudioServiceTests(unittest.TestCase):
                     container_name="course-gen-sandbox-deliverable_1-deadbeef",
                 )
 
+    def test_container_logs_merges_stdout_and_stderr_with_large_window(self) -> None:
+        """`_container_logs` must merge stdout+stderr (so the runtime stage
+        marker, which is echoed to stdout, is still visible) and request a
+        generous 500-line tail so long install/build streams aren't truncated.
+        """
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        captured: dict[str, list[str]] = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return SimpleNamespace(
+                returncode=0,
+                stdout="stdout-line-1\n[coursegen-stage] install",
+                stderr="go: requires go >= 1.23 (running go 1.22.4)",
+            )
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            logs = service._container_logs("container-x")
+
+        self.assertIn("--tail", captured["cmd"])
+        tail_index = captured["cmd"].index("--tail")
+        self.assertEqual(captured["cmd"][tail_index + 1], "500")
+        # Both streams present.
+        self.assertIn("stdout-line-1", logs)
+        self.assertIn("[coursegen-stage] install", logs)
+        self.assertIn("requires go >= 1.23", logs)
+
+    def test_container_stderr_returns_only_stderr_stream(self) -> None:
+        """`_container_stderr` returns ONLY what docker logs wrote to stderr —
+        the container's stderr stream — so the per-deliverable report.stderr
+        is signal (errors), not noise (interleaved stdout).
+        """
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+        go_err = (
+            "go: github.com/rogpeppe/go-internal@v1.14.1 requires go >= 1.23 "
+            "(running go 1.22.4)"
+        )
+
+        def _fake_run(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout="GET /health 200 OK\nlistening on :8080",
+                stderr=go_err,
+            )
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            stderr_only = service._container_stderr("container-x")
+
+        self.assertIsNotNone(stderr_only)
+        self.assertIn("requires go >= 1.23", stderr_only)
+        # stdout content (status / listener noise) must NOT appear.
+        self.assertNotIn("GET /health", stderr_only)
+        self.assertNotIn("listening on", stderr_only)
+
+    def test_container_stderr_returns_none_when_stderr_is_empty(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        def _fake_run(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout="some output",
+                stderr="",
+            )
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            result = service._container_stderr("container-x")
+
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()
