@@ -1487,5 +1487,53 @@ class DeterministicVisibleScriptInlinesPublicChecksTests(unittest.TestCase):
         self.assertIn("get_resource", script)
 
 
+class RepoAuthoringPromptImportVsManifestAuditTests(unittest.TestCase):
+    """Pass 13.
+
+    The model has been shipping code that imports packages not pinned in the
+    dependency manifest, causing one ModuleNotFoundError per retry across the
+    authoring loop (5 attempts ≈ 5 missing-dep cycles in the worst case).
+    Each retry costs ~30-90s of Docker build + boot + tear-down PLUS an
+    authoring OpenAI call. The prompt must explicitly direct the model to
+    walk authored source files, collect every non-stdlib import, and ensure
+    each appears in the manifest BEFORE returning.
+
+    These assertions pin the import-vs-manifest audit directive in both the
+    shared and per-deliverable repo-authoring prompts so a future edit can't
+    quietly delete it.
+    """
+
+    def test_shared_repo_authoring_prompt_requires_import_vs_manifest_audit(self) -> None:
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        # The directive name appears verbatim.
+        self.assertIn("import-vs-manifest audit", source,
+                      "Shared repo-authoring prompt must direct the model to perform "
+                      "an explicit import-vs-manifest audit before returning.")
+        # The directive must name the common Python-side omissions so the
+        # model sees the cost of missing one.
+        self.assertIn("pydantic_settings", source)
+        self.assertIn("psycopg2", source)
+        # The directive must specify that EVERY non-stdlib import has a
+        # matching manifest entry (not just "should be coherent").
+        self.assertIn("Do NOT ship code that imports a package you haven't pinned", source)
+
+    def test_shared_repo_authoring_prompt_names_lockfiles_in_audit(self) -> None:
+        """The audit instruction must name the per-ecosystem manifests so the
+        model knows where to write each import's matching entry."""
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        self.assertIn("requirements.txt", source)
+        self.assertIn("package.json", source)
+        self.assertIn("go.mod", source)
+        self.assertIn("Cargo.toml", source)
+        self.assertTrue(
+            "pom.xml" in source or "build.gradle" in source,
+            "Java/Kotlin manifest must be named in the audit instruction.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
