@@ -19,7 +19,7 @@ SCENARIOS = [
             "Use caching carefully for availability reads.",
         ],
         "creator_choices": {
-            "starter_type": "partial_implementation",
+            "starter_type": "partial",
             "primary_database": "postgres",
             "cache_backend": "redis",
             "tech_stack": [],
@@ -34,7 +34,7 @@ SCENARIOS = [
             "Keep flag reads fast without losing correctness under rollout changes.",
         ],
         "creator_choices": {
-            "starter_type": "working_buggy",
+            "starter_type": "partial",
             "implementation_language": "python",
             "application_framework": "fastapi",
             "primary_database": "postgres",
@@ -51,7 +51,7 @@ SCENARIOS = [
             "Abstain safely when the corpus does not support an answer.",
         ],
         "creator_choices": {
-            "starter_type": "partial_implementation",
+            "starter_type": "partial",
             "primary_database": None,
             "cache_backend": None,
             "tech_stack": [],
@@ -66,7 +66,7 @@ SCENARIOS = [
             "Design a service that is observable, expiration-aware, and safe to evolve.",
         ],
         "creator_choices": {
-            "starter_type": "working_buggy",
+            "starter_type": "partial",
             "implementation_language": "typescript",
             "application_framework": "nestjs",
             "primary_database": "mongodb",
