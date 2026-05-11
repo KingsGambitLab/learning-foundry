@@ -162,6 +162,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             )
             runner.runtime_harness._remove_runtime_support.return_value = None
             runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._container_stderr.return_value = ""
             runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = "[coursegen-runtime-stage] "
             runner.dependency_contract_materializer.materialize = Mock(
                 return_value=SimpleNamespace(
@@ -311,6 +312,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             runner.runtime_harness._healthcheck_path.return_value = "/health"
             runner.runtime_harness._wait_for_http.return_value = None
             runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._container_stderr.return_value = ""
             runner.runtime_harness._runtime_stage_from_logs.return_value = ""
             runner.runtime_harness._remove_runtime_support.return_value = None
             runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
@@ -453,6 +455,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             runner.runtime_harness._healthcheck_path.return_value = "/health"
             runner.runtime_harness._wait_for_http.return_value = None
             runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._container_stderr.return_value = ""
             runner.runtime_harness._runtime_stage_from_logs.return_value = ""
             runner.runtime_harness._remove_runtime_support.return_value = None
             runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
@@ -564,6 +567,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             )
             runner.runtime_harness._remove_runtime_support.return_value = None
             runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._container_stderr.return_value = ""
             runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
                 "[coursegen-runtime-stage] "
             )
@@ -627,6 +631,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             runner.runtime_harness._healthcheck_path.return_value = "/health"
             runner.runtime_harness._wait_for_http.side_effect = RuntimeError("connection refused")
             runner.runtime_harness._container_logs.return_value = "HikariPool boot failed"
+            runner.runtime_harness._container_stderr.return_value = "HikariPool boot failed"
             runner.runtime_harness._runtime_stage_from_logs.return_value = "boot"
             runner.runtime_harness._runtime_stage_command.return_value = ["sh", ".coursegen/runtime/run.sh"]
             runner.runtime_harness._remove_runtime_support.return_value = None

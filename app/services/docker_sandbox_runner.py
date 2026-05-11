@@ -537,6 +537,7 @@ class DockerSandboxRunner:
                     if run_result.returncode != 0:
                         all_runs_succeeded = False
                         logs = self.runtime_harness._container_logs(container_name) or ""
+                        container_stderr = self.runtime_harness._container_stderr(container_name) or ""
                         failed_stage = self._deliverable_runtime_stage(
                             logs=logs,
                             error_text="\n".join(part for part in (run_result.stderr, run_result.stdout) if part),
@@ -551,6 +552,9 @@ class DockerSandboxRunner:
                         )
                         run_stdout_parts.append(f"[{deliverable.id}] {run_result.stdout}".strip())
                         run_stderr_parts.append(f"[{deliverable.id}] {run_result.stderr}\n{logs}".strip())
+                        report_stderr = "\n".join(
+                            part for part in [run_result.stderr, container_stderr or logs] if part
+                        )
                         deliverable_reports.append(
                             DeliverableSandboxReport(
                                 deliverable_id=deliverable.id,
@@ -565,12 +569,12 @@ class DockerSandboxRunner:
                                 ),
                                 stage_exit_code=run_result.returncode,
                                 stdout=run_result.stdout,
-                                stderr="\n".join(part for part in [run_result.stderr, logs] if part),
+                                stderr=report_stderr,
                                 error=self._summarize_stage_failure(
                                     deliverable_id=deliverable.id,
                                     failed_stage=failed_stage,
                                     error_text=run_result.stderr,
-                                    logs=logs,
+                                    logs=container_stderr or logs,
                                     default="Could not start the starter runtime container.",
                                 ),
                             )
@@ -698,6 +702,7 @@ class DockerSandboxRunner:
                     all_builds_succeeded = False
                 all_runs_succeeded = False
                 logs = self.runtime_harness._container_logs(container_name) or ""
+                container_stderr = self.runtime_harness._container_stderr(container_name) or ""
                 failed_stage = self._deliverable_runtime_stage(
                     logs=logs,
                     error_text=str(exc),
@@ -730,12 +735,12 @@ class DockerSandboxRunner:
                             fallback=run_command,
                         ),
                         stdout="",
-                        stderr=logs,
+                        stderr=container_stderr or logs,
                         error=self._summarize_stage_failure(
                             deliverable_id=deliverable.id,
                             failed_stage=failed_stage,
                             error_text=str(exc),
-                            logs=logs,
+                            logs=container_stderr or logs,
                             default=str(exc),
                         ),
                     )
@@ -1081,6 +1086,7 @@ class DockerSandboxRunner:
                 if run_result.returncode != 0:
                     all_runs_succeeded = False
                     logs = self.runtime_harness._container_logs(container_name) or ""
+                    container_stderr = self.runtime_harness._container_stderr(container_name) or ""
                     failed_stage = self._deliverable_runtime_stage(
                         logs=logs,
                         error_text="\n".join(
@@ -1091,6 +1097,9 @@ class DockerSandboxRunner:
                     run_stdout_parts.append(f"[shared] {run_result.stdout}".strip())
                     run_stderr_parts.append(
                         f"[shared] {run_result.stderr}\n{logs}".strip()
+                    )
+                    report_stderr = "\n".join(
+                        part for part in [run_result.stderr, container_stderr or logs] if part
                     )
                     for deliverable in spec.deliverables:
                         deliverable_reports.append(
@@ -1109,14 +1118,12 @@ class DockerSandboxRunner:
                                 ),
                                 stage_exit_code=run_result.returncode,
                                 stdout=run_result.stdout,
-                                stderr="\n".join(
-                                    part for part in [run_result.stderr, logs] if part
-                                ),
+                                stderr=report_stderr,
                                 error=self._summarize_stage_failure(
                                     deliverable_id=deliverable.id,
                                     failed_stage=failed_stage,
                                     error_text=run_result.stderr,
-                                    logs=logs,
+                                    logs=container_stderr or logs,
                                     default="Could not start the starter runtime container.",
                                 ),
                             )
@@ -1155,6 +1162,7 @@ class DockerSandboxRunner:
                     all_runs_succeeded = False
                     boot_failure_reported = True
                     logs = self.runtime_harness._container_logs(container_name) or ""
+                    container_stderr = self.runtime_harness._container_stderr(container_name) or ""
                     failed_stage = self._deliverable_runtime_stage(
                         logs=logs,
                         error_text=str(exc),
@@ -1178,12 +1186,12 @@ class DockerSandboxRunner:
                                 fallback=run_command,
                             ),
                             stdout="",
-                            stderr=logs,
+                            stderr=container_stderr or logs,
                             error=self._summarize_stage_failure(
                                 deliverable_id=primary.id,
                                 failed_stage=failed_stage,
                                 error_text=str(exc),
-                                logs=logs,
+                                logs=container_stderr or logs,
                                 default=str(exc),
                             ),
                         )
@@ -1243,6 +1251,7 @@ class DockerSandboxRunner:
                 all_builds_succeeded = False
             all_runs_succeeded = False
             logs = self.runtime_harness._container_logs(container_name) or ""
+            container_stderr = self.runtime_harness._container_stderr(container_name) or ""
             failed_stage = self._deliverable_runtime_stage(
                 logs=logs,
                 error_text=str(exc),
@@ -1271,12 +1280,12 @@ class DockerSandboxRunner:
                             fallback=run_command,
                         ),
                         stdout="",
-                        stderr=logs,
+                        stderr=container_stderr or logs,
                         error=self._summarize_stage_failure(
                             deliverable_id=primary.id,
                             failed_stage=failed_stage,
                             error_text=str(exc),
-                            logs=logs,
+                            logs=container_stderr or logs,
                             default=str(exc),
                         ),
                     )
