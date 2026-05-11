@@ -2242,7 +2242,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(review.status_code, 200)
         body = review.json()
         self.assertTrue(body["review_ready"])
-        self.assertEqual(body["policy"]["max_authoring_attempts"], 3)
+        self.assertEqual(body["policy"]["max_authoring_attempts"], 5)
         self.assertEqual(body["policy"]["max_reviewer_attempts"], 2)
         self.assertEqual(body["authoring"]["attempts_used"], 1)
         self.assertEqual(body["reviewer"]["attempts_used"], 1)
