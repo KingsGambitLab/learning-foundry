@@ -1213,140 +1213,25 @@ class DockerSandboxRunner:
                 # The runtime is up. Walk each deliverable against the single
                 # running app.
                 for deliverable in spec.deliverables:
-                    log_coursegen_event(
-                        "sandbox_deliverable_started",
-                        workflow_run_id=workflow_run_id,
-                        deliverable_id=deliverable.id,
-                        deliverable_title=deliverable.title,
-                        starter_root=str(shared_starter_root),
-                    )
-                    manifest = self._load_per_deliverable_manifest(
-                        private_root=private_root,
-                        deliverable_id=deliverable.id,
-                    )
-                    visible_script = (
-                        deliverable_visible_checks_dir(workspace_root, deliverable.id)
-                        / VISIBLE_CHECK_SCRIPT_RELATIVE_PATH
-                    )
-
-                    log_coursegen_event(
-                        "sandbox_deliverable_public_checks_started",
-                        workflow_run_id=workflow_run_id,
-                        deliverable_id=deliverable.id,
-                        base_url=base_url,
-                    )
-                    contract_passed, contract_output, contract_error = (
-                        self._probe_contract_smoke(manifest, base_url)
-                    )
-
-                    visible_script_missing = not visible_script.exists()
-                    if visible_script_missing:
-                        checks_passed = False
-                        check_output = ""
-                        check_error = (
-                            f"Visible check script not found: "
-                            f"public/checks/{deliverable.id}/run_visible_checks.py"
-                        )
-                        visible_command_for_report = (
-                            f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
-                        )
-                    else:
-                        visible_command_for_report = (
-                            f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
-                        )
-                        suite_report = self.test_script_runner.run_suite(
-                            workspace_root=shared_starter_root,
-                            command=visible_command_for_report,
+                    report, combined_output, runtime_succeeded, stop = (
+                        self._run_one_deliverable_against_shared_runtime(
+                            deliverable=deliverable,
+                            workspace_root=workspace_root,
+                            private_root=private_root,
+                            shared_starter_root=shared_starter_root,
                             base_url=base_url,
-                            suite_type="visible",
-                        )
-                        lines = [f"Visible suite: {suite_report.summary}"]
-                        for case in suite_report.tests:
-                            marker = "PASS" if case.status == "passed" else "FAIL"
-                            lines.append(f"[{marker}] {case.title}: {case.summary}")
-                            for diagnostic in case.diagnostics[:3]:
-                                lines.append(f"  - {diagnostic}")
-                        check_output = "\n".join(lines)
-                        if not suite_report.valid:
-                            checks_passed = False
-                            check_error = "Visible test script did not emit a valid report."
-                        else:
-                            checks_passed = suite_report.passed
-                            check_error = (
-                                None
-                                if checks_passed
-                                else f"Visible suite failed for {deliverable.id}."
-                            )
-
-                    combined_output = "\n\n".join(
-                        part
-                        for part in (contract_output, check_output)
-                        if part and part.strip()
-                    )
-                    run_stdout_parts.append(
-                        f"[{deliverable.id}] {combined_output}".strip()
-                    )
-                    if not contract_passed:
-                        all_runs_succeeded = False
-                    if not checks_passed:
-                        all_runs_succeeded = False
-                    failed_stage: SandboxFailureStage | None = None
-                    if not contract_passed:
-                        failed_stage = SandboxFailureStage.contract
-                    elif not checks_passed:
-                        failed_stage = SandboxFailureStage.checks
-                    log_coursegen_event(
-                        "sandbox_deliverable_public_checks_completed",
-                        workflow_run_id=workflow_run_id,
-                        deliverable_id=deliverable.id,
-                        contract_passed=contract_passed,
-                        checks_passed=checks_passed,
-                        error=check_error,
-                    )
-                    deliverable_reports.append(
-                        DeliverableSandboxReport(
-                            deliverable_id=deliverable.id,
-                            compile_succeeded=True,
-                            runtime_succeeded=contract_passed,
-                            failed_stage=failed_stage,
-                            stage_command=(
-                                [visible_command_for_report]
-                                if failed_stage == SandboxFailureStage.checks
-                                else []
-                            ),
-                            public_checks_passed=checks_passed,
-                            health_status_code=200,
-                            stdout=combined_output,
-                            stderr="",
-                            error=contract_error or check_error,
-                        )
-                    )
-                    log_coursegen_event(
-                        "sandbox_deliverable_completed",
-                        workflow_run_id=workflow_run_id,
-                        deliverable_id=deliverable.id,
-                        sandbox_status="passed" if contract_passed and checks_passed else "failed",
-                        error=check_error,
-                    )
-                    # Fail-fast triggers on a contract probe failure or a real
-                    # visible-suite failure, but NOT on a missing per-deliverable
-                    # visible script (which is an authoring gap on a single
-                    # deliverable, not a runtime regression of the shared app).
-                    if fail_fast and not contract_passed:
-                        log_coursegen_event(
-                            "sandbox_fail_fast_stopped_after_deliverable",
                             workflow_run_id=workflow_run_id,
-                            deliverable_id=deliverable.id,
-                            shared_codebase=True,
+                            fail_fast=fail_fast,
                         )
-                        break
-                    if fail_fast and not checks_passed and not visible_script_missing:
-                        log_coursegen_event(
-                            "sandbox_fail_fast_stopped_after_deliverable",
-                            workflow_run_id=workflow_run_id,
-                            deliverable_id=deliverable.id,
-                            shared_codebase=True,
+                    )
+                    deliverable_reports.append(report)
+                    if combined_output:
+                        run_stdout_parts.append(
+                            f"[{deliverable.id}] {combined_output}".strip()
                         )
+                    if not runtime_succeeded:
+                        all_runs_succeeded = False
+                    if stop:
                         break
 
                 # Collect container logs for forensic context.
@@ -1487,6 +1372,138 @@ class DockerSandboxRunner:
             error=result.error,
         )
         return result
+
+    def _run_one_deliverable_against_shared_runtime(
+        self,
+        *,
+        deliverable,
+        workspace_root: Path,
+        private_root: Path,
+        shared_starter_root: Path,
+        base_url: str,
+        workflow_run_id: str,
+        fail_fast: bool,
+    ) -> tuple[DeliverableSandboxReport, str, bool, bool]:
+        """Run one deliverable's contract probe + visible suite against the
+        shared running app. Returns (report, combined_stdout, runtime_succeeded,
+        stop_iteration). `stop_iteration` indicates the caller should break the
+        loop (fail-fast semantics).
+        """
+        log_coursegen_event(
+            "sandbox_deliverable_started",
+            workflow_run_id=workflow_run_id,
+            deliverable_id=deliverable.id,
+            deliverable_title=deliverable.title,
+            starter_root=str(shared_starter_root),
+        )
+        manifest = self._load_per_deliverable_manifest(
+            private_root=private_root,
+            deliverable_id=deliverable.id,
+        )
+        visible_script = (
+            deliverable_visible_checks_dir(workspace_root, deliverable.id)
+            / VISIBLE_CHECK_SCRIPT_RELATIVE_PATH
+        )
+        log_coursegen_event(
+            "sandbox_deliverable_public_checks_started",
+            workflow_run_id=workflow_run_id,
+            deliverable_id=deliverable.id,
+            base_url=base_url,
+        )
+        contract_passed, contract_output, contract_error = self._probe_contract_smoke(
+            manifest, base_url
+        )
+
+        visible_command = f"python3 ../checks/{deliverable.id}/run_visible_checks.py"
+        visible_script_missing = not visible_script.exists()
+        if visible_script_missing:
+            checks_passed = False
+            check_output = ""
+            check_error = (
+                f"Visible check script not found: "
+                f"public/checks/{deliverable.id}/run_visible_checks.py"
+            )
+        else:
+            suite_report = self.test_script_runner.run_suite(
+                workspace_root=shared_starter_root,
+                command=visible_command,
+                base_url=base_url,
+                suite_type="visible",
+            )
+            lines = [f"Visible suite: {suite_report.summary}"]
+            for case in suite_report.tests:
+                marker = "PASS" if case.status == "passed" else "FAIL"
+                lines.append(f"[{marker}] {case.title}: {case.summary}")
+                for diagnostic in case.diagnostics[:3]:
+                    lines.append(f"  - {diagnostic}")
+            check_output = "\n".join(lines)
+            if not suite_report.valid:
+                checks_passed = False
+                check_error = "Visible test script did not emit a valid report."
+            else:
+                checks_passed = suite_report.passed
+                check_error = (
+                    None
+                    if checks_passed
+                    else f"Visible suite failed for {deliverable.id}."
+                )
+
+        combined_output = "\n\n".join(
+            part for part in (contract_output, check_output) if part and part.strip()
+        )
+        failed_stage: SandboxFailureStage | None = None
+        if not contract_passed:
+            failed_stage = SandboxFailureStage.contract
+        elif not checks_passed:
+            failed_stage = SandboxFailureStage.checks
+        log_coursegen_event(
+            "sandbox_deliverable_public_checks_completed",
+            workflow_run_id=workflow_run_id,
+            deliverable_id=deliverable.id,
+            contract_passed=contract_passed,
+            checks_passed=checks_passed,
+            error=check_error,
+        )
+        report = DeliverableSandboxReport(
+            deliverable_id=deliverable.id,
+            compile_succeeded=True,
+            runtime_succeeded=contract_passed,
+            failed_stage=failed_stage,
+            stage_command=(
+                [visible_command]
+                if failed_stage == SandboxFailureStage.checks
+                else []
+            ),
+            public_checks_passed=checks_passed,
+            health_status_code=200,
+            stdout=combined_output,
+            stderr="",
+            error=contract_error or check_error,
+        )
+        log_coursegen_event(
+            "sandbox_deliverable_completed",
+            workflow_run_id=workflow_run_id,
+            deliverable_id=deliverable.id,
+            sandbox_status="passed" if contract_passed and checks_passed else "failed",
+            error=check_error,
+        )
+        # Fail-fast triggers on a contract probe failure or a real
+        # visible-suite failure, but NOT on a missing per-deliverable visible
+        # script (an authoring gap, not a runtime regression of the shared app).
+        stop = False
+        if fail_fast and not contract_passed:
+            stop = True
+        elif fail_fast and not checks_passed and not visible_script_missing:
+            stop = True
+        if stop:
+            log_coursegen_event(
+                "sandbox_fail_fast_stopped_after_deliverable",
+                workflow_run_id=workflow_run_id,
+                deliverable_id=deliverable.id,
+                shared_codebase=True,
+            )
+        runtime_succeeded = contract_passed and checks_passed
+        return report, combined_output, runtime_succeeded, stop
 
     def _starter_runtime_image_tag(self, workspace_root: Path) -> str:
         cache_key = self._workspace_cache_key(workspace_root)
