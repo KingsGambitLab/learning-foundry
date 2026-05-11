@@ -134,6 +134,9 @@ class FailureContextDependencyContract(BaseModel):
 class FailureContextVerifiedRuntimeFile(BaseModel):
     path: str
     sha256: str
+    role: str
+    content: str | None = None
+    preserve_verbatim: bool = True
 
 
 class FailureContextVerifiedRuntime(BaseModel):
@@ -142,7 +145,8 @@ class FailureContextVerifiedRuntime(BaseModel):
     verified_at: datetime
     source_deliverable_id: str | None = None
     passed_deliverables: list[str] = Field(default_factory=list)
-    runtime_protocol_files: list[FailureContextVerifiedRuntimeFile] = Field(default_factory=list)
+    current_failed_deliverables: list[str] = Field(default_factory=list)
+    verified_files: list[FailureContextVerifiedRuntimeFile] = Field(default_factory=list)
     dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
 
 

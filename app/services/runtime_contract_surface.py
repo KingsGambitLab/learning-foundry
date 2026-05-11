@@ -128,6 +128,38 @@ def starter_repo_authoring_paths(
     return learner_editable_paths_for_manifest(manifest)
 
 
+def starter_verified_support_paths(
+    *,
+    starter_root: Path | None = None,
+    manifest: dict[str, Any] | None = None,
+    max_paths: int = 12,
+) -> list[str]:
+    if manifest is None:
+        return []
+    authored_paths = starter_repo_authoring_paths(starter_root=starter_root, manifest=manifest)
+    editable_paths = set(learner_editable_paths_for_manifest(manifest))
+    dependency_paths = set(
+        starter_dependency_contract_paths(
+            manifest=manifest,
+            include_lockfiles=False,
+            include_build_support=True,
+        )
+    )
+    excluded_paths = {
+        *editable_paths,
+        *dependency_paths,
+        *STARTER_RUNTIME_PROTOCOL_PATHS,
+        *STARTER_RUNTIME_CHECK_SCRIPT_PATHS,
+        *STARTER_SUPPORT_PATHS,
+    }
+    support_paths = [
+        path
+        for path in authored_paths
+        if path not in excluded_paths
+    ]
+    return support_paths[: max(0, max_paths)]
+
+
 def starter_materialization_paths(
     *,
     manifest: dict[str, Any] | None = None,

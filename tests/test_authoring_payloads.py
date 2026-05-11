@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,8 @@ from app.domain.registry import PackageType
 from app.domain.workflow import (
     FailureContext,
     FailureContextDependencyContract,
+    FailureContextVerifiedRuntime,
+    FailureContextVerifiedRuntimeFile,
     MaterializeBundleRequest,
     WorkflowNodeKind,
 )
@@ -394,6 +397,31 @@ class AuthoringPayloadTests(unittest.TestCase):
                         runtime_bundle_complete=False,
                     )
                 ],
+                previously_verified_runtime=FailureContextVerifiedRuntime(
+                    source_node_kind=WorkflowNodeKind.authoring_runtime,
+                    source_node_attempt=3,
+                    verified_at=datetime.now(UTC),
+                    source_deliverable_id=deliverable.id,
+                    passed_deliverables=[deliverable.id],
+                    current_failed_deliverables=[deliverable.id],
+                    verified_files=[
+                        FailureContextVerifiedRuntimeFile(
+                            path="Dockerfile",
+                            sha256="abc123",
+                            role="runtime_protocol",
+                            content="FROM rust:1.82-bookworm\n",
+                            preserve_verbatim=True,
+                        ),
+                        FailureContextVerifiedRuntimeFile(
+                            path="Cargo.toml",
+                            sha256="def456",
+                            role="dependency_contract",
+                            content="[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+                            preserve_verbatim=True,
+                        ),
+                    ],
+                    dependency_contracts=[],
+                ),
             )
 
             service = OpenAIStarterRepoAuthoringService(enabled=False)
@@ -410,6 +438,11 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert dependency_contracts[0]["expected_lockfile_paths"] == ["Cargo.lock"]
         assert dependency_contracts[0]["present_lockfile_paths"] == []
         assert dependency_contracts[0]["runtime_bundle_complete"] is False
+        verified_runtime = payload["failure_context"]["previously_verified_runtime"]
+        assert verified_runtime["passed_deliverables"] == [deliverable.id]
+        assert verified_runtime["current_failed_deliverables"] == [deliverable.id]
+        assert verified_runtime["verified_files"][0]["path"] == "Dockerfile"
+        assert verified_runtime["verified_files"][0]["content"] == "FROM rust:1.82-bookworm\n"
 
     def test_repo_authoring_shared_codebase_uses_single_shared_repo_bundle_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

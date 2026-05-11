@@ -560,7 +560,12 @@ class TaskAgentRetryServiceTests(TestCase):
                 verified.passed_deliverables,
                 ["deliverable_1", "deliverable_2", "deliverable_3", "deliverable_4"],
             )
-            self.assertIn("Dockerfile", [item.path for item in verified.runtime_protocol_files])
+            self.assertEqual(verified.current_failed_deliverables, ["deliverable_1"])
+            verified_paths = {item.path: item for item in verified.verified_files}
+            self.assertIn("Dockerfile", verified_paths)
+            self.assertEqual(verified_paths["Dockerfile"].role, "runtime_protocol")
+            self.assertIsNotNone(verified_paths["Dockerfile"].content)
+            self.assertTrue(verified_paths["Dockerfile"].preserve_verbatim)
 
     def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
         with TemporaryDirectory() as temp_dir_name:

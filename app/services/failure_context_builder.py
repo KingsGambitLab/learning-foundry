@@ -21,6 +21,9 @@ from app.domain.workflow import (
 from app.services.runtime_contract_surface import (
     STARTER_RUNTIME_PROTOCOL_PATHS,
     dependency_contract_facts_for_deliverables,
+    load_starter_manifest,
+    starter_dependency_contract_paths,
+    starter_verified_support_paths,
 )
 
 _REVIEWER_KINDS = {
@@ -401,6 +404,12 @@ def _previously_verified_runtime(
     if not passed_deliverables:
         return None
 
+    current_failed_deliverables = [
+        report.deliverable_id
+        for report in (latest_node.sandbox_result.deliverable_reports if latest_node.sandbox_result is not None else [])
+        if not report.compile_succeeded or not report.runtime_succeeded or bool(report.error)
+    ]
+
     public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
     runtime_plan = (
         run.artifacts.task_agent_spec.project_contract.runtime_plan
@@ -412,7 +421,7 @@ def _previously_verified_runtime(
         runtime_plan=runtime_plan,
         deliverable_ids=passed_deliverables,
     )
-    runtime_protocol_files = _verified_runtime_protocol_files(
+    verified_files = _verified_runtime_files(
         public_root=public_root,
         source_deliverable_id=passed_deliverables[0],
     )
@@ -422,12 +431,13 @@ def _previously_verified_runtime(
         verified_at=runtime_node.created_at,
         source_deliverable_id=passed_deliverables[0],
         passed_deliverables=passed_deliverables,
-        runtime_protocol_files=runtime_protocol_files,
+        current_failed_deliverables=current_failed_deliverables,
+        verified_files=verified_files,
         dependency_contracts=dependency_contracts,
     )
 
 
-def _verified_runtime_protocol_files(
+def _verified_runtime_files(
     *,
     public_root: str | None,
     source_deliverable_id: str,
@@ -435,15 +445,83 @@ def _verified_runtime_protocol_files(
     if not public_root:
         return []
     starter_root = Path(public_root) / "starter" / source_deliverable_id
+    manifest = load_starter_manifest(starter_root)
+    if manifest is None:
+        return []
+
+    per_file_limit = 24 * 1024
+    total_limit = 64 * 1024
+    total_bytes = 0
     files: list[FailureContextVerifiedRuntimeFile] = []
-    for relative_path in STARTER_RUNTIME_PROTOCOL_PATHS:
-        target = starter_root / relative_path
-        if not target.exists() or not target.is_file():
+    path_roles: list[tuple[str, str]] = [
+        *(("runtime_protocol", path) for path in STARTER_RUNTIME_PROTOCOL_PATHS),
+        *(
+            ("dependency_contract", path)
+            for path in starter_dependency_contract_paths(
+                manifest=manifest,
+                include_lockfiles=False,
+                include_build_support=True,
+            )
+        ),
+        *(
+            ("repo_support", path)
+            for path in starter_verified_support_paths(
+                starter_root=starter_root,
+                manifest=manifest,
+            )
+        ),
+    ]
+    seen_paths: set[str] = set()
+    for role, relative_path in path_roles:
+        if relative_path in seen_paths:
             continue
+        seen_paths.add(relative_path)
+        target = starter_root / relative_path
+        content = _read_verified_text_file(
+            target,
+            max_file_bytes=per_file_limit,
+            remaining_total_bytes=max(0, total_limit - total_bytes),
+        )
+        if content is None:
+            continue
+        byte_length = len(content.encode("utf-8"))
+        total_bytes += byte_length
         files.append(
             FailureContextVerifiedRuntimeFile(
                 path=relative_path,
                 sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+                role=role,
+                content=content,
+                preserve_verbatim=True,
             )
         )
+        if total_bytes >= total_limit:
+            break
     return files
+
+
+def _read_verified_text_file(
+    path: Path,
+    *,
+    max_file_bytes: int,
+    remaining_total_bytes: int,
+) -> str | None:
+    if remaining_total_bytes <= 0:
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return None
+    if file_size > max_file_bytes or file_size > remaining_total_bytes:
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for character in content:
+        codepoint = ord(character)
+        if codepoint < 32 and character not in {"\n", "\r", "\t"}:
+            return None
+    return content
