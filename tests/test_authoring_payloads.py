@@ -130,6 +130,51 @@ def _materialized_run(temp_dir: str):
 
 
 class AuthoringPayloadTests(unittest.TestCase):
+    def test_repo_authoring_writes_shebang_files_as_executable(self) -> None:
+        import os
+        import stat
+
+        service = OpenAIStarterRepoAuthoringService(enabled=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_root = Path(temp_dir)
+            target = workspace_root / "mvnw"
+            content = "#!/bin/sh\n# Apache Maven Wrapper\nexec java -classpath ...\n"
+
+            updated = service._write_if_changed(target, content, workspace_root)
+
+            self.assertEqual(updated, ["mvnw"])
+            mode = os.stat(target).st_mode
+            self.assertTrue(
+                mode & stat.S_IXUSR,
+                f"expected mvnw to be executable for owner; mode={oct(mode)}",
+            )
+            self.assertTrue(
+                mode & stat.S_IXGRP,
+                f"expected mvnw to be executable for group; mode={oct(mode)}",
+            )
+            self.assertTrue(
+                mode & stat.S_IXOTH,
+                f"expected mvnw to be executable for other; mode={oct(mode)}",
+            )
+
+    def test_repo_authoring_writes_non_shebang_files_without_execute_bit(self) -> None:
+        import os
+        import stat
+
+        service = OpenAIStarterRepoAuthoringService(enabled=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_root = Path(temp_dir)
+            target = workspace_root / "pom.xml"
+            content = "<?xml version=\"1.0\"?>\n<project></project>\n"
+
+            service._write_if_changed(target, content, workspace_root)
+
+            mode = os.stat(target).st_mode
+            self.assertFalse(
+                mode & stat.S_IXUSR,
+                f"expected pom.xml NOT to be executable; mode={oct(mode)}",
+            )
+
     def test_repo_authoring_uses_structured_response_parsing(self) -> None:
         client = _FakeClient(
             _FakeParsedResponse(

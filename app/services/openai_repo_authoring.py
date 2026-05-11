@@ -792,6 +792,9 @@ class OpenAIStarterRepoAuthoringService:
             return []
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        if content.startswith("#!"):
+            current_mode = path.stat().st_mode
+            path.chmod(current_mode | 0o111)
         return [str(path.relative_to(workspace_root))]
 
     def _create_response_with_retries(
