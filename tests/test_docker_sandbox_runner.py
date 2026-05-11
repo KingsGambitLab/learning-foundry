@@ -250,6 +250,260 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             ),
         )
 
+    def test_shared_codebase_boots_runtime_once_for_all_deliverables(self) -> None:
+        """For shared_codebase courses, the runtime image must be built once and
+        the container booted once. The per-deliverable visible script lives at
+        public/checks/<id>/run_visible_checks.py and must be invoked once per
+        deliverable against the single running app.
+        """
+        from app.services.generated_test_harness import GeneratedTestSuiteReport
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            assert spec.course_structure.shared_codebase is True
+            # _make_run produces 4 deliverables for the shared-codebase course.
+            self.assertGreaterEqual(len(spec.deliverables), 3)
+
+            runner = DockerSandboxRunner()
+            runner.runtime_harness = Mock()
+            runner.runtime_harness._allocate_port.return_value = 18001
+            runner.runtime_harness._runtime_manifest.return_value = {}
+            runner.runtime_harness._ephemeral_runtime_workspace.side_effect = (
+                lambda starter_root: nullcontext(starter_root)
+            )
+            runner.runtime_harness._workspace_runtime_image_name.return_value = (
+                "course-gen-runtime:test"
+            )
+            runner.runtime_harness._ensure_runtime_image_available.return_value = None
+            runner.runtime_harness._image_exists.return_value = True
+            runner.runtime_harness._dependency_services.return_value = []
+            runner.runtime_harness._start_runtime_support_services.return_value = None
+            runner.runtime_harness._docker_env_args.return_value = []
+            runner.runtime_harness._app_runtime_environment.return_value = {}
+            runner.runtime_harness._runtime_shell_command.return_value = [
+                "sh",
+                "-c",
+                "echo run",
+            ]
+            runner.runtime_harness._runtime_launch_script.return_value = "echo run"
+            runner.runtime_harness._healthcheck_path.return_value = "/health"
+            runner.runtime_harness._wait_for_http.return_value = None
+            runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._runtime_stage_from_logs.return_value = ""
+            runner.runtime_harness._remove_runtime_support.return_value = None
+            runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
+                "[coursegen-runtime-stage] "
+            )
+            runner.dependency_contract_materializer.materialize = Mock(
+                return_value=SimpleNamespace(
+                    attempted=True,
+                    succeeded=True,
+                    stdout="",
+                    stderr="",
+                    image_name="course-gen-runtime:test",
+                    synced_paths=[],
+                    command=[],
+                    return_code=0,
+                    error=None,
+                )
+            )
+
+            # Make test_script_runner.run_suite return a passing report each time.
+            def _ok_report(*, workspace_root, command, base_url, suite_type):
+                return GeneratedTestSuiteReport(
+                    suite_type=suite_type,
+                    command=command,
+                    exit_code=0,
+                    valid=True,
+                    passed=True,
+                    tests=[],
+                    summary="ok",
+                )
+
+            runner.test_script_runner = Mock()
+            runner.test_script_runner.run_suite.side_effect = _ok_report
+
+            with (
+                patch(
+                    "app.services.docker_sandbox_runner.subprocess.run",
+                    return_value=SimpleNamespace(
+                        returncode=0, stdout="container-id", stderr=""
+                    ),
+                ),
+                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None)),
+            ):
+                result = runner._execute_starter_harness(
+                    workspace_root=Path(workspace.public_dir),
+                    spec=spec,
+                    workflow_run_id=run.id,
+                    now=datetime.now(UTC),
+                    started=time.perf_counter(),
+                )
+
+            # Single image build, single container boot.
+            self.assertEqual(
+                runner.runtime_harness._ensure_runtime_image_available.call_count,
+                1,
+                "Shared-codebase course must build the runtime image exactly once.",
+            )
+            # The single `docker run -d ...` command for the container is the
+            # only subprocess.run call to the docker binary for boot.
+            # Easier assertion: dependency-contract materialization is called once.
+            self.assertEqual(
+                runner.dependency_contract_materializer.materialize.call_count,
+                1,
+                "Shared-codebase course must materialize the dependency contract exactly once.",
+            )
+            # Per-deliverable visible-suite calls = len(deliverables), each with
+            # a distinct command pointing at public/checks/<id>/run_visible_checks.py.
+            self.assertEqual(
+                runner.test_script_runner.run_suite.call_count,
+                len(spec.deliverables),
+                "Visible suite must run once per deliverable against the single running app.",
+            )
+            invoked_commands = [
+                call.kwargs.get("command") or (call.args[1] if len(call.args) > 1 else None)
+                for call in runner.test_script_runner.run_suite.call_args_list
+            ]
+            for deliverable in spec.deliverables:
+                expected_fragment = f"../checks/{deliverable.id}/run_visible_checks.py"
+                self.assertTrue(
+                    any(expected_fragment in (cmd or "") for cmd in invoked_commands),
+                    f"Visible suite command for {deliverable.id} should reference {expected_fragment}; got {invoked_commands!r}",
+                )
+            # All four reports produced; all passed.
+            self.assertEqual(len(result.deliverable_reports), len(spec.deliverables))
+            for report in result.deliverable_reports:
+                self.assertTrue(report.runtime_succeeded, report.error)
+                self.assertTrue(report.public_checks_passed, report.error)
+
+    def test_shared_codebase_missing_visible_script_fails_only_that_deliverable(self) -> None:
+        """If a deliverable's visible script does not exist in public/checks/<id>/,
+        the runner produces a DeliverableSandboxReport with checks_passed=False
+        and a clear error. The other deliverables still run (no fail-fast on
+        missing visible script, unless the contract probe also fails).
+        """
+        from app.services.generated_test_harness import GeneratedTestSuiteReport
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            assert spec.course_structure.shared_codebase is True
+
+            # Delete the visible script for the second deliverable so the runner
+            # observes a missing per-deliverable visible suite.
+            missing_id = spec.deliverables[1].id
+            missing_path = (
+                Path(workspace.public_dir)
+                / "checks"
+                / missing_id
+                / "run_visible_checks.py"
+            )
+            self.assertTrue(missing_path.exists())
+            missing_path.unlink()
+
+            runner = DockerSandboxRunner()
+            runner.runtime_harness = Mock()
+            runner.runtime_harness._allocate_port.return_value = 18001
+            runner.runtime_harness._runtime_manifest.return_value = {}
+            runner.runtime_harness._ephemeral_runtime_workspace.side_effect = (
+                lambda starter_root: nullcontext(starter_root)
+            )
+            runner.runtime_harness._workspace_runtime_image_name.return_value = (
+                "course-gen-runtime:test"
+            )
+            runner.runtime_harness._ensure_runtime_image_available.return_value = None
+            runner.runtime_harness._image_exists.return_value = True
+            runner.runtime_harness._dependency_services.return_value = []
+            runner.runtime_harness._start_runtime_support_services.return_value = None
+            runner.runtime_harness._docker_env_args.return_value = []
+            runner.runtime_harness._app_runtime_environment.return_value = {}
+            runner.runtime_harness._runtime_shell_command.return_value = [
+                "sh",
+                "-c",
+                "echo run",
+            ]
+            runner.runtime_harness._runtime_launch_script.return_value = "echo run"
+            runner.runtime_harness._healthcheck_path.return_value = "/health"
+            runner.runtime_harness._wait_for_http.return_value = None
+            runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._runtime_stage_from_logs.return_value = ""
+            runner.runtime_harness._remove_runtime_support.return_value = None
+            runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
+                "[coursegen-runtime-stage] "
+            )
+            runner.dependency_contract_materializer.materialize = Mock(
+                return_value=SimpleNamespace(
+                    attempted=True,
+                    succeeded=True,
+                    stdout="",
+                    stderr="",
+                    image_name="course-gen-runtime:test",
+                    synced_paths=[],
+                    command=[],
+                    return_code=0,
+                    error=None,
+                )
+            )
+
+            def _ok_report(*, workspace_root, command, base_url, suite_type):
+                return GeneratedTestSuiteReport(
+                    suite_type=suite_type,
+                    command=command,
+                    exit_code=0,
+                    valid=True,
+                    passed=True,
+                    tests=[],
+                    summary="ok",
+                )
+
+            runner.test_script_runner = Mock()
+            runner.test_script_runner.run_suite.side_effect = _ok_report
+
+            with (
+                patch(
+                    "app.services.docker_sandbox_runner.subprocess.run",
+                    return_value=SimpleNamespace(
+                        returncode=0, stdout="container-id", stderr=""
+                    ),
+                ),
+                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None)),
+            ):
+                result = runner._execute_starter_harness(
+                    workspace_root=Path(workspace.public_dir),
+                    spec=spec,
+                    workflow_run_id=run.id,
+                    now=datetime.now(UTC),
+                    started=time.perf_counter(),
+                )
+
+            # The missing-script deliverable must yield a failed report with a
+            # clear error. The other deliverables should still produce reports.
+            ids_to_reports = {r.deliverable_id: r for r in result.deliverable_reports}
+            self.assertIn(missing_id, ids_to_reports)
+            missing_report = ids_to_reports[missing_id]
+            self.assertFalse(missing_report.public_checks_passed)
+            self.assertTrue(
+                missing_report.error
+                and "run_visible_checks.py" in missing_report.error,
+                f"Error should mention the missing visible script; got {missing_report.error!r}",
+            )
+            # run_suite should NOT have been called for the missing deliverable
+            # (one fewer call than total deliverables).
+            self.assertEqual(
+                runner.test_script_runner.run_suite.call_count,
+                len(spec.deliverables) - 1,
+            )
+
     def test_shared_codebase_runtime_stops_after_first_failed_deliverable(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
