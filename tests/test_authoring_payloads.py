@@ -685,6 +685,91 @@ class AuthoringPayloadTests(unittest.TestCase):
             "Repo authoring system prompt should name common binary wrappers (maven-wrapper.jar, gradle-wrapper.jar) the model must not assume it can bundle.",
         )
 
+    def test_test_authoring_system_prompt_uses_collapsed_starter_type_contract(self) -> None:
+        """The test-script authoring system prompt must reflect the Pass-1
+        collapse to `empty | partial`. Both starter variants leave the shared
+        starter without business-logic implementation, so visible AND hidden
+        suites are expected to FAIL the untouched shared starter. The legacy
+        `partial_implementation` / `working_buggy` directives must be gone.
+        """
+        import inspect
+        from app.services.openai_test_script_authoring import (
+            OpenAITestScriptAuthoringService,
+        )
+
+        source = inspect.getsource(OpenAITestScriptAuthoringService)
+        # Legacy four-bucket vocabulary must be gone.
+        self.assertNotIn(
+            "partial_implementation",
+            source,
+            "Test-script authoring prompt must not reference the retired `partial_implementation` starter type.",
+        )
+        self.assertNotIn(
+            "working_buggy",
+            source,
+            "Test-script authoring prompt must not reference the retired `working_buggy` starter type.",
+        )
+        self.assertNotIn(
+            "working_suboptimal",
+            source,
+            "Test-script authoring prompt must not reference the retired `working_suboptimal` starter type.",
+        )
+        # The prompt must say both visible and hidden suites are expected to
+        # fail the untouched shared starter, since neither `empty` nor
+        # `partial` ships business-logic implementations.
+        lowered = source.lower()
+        self.assertIn(
+            "untouched shared starter",
+            lowered,
+            "Test-script authoring prompt must call out that the untouched shared starter has no business-logic implementation.",
+        )
+        self.assertTrue(
+            "must fail" in lowered or "must FAIL".lower() in lowered,
+            "Test-script authoring prompt must require visible AND hidden suites to fail against the untouched shared starter.",
+        )
+        self.assertIn(
+            "visible and hidden",
+            lowered,
+            "Test-script authoring prompt must apply the fail-against-starter directive to both visible AND hidden scripts.",
+        )
+
+    def test_test_authoring_prompt_payload_carries_course_starter_type(self) -> None:
+        """The user payload for the test-script authoring LLM call must include
+        `course_starter_type` so the model can read the course-level `empty`
+        vs `partial` setting explicitly (rather than guessing from manifest
+        shape).
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            deliverable = spec.deliverables[0]
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            service = OpenAITestScriptAuthoringService(enabled=False)
+            payload = service._prompt_payload(
+                run,
+                starter_root=starter_root,
+                manifest=manifest,
+                failure_context=None,
+            )
+
+        self.assertIn("course_starter_type", payload)
+        self.assertEqual(
+            payload["course_starter_type"],
+            spec.runtime_dependencies.starter_type.value,
+        )
+
     def test_repo_authoring_system_prompt_directs_model_to_preserve_passing_stage_files(self) -> None:
         """The system prompt for repo authoring must include explicit guidance
         about `last_attempted_runtime.stage_outcomes`. Without it, the model
@@ -704,6 +789,82 @@ class AuthoringPayloadTests(unittest.TestCase):
             "stage_outcomes",
             source,
             "Repo authoring system prompt must reference stage_outcomes so the model can scope edits to the actually-failing stage.",
+        )
+
+    def test_repo_authoring_system_prompt_uses_collapsed_starter_type_contract(self) -> None:
+        """The progressive shared-repo authoring prompt must reflect the
+        Pass-1 collapse: course-level `course_starter_type` is `empty` or
+        `partial`. The prompt must direct the model to leave every business
+        endpoint as an explicit unimplemented stub for `partial`, and to
+        author only boot scaffolding for `empty`. Legacy four-bucket terms
+        (`working_buggy`, etc.) must be gone.
+        """
+        import inspect
+        from app.services.openai_repo_authoring import (
+            OpenAIStarterRepoAuthoringService,
+        )
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+
+        self.assertNotIn(
+            "partial_implementation",
+            source,
+            "Repo authoring prompt must not reference the retired `partial_implementation` starter type.",
+        )
+        self.assertNotIn(
+            "working_buggy",
+            source,
+            "Repo authoring prompt must not reference the retired `working_buggy` starter type.",
+        )
+        self.assertNotIn(
+            "working_suboptimal",
+            source,
+            "Repo authoring prompt must not reference the retired `working_suboptimal` starter type.",
+        )
+        # Strong `partial` directive: explicit unimplemented stubs.
+        self.assertIn(
+            "explicit unimplemented stub",
+            source,
+            "Repo authoring prompt must require `partial` starters to leave business endpoints as explicit unimplemented stubs.",
+        )
+        self.assertIn(
+            "course_starter_type",
+            source,
+            "Repo authoring prompt must reference the course-level `course_starter_type` payload key.",
+        )
+        # Empty-starter contract.
+        lowered = source.lower()
+        self.assertIn(
+            "health endpoint",
+            lowered,
+            "Repo authoring prompt must describe the boot/health contract that both `empty` and `partial` starters must satisfy.",
+        )
+
+    def test_repo_authoring_progressive_payload_carries_course_starter_type(self) -> None:
+        """The user payload for the progressive shared-repo authoring LLM call
+        must include `course_starter_type` so the model knows whether to author
+        an `empty` skeleton or a `partial` scaffold with stub endpoints.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+            public_root = Path(workspace.public_dir)
+
+            service = OpenAIStarterRepoAuthoringService(enabled=False)
+            payload = service._progressive_prompt_payload(
+                run=run,
+                public_root=public_root,
+                deliverable_ids=[spec.deliverables[0].id],
+                failure_context=None,
+            )
+
+        self.assertIn("course_starter_type", payload)
+        self.assertEqual(
+            payload["course_starter_type"],
+            spec.runtime_dependencies.starter_type.value,
         )
 
     def test_repo_authoring_shared_codebase_uses_single_shared_repo_bundle_call(self) -> None:

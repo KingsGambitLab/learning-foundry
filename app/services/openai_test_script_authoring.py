@@ -185,10 +185,17 @@ class OpenAITestScriptAuthoringService:
             starter_root=starter_root,
             manifest=manifest,
         )
+        spec = run.artifacts.task_agent_spec
+        course_starter_type = (
+            spec.runtime_dependencies.starter_type.value
+            if spec is not None
+            else None
+        )
         return {
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "starter_root": starter_root.name,
+            "course_starter_type": course_starter_type,
             "manifest": manifest,
             "files": prompt_files["learner_files"],
             "dependency_contract_files": prompt_files["dependency_contract_files"],
@@ -225,9 +232,10 @@ class OpenAITestScriptAuthoringService:
                         "If `REPORT_PATH` is set, write a JSON report there. Otherwise print the same JSON to stdout. "
                         "Report shape: {\"summary\": str, \"tests\": [{\"id\": str, \"title\": str, \"status\": \"passed\"|\"failed\", \"summary\": str, \"diagnostics\": [str]}]}. "
                         "Exit 0 only when every test passes. Exit non-zero when any test fails. "
-                        "Visible tests should be learner-friendly and basic. Hidden tests should be materially stronger. "
-                        "For `partial_implementation` starters, visible tests should still fail the untouched starter when core behavior is missing. "
-                        "For `working_buggy` starters, visible tests may pass but hidden tests should expose the deeper bug. "
+                        "Visible tests should be learner-friendly and basic (small, single-behavior assertions). Hidden tests must be materially stronger (cover edge cases, error paths, idempotency, concurrency, and adversarial inputs). "
+                        "Identical visible and hidden scripts are not allowed. "
+                        "The course-level `course_starter_type` in the payload is either `empty` or `partial`. For BOTH values, the shared starter ships no business-logic implementation — every business endpoint either does not exist (`empty`) or raises a not-implemented exception (`partial`). "
+                        "Therefore both the visible AND hidden suites MUST fail against the untouched shared starter. A test that passes against the untouched shared starter is broken: it is not exercising any deliverable behavior and must be rewritten or removed. "
                         "Use only the published endpoints and the actual learner files in the prompt, plus any dependency-contract or runtime protocol files provided separately. "
                         "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
                         "Do not import the learner application directly."
