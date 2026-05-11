@@ -50,6 +50,25 @@ RetryRoute = Literal["authoring_runtime", "authoring_tests", "reviewer_tests", "
 _UNSET = object()
 
 
+# Pass 9 Job B: shared-codebase courses converge through more distinct
+# failure modes per retry (install → verify → contract → ...). Three
+# attempts run out before convergence. Non-shared courses are smaller
+# and three is still appropriate.
+_SHARED_CODEBASE_MAX_AUTHORING_ATTEMPTS = 5
+_NON_SHARED_CODEBASE_MAX_AUTHORING_ATTEMPTS = 3
+
+
+def max_authoring_attempts(spec) -> int:
+    """Return the per-spec authoring-attempt cap.
+
+    For shared-codebase courses the cap is 5 (Pass 9 Job B); every
+    other course type keeps the historical 3.
+    """
+    if getattr(spec.course_structure, "shared_codebase", False):
+        return _SHARED_CODEBASE_MAX_AUTHORING_ATTEMPTS
+    return _NON_SHARED_CODEBASE_MAX_AUTHORING_ATTEMPTS
+
+
 class AssignmentGraphState(TypedDict):
     run: WorkflowRun
     node_executions: list[WorkflowNodeExecution]
@@ -96,6 +115,23 @@ class LangGraphAssignmentGraph:
             max_authoring_attempts=self.max_authoring_attempts,
             max_reviewer_attempts=self.max_reviewer_attempts,
         )
+
+    def _max_authoring_attempts_for_spec(self, spec) -> int:
+        """Return the authoring-attempt cap for ``spec``.
+
+        Shared-codebase specs always get 5 retries (Pass 9 Job B).
+        Non-shared specs use the constructor-configured value (which
+        defaults to 3) so callers can still tighten the cap for tests.
+        """
+        if getattr(spec.course_structure, "shared_codebase", False):
+            return _SHARED_CODEBASE_MAX_AUTHORING_ATTEMPTS
+        return self.max_authoring_attempts
+
+    def _state_max_authoring_attempts(self, state: AssignmentGraphState) -> int:
+        spec = state["run"].artifacts.task_agent_spec
+        if spec is None:
+            return self.max_authoring_attempts
+        return self._max_authoring_attempts_for_spec(spec)
 
     def execute(
         self,
@@ -281,7 +317,7 @@ class LangGraphAssignmentGraph:
         latest = state["node_executions"][-1]
         if latest.status == WorkflowNodeStatus.passed:
             return "authoring_tests"
-        if state["authoring_attempt"] < self.max_authoring_attempts:
+        if state["authoring_attempt"] < self._state_max_authoring_attempts(state):
             return "authoring_repair"
         return "end"
 
@@ -289,7 +325,7 @@ class LangGraphAssignmentGraph:
         latest = state["node_executions"][-1]
         if latest.status == WorkflowNodeStatus.passed:
             return "reviewer_runtime"
-        if state["authoring_attempt"] < self.max_authoring_attempts:
+        if state["authoring_attempt"] < self._state_max_authoring_attempts(state):
             return "authoring_repair"
         return "end"
 
