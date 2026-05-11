@@ -614,6 +614,194 @@ class DockerSandboxRunnerTests(unittest.TestCase):
 
         self.assertEqual(summary, "deliverable_3 failed during runtime.")
 
+    def test_contract_stage_summary_includes_http_request_and_response(self) -> None:
+        """Pass 9: for ``contract`` failures the canonical diagnostic isn't
+        in stderr — it's in ``http_response`` (captured by
+        ``_probe_contract_smoke``). The headline must surface the request
+        line plus the response status and body so the model doesn't have
+        to dig into nested fields.
+        """
+        runner = DockerSandboxRunner()
+
+        http_response = {
+            "request_method": "POST",
+            "request_path": "/links",
+            "request_body": {"target": "https://example.com"},
+            "response_status": 400,
+            "response_headers": {"content-type": "application/json"},
+            "response_body_text": '{"error":"missing_required_fields"}',
+        }
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.contract,
+            error_text=(
+                "One or more starter smoke checks could not exercise the published contract."
+            ),
+            logs=None,
+            default="contract failed",
+            http_response=http_response,
+        )
+
+        self.assertIn("deliverable_1 failed during contract", summary)
+        self.assertIn("POST /links", summary)
+        self.assertIn("400", summary)
+        self.assertIn("missing_required_fields", summary)
+        # Headline must NOT collapse to the stage-agnostic generic message.
+        self.assertNotIn(
+            "could not exercise the published contract",
+            summary,
+        )
+
+    def test_contract_stage_summary_truncates_long_response_body(self) -> None:
+        """Long error bodies get truncated to ~400 chars so the headline
+        stays scannable. The full body still lives on the
+        ``http_response`` field for the LLM to read in full.
+        """
+        runner = DockerSandboxRunner()
+
+        long_body = "missing_required_fields: " + ("x" * 1000)
+        http_response = {
+            "request_method": "GET",
+            "request_path": "/items/abc",
+            "request_body": None,
+            "response_status": 500,
+            "response_headers": None,
+            "response_body_text": long_body,
+        }
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_2",
+            failed_stage=SandboxFailureStage.contract,
+            error_text=None,
+            logs=None,
+            default="contract failed",
+            http_response=http_response,
+        )
+
+        self.assertIn("GET /items/abc", summary)
+        self.assertIn("500", summary)
+        # First chunk of body must be present, full 1000-char tail must not.
+        self.assertIn("missing_required_fields", summary)
+        # Truncated to ~400 chars: total summary should not be enormous.
+        self.assertLess(len(summary), 800)
+
+    def test_contract_stage_summary_handles_missing_response_status(self) -> None:
+        """When the request never reached the server (e.g. connection
+        refused), ``response_status`` is None but ``response_body_text``
+        carries the exception string. The headline must still surface
+        the request line and the body text.
+        """
+        runner = DockerSandboxRunner()
+
+        http_response = {
+            "request_method": "POST",
+            "request_path": "/links",
+            "request_body": None,
+            "response_status": None,
+            "response_headers": None,
+            "response_body_text": "Connection refused",
+        }
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.contract,
+            error_text=None,
+            logs=None,
+            default="contract failed",
+            http_response=http_response,
+        )
+
+        self.assertIn("POST /links", summary)
+        self.assertIn("Connection refused", summary)
+
+    def test_contract_stage_summary_falls_back_when_http_response_missing(self) -> None:
+        """If no ``http_response`` is supplied (legacy call path), fall
+        through to the existing stage-agnostic behaviour.
+        """
+        runner = DockerSandboxRunner()
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.contract,
+            error_text="Some opaque error",
+            logs="line A\nline B\nfinal teaser line",
+            default="contract failed",
+        )
+
+        self.assertIn("deliverable_1 failed during contract", summary)
+        # Stage-agnostic tail teaser should still appear.
+        self.assertIn("final teaser line", summary)
+
+    def test_non_contract_stage_ignores_http_response(self) -> None:
+        """Even if a caller mistakenly passes ``http_response`` for a
+        non-contract stage, the helper must keep the existing behaviour
+        for that stage (so install / verify / boot / checks still get
+        their stderr-tail teaser).
+        """
+        runner = DockerSandboxRunner()
+
+        http_response = {
+            "request_method": "POST",
+            "request_path": "/links",
+            "response_status": 400,
+            "response_body_text": '{"error":"would_not_be_used"}',
+        }
+
+        for stage in (
+            SandboxFailureStage.install,
+            SandboxFailureStage.verify,
+            SandboxFailureStage.boot,
+            SandboxFailureStage.checks,
+        ):
+            summary = runner._summarize_stage_failure(
+                deliverable_id="deliverable_1",
+                failed_stage=stage,
+                error_text="opaque",
+                logs="alpha\nbeta\nfinal_line_for_stage",
+                default="x",
+                http_response=http_response,
+            )
+
+            self.assertIn("deliverable_1 failed during", summary)
+            self.assertIn("final_line_for_stage", summary)
+            self.assertNotIn("would_not_be_used", summary)
+
+    def test_summarize_failed_deliverables_threads_http_response_for_contract(
+        self,
+    ) -> None:
+        """The wrapper that picks the primary failed deliverable must
+        thread its ``http_response`` into ``_summarize_stage_failure``
+        so contract failures get the rich headline at the run level too.
+        """
+        from app.domain.sandbox import DeliverableSandboxReport
+
+        runner = DockerSandboxRunner()
+
+        primary = DeliverableSandboxReport(
+            deliverable_id="deliverable_1",
+            compile_succeeded=True,
+            runtime_succeeded=False,
+            failed_stage=SandboxFailureStage.contract,
+            public_checks_passed=False,
+            error="contract failed",
+            stderr="",
+            http_response={
+                "request_method": "POST",
+                "request_path": "/links",
+                "request_body": {"target": "https://example.com"},
+                "response_status": 400,
+                "response_headers": None,
+                "response_body_text": '{"error":"missing_required_fields"}',
+            },
+        )
+
+        summary = runner._summarize_failed_deliverables([primary])
+
+        self.assertIn("POST /links", summary)
+        self.assertIn("400", summary)
+        self.assertIn("missing_required_fields", summary)
+
     def test_shared_codebase_boots_runtime_once_for_all_deliverables(self) -> None:
         """For shared_codebase courses, the runtime image must be built once and
         the container booted once. The per-deliverable visible script lives at

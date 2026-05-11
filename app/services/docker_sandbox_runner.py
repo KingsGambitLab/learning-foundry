@@ -669,7 +669,18 @@ class DockerSandboxRunner:
                             health_status_code=200,
                             stdout=combined_output,
                             stderr=logs,
-                            error=contract_error or check_error,
+                            error=(
+                                self._summarize_stage_failure(
+                                    deliverable_id=deliverable.id,
+                                    failed_stage=failed_stage,
+                                    error_text=contract_error or check_error,
+                                    logs=logs,
+                                    default=contract_error or check_error or "",
+                                    http_response=contract_http_response,
+                                )
+                                if failed_stage is not None
+                                else (contract_error or check_error)
+                            ),
                             stdout_tail=(
                                 contract_failure_diagnostics[0]
                                 if contract_failure_diagnostics
@@ -1574,7 +1585,18 @@ class DockerSandboxRunner:
             health_status_code=200,
             stdout=combined_output,
             stderr="",
-            error=contract_error or check_error,
+            error=(
+                self._summarize_stage_failure(
+                    deliverable_id=deliverable.id,
+                    failed_stage=failed_stage,
+                    error_text=contract_error or check_error,
+                    logs=None,
+                    default=contract_error or check_error or "",
+                    http_response=contract_http_response,
+                )
+                if failed_stage is not None
+                else (contract_error or check_error)
+            ),
             http_response=contract_http_response,
         )
         log_coursegen_event(
@@ -1969,6 +1991,7 @@ class DockerSandboxRunner:
         error_text: str | None,
         logs: str | None,
         default: str,
+        http_response: dict | None = None,
     ) -> str:
         """Stage-agnostic failure summary: deliverable id + stage + tail of stderr.
 
@@ -1977,18 +2000,44 @@ class DockerSandboxRunner:
         deliverable failed at which stage, plus a ~3-line tail teaser. The
         full stderr is the canonical diagnostic.
 
-        ``image_build`` is the one stage that needs special handling: docker
-        buildkit emits a generic ``failed to solve`` footer AFTER the real
-        ``RUN`` step error. For that stage we use
-        :meth:`_image_build_diagnostic_line` to walk past the footer to the
-        real cause. Every other stage's canonical signal is at the tail of
-        stderr already.
+        Two stages need special handling:
+
+        * ``image_build`` — docker buildkit emits a generic
+          ``failed to solve`` footer AFTER the real ``RUN`` step error.
+          :meth:`_image_build_diagnostic_line` walks past the footer to
+          the real cause.
+        * ``contract`` (Pass 9) — the canonical diagnostic is the HTTP
+          exchange captured by :meth:`_probe_contract_smoke`, NOT
+          stderr. When ``http_response`` is supplied we format a
+          headline like ``POST /links → 400 {"error":"…"}`` so the LLM
+          doesn't have to dig into nested fields.
+
+        Every other stage's canonical signal is at the tail of stderr,
+        so we surface a 3-line teaser there.
         """
         stage_label = (
             failed_stage.value.replace("_", " ")
             if failed_stage is not None
             else "runtime"
         )
+        if (
+            failed_stage == SandboxFailureStage.contract
+            and isinstance(http_response, dict)
+        ):
+            method = str(http_response.get("request_method") or "").strip() or "REQUEST"
+            path = str(http_response.get("request_path") or "").strip() or "?"
+            status = http_response.get("response_status")
+            body = str(http_response.get("response_body_text") or "").strip()
+            # Truncate body at ~400 chars so the headline stays scannable;
+            # the full body lives on the http_response field.
+            if len(body) > 400:
+                body = body[:400] + "…"
+            status_part = str(status) if status is not None else "no_response"
+            tail = f"{status_part} {body}".strip()
+            return (
+                f"{deliverable_id} failed during {stage_label}: "
+                f"{method} {path} → {tail}"
+            )
         source = (logs or error_text or "").strip()
         if not source:
             return f"{deliverable_id} failed during {stage_label}."
@@ -2024,6 +2073,7 @@ class DockerSandboxRunner:
             error_text=primary.error,
             logs=primary.stderr,
             default="Starter deliverable verification failed on the authored runtime harness.",
+            http_response=primary.http_response,
         )
 
     def _tail_lines(self, text: str | None, *, max_lines: int) -> str:
