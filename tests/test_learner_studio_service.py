@@ -379,6 +379,87 @@ class LearnerStudioServiceTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_container_stdout_returns_only_stdout_stream(self) -> None:
+        """`_container_stdout` returns ONLY what docker logs wrote to stdout —
+        framework boot/access logs (Spring Boot, gunicorn, etc.). Stderr
+        content (errors) must be filtered out.
+        """
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        boot_log = (
+            "Started Application in 6.2 seconds\n"
+            "Tomcat started on port(s): 8080 (http)\n"
+            "Hibernate: select * from reservations"
+        )
+
+        def _fake_run(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=boot_log,
+                stderr="org.postgresql.util.PSQLException: Connection refused",
+            )
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            stdout_only = service._container_stdout("container-x")
+
+        self.assertIsNotNone(stdout_only)
+        self.assertIn("Started Application", stdout_only)
+        self.assertIn("Tomcat started", stdout_only)
+        # stderr must not leak in.
+        self.assertNotIn("PSQLException", stdout_only)
+
+    def test_container_stdout_returns_none_when_stdout_is_empty(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        def _fake_run(cmd, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="", stderr="some-err")
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            result = service._container_stdout("container-x")
+
+        self.assertIsNone(result)
+
+    def test_container_exit_state_captures_oom_killed(self) -> None:
+        """`_container_exit_state` runs `docker inspect <name> --format
+        {{json .State}}` and returns a dict with at least exit_code,
+        oom_killed, status, error.
+        """
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        inspected = (
+            '{"Status": "exited", "ExitCode": 137, "OOMKilled": true, '
+            '"Error": "", "Dead": false, "Pid": 0, "StartedAt": "2026-05-11T10:00:00Z"}'
+        )
+
+        captured: dict[str, list[str]] = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return SimpleNamespace(returncode=0, stdout=inspected, stderr="")
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            state = service._container_exit_state("container-x")
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state["exit_code"], 137)
+        self.assertTrue(state["oom_killed"])
+        self.assertEqual(state["status"], "exited")
+        # The docker inspect command shape: includes --format with .State.
+        joined = " ".join(captured["cmd"])
+        self.assertIn("inspect", joined)
+        self.assertIn(".State", joined)
+
+    def test_container_exit_state_returns_none_on_inspect_failure(self) -> None:
+        service = LearnerStudioService(image_name="course-gen-learner-studio:test")
+
+        def _fake_run(cmd, **kwargs):
+            return SimpleNamespace(returncode=1, stdout="", stderr="no such container")
+
+        with patch("app.services.learner_studio_service.subprocess.run", side_effect=_fake_run):
+            state = service._container_exit_state("container-x")
+
+        self.assertIsNone(state)
+
 
 if __name__ == "__main__":
     unittest.main()

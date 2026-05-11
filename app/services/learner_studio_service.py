@@ -832,6 +832,74 @@ class LearnerStudioService:
         stderr_text = (result.stderr or "").strip()
         return stderr_text or None
 
+    def _container_stdout(self, container_name: str) -> str | None:
+        """Return ONLY the container's stdout stream (framework boot logs).
+
+        Symmetric with ``_container_stderr``. Spring Boot, gunicorn, Flask
+        and most structured loggers write to stdout — so when the app fails
+        AFTER stdout-only startup banners (and stderr is empty), the
+        canonical diagnostic lives here. Last 100 lines is enough headroom
+        for the boot frame without bloating the failure context.
+        """
+        result = subprocess.run(
+            [self.docker_binary, "logs", "--tail", "100", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        stdout_text = (result.stdout or "").strip()
+        return stdout_text or None
+
+    def _container_exit_state(self, container_name: str) -> dict | None:
+        """Return container exit state (`docker inspect --format {{json .State}}`).
+
+        Captures the structured exit reason the LLM otherwise has to guess
+        from stderr alone:
+
+        - ``oom_killed=true`` means the container was killed by the kernel
+          OOM-killer (raise memory cap or trim resource use).
+        - ``exit_code=137`` (= 128 + SIGKILL) usually pairs with OOM.
+        - ``status="exited"`` vs ``"dead"`` distinguishes a clean process
+          exit from a Docker-level cleanup failure.
+        - ``error`` is Docker's own message when the container could not
+          even start (image not found, missing entrypoint binary, etc.).
+
+        Returns ``None`` if ``docker inspect`` itself fails (container
+        removed before inspect, daemon error, etc.).
+        """
+        result = subprocess.run(
+            [
+                self.docker_binary,
+                "inspect",
+                "--format",
+                "{{json .State}}",
+                container_name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return None
+        raw = (result.stdout or "").strip()
+        if not raw:
+            return None
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(state, dict):
+            return None
+        # Normalize the keys the LLM/repair-prompt expects.
+        return {
+            "exit_code": state.get("ExitCode"),
+            "oom_killed": bool(state.get("OOMKilled")),
+            "status": state.get("Status"),
+            "error": state.get("Error") or None,
+        }
+
     def _wait_for_http(self, url: str, *, container_name: str | None = None) -> None:
         deadline = time.time() + self.start_timeout_s
         last_error: Exception | None = None
