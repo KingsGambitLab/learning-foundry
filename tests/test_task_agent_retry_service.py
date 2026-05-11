@@ -886,6 +886,143 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertIsNotNone(verified_paths["Dockerfile"].content)
             self.assertTrue(verified_paths["Dockerfile"].preserve_verbatim)
 
+    def test_repair_workspace_for_readme_only_findings_skips_llm_reauthoring(self) -> None:
+        """When reviewer_code emits ONLY documentation-class findings (e.g.
+        starter_readme_missing_local_reference), repair_workspace must
+        regenerate the deterministic README templates WITHOUT calling
+        ``author_workspace_repo``.
+
+        The old behavior: any reviewer_code finding triggered a full
+        LLM-driven workspace re-author, which is a fresh roll of the
+        dependency-manifest dice. A README path bug would trigger
+        re-authoring, which would regenerate requirements.txt, which
+        would silently drop or swap dependencies → ModuleNotFoundError on
+        the next sandbox attempt → "repair regression".
+
+        Proportional repair scope: documentation-only findings → re-render
+        the README templates from the deterministic builder; code and
+        manifests stay byte-for-byte unchanged.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="reviewer_code_1",
+                kind=WorkflowNodeKind.reviewer_code,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer code flagged README path inconsistencies.",
+                created_at=datetime.now(UTC),
+                findings=[
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="starter_readme_missing_local_reference",
+                        detail=(
+                            "README references checks/run_visible_checks.py but "
+                            "that file is not present in the learner workspace."
+                        ),
+                        location="public/checks/deliverable_1/README.md",
+                    ),
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="starter_readme_missing_local_reference",
+                        detail="same",
+                        location="public/checks/deliverable_2/README.md",
+                    ),
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+
+            repaired_run, repaired, message = workspace_authoring.repair_workspace(
+                run, latest_node, failure_context=failure_context,
+            )
+
+            self.assertTrue(repaired)
+            self.assertEqual(
+                repo_authoring.calls, [],
+                "README-only reviewer findings must NOT trigger LLM-driven "
+                "workspace re-authoring. That fresh roll of the dependency "
+                "dice is what caused the repair-regression class of failures.",
+            )
+            self.assertIn("README", message)
+            # The README files for the affected deliverables should now exist
+            # (regenerated from the deterministic template).
+            repaired_workspace = repaired_run.artifacts.workspace_snapshot
+            assert repaired_workspace is not None
+            for did in ("deliverable_1", "deliverable_2"):
+                readme_path = (
+                    Path(repaired_workspace.public_dir) / "checks" / did / "README.md"
+                )
+                self.assertTrue(
+                    readme_path.exists(),
+                    f"README for {did} should be re-rendered at {readme_path}.",
+                )
+
+    def test_repair_workspace_for_mixed_findings_still_uses_llm_reauthoring(self) -> None:
+        """If ANY error finding is not documentation-class (e.g. a real
+        code issue), repair_workspace must fall back to the full LLM
+        re-authoring path. Pinning the narrow scope: don't accidentally
+        skip a real repair just because a README error also fires.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="reviewer_code_1",
+                kind=WorkflowNodeKind.reviewer_code,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Mixed findings.",
+                created_at=datetime.now(UTC),
+                findings=[
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="...",
+                        detail="...",
+                        location="public/checks/deliverable_1/README.md",
+                    ),
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="missing_required_endpoint",
+                        title="non-README issue",
+                        detail="Handler is missing.",
+                        location="public/starter/app/main.py",
+                    ),
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+            workspace_authoring.repair_workspace(
+                run, latest_node, failure_context=failure_context,
+            )
+            self.assertNotEqual(
+                repo_authoring.calls, [],
+                "Mixed findings (with at least one non-README error) must still "
+                "fall through to LLM-driven workspace re-authoring.",
+            )
+
     def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)

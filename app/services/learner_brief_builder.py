@@ -104,7 +104,17 @@ def _primary_request_surface(starter_surface: LearnerStarterSurfaceSpec) -> str:
 
 
 def _support_paths_for_spec(spec: TaskAgentServiceSpec) -> list[str]:
-    paths = ["checks/run_visible_checks.py"]
+    # The visible-check script's location relative to the README depends on
+    # the workspace layout. For shared-codebase courses the README sits at
+    # `public/checks/<id>/README.md` next to `run_visible_checks.py` (same
+    # directory). For legacy non-shared courses the README sits at
+    # `public/starter/<id>/README.md` with the script under `checks/`.
+    # The reviewer enforces that any path the README references actually
+    # exists relative to the README, so this must match the on-disk layout.
+    if spec.course_structure.shared_codebase:
+        paths = ["run_visible_checks.py"]
+    else:
+        paths = ["checks/run_visible_checks.py"]
     paths.extend(
         source.workspace_path
         for source in spec.runtime_dependencies.data_sources

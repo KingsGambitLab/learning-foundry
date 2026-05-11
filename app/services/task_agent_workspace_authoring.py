@@ -10,12 +10,66 @@ from app.domain.sandbox import SandboxExecutionResult, SandboxExecutionStatus
 from app.domain.workflow import FailureContext, WorkflowNodeExecution, WorkflowRun
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.docker_sandbox_runner import DockerSandboxRunner
+from app.services.learner_brief_builder import (
+    build_task_agent_deliverable_brief,
+    render_learner_starter_readme,
+)
 from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
 from app.services.task_agent_starter_templates import (
     HIDDEN_GRADER_SCRIPT_PATH,
     HIDDEN_MANIFEST_PATH,
+    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
     build_task_agent_starter_files,
+    default_preview_command,
 )
+
+
+# Reviewer finding codes that ONLY affect the deterministic README template.
+# When all error findings in a reviewer failure are in this set, the repair
+# can be scoped to re-rendering the README — no LLM-driven re-authoring,
+# no fresh roll of the dependency-manifest dice. The codes are defined in
+# `app/services/bundle_validation.py` where the reviewer emits them.
+_DOCUMENTATION_ONLY_FINDING_CODES = frozenset({
+    "starter_readme_missing_section",
+    "starter_readme_missing_local_reference",
+    "starter_readme_uses_secondary_brief",
+    "starter_readme_unpublished_endpoint_reference",
+    "starter_readme_lacks_domain_grounding",
+})
+
+
+def _is_documentation_only_failure(latest_node: WorkflowNodeExecution) -> bool:
+    """True when every error finding's code is purely a README/text issue.
+
+    `severity == "info"` findings are not gating; we only consider errors.
+    A node with zero errors is not a failure we should fast-path through.
+    """
+    error_findings = [
+        f for f in latest_node.findings if f.severity.value == "error"
+    ]
+    if not error_findings:
+        return False
+    return all(
+        (f.code or "") in _DOCUMENTATION_ONLY_FINDING_CODES
+        for f in error_findings
+    )
+
+
+def _deliverable_ids_from_findings(latest_node: WorkflowNodeExecution) -> set[str]:
+    """Extract `deliverable_X` ids from finding `location` strings.
+
+    Findings carry locations like `public/checks/deliverable_1/README.md`
+    or `public/starter/deliverable_2/...`. Pull the deliverable id out.
+    """
+    ids: set[str] = set()
+    for f in latest_node.findings:
+        location = f.location or ""
+        parts = [p for p in location.replace("\\", "/").split("/") if p]
+        for part in parts:
+            if part.startswith("deliverable_"):
+                ids.add(part)
+                break
+    return ids
 
 
 class WorkspaceAuthoringSource(str, Enum):
@@ -83,6 +137,16 @@ class TaskAgentWorkspaceAuthoringService:
         if workspace is None:
             return run, False, "The workspace is missing and could not be prepared."
 
+        # Proportional repair scope: when every error finding is a
+        # documentation-only issue (README path/section/grounding), regenerate
+        # the deterministic README templates only. Do NOT call
+        # ``author_workspace_repo`` — that fresh LLM roll over the entire
+        # workspace silently swaps dependency manifests and causes
+        # "repair regression" failures (working psycopg pin → missing psycopg2
+        # transitive after a README-only repair).
+        if _is_documentation_only_failure(latest_node):
+            return self._repair_readmes_only(run, latest_node)
+
         failed_deliverables = self._target_deliverable_ids(
             run=run,
             latest_node=latest_node,
@@ -144,6 +208,88 @@ class TaskAgentWorkspaceAuthoringService:
                 + reason,
             )
         return run, False, "No workspace file changes were needed for the current sandbox failure."
+
+    def _repair_readmes_only(
+        self,
+        run: WorkflowRun,
+        latest_node: WorkflowNodeExecution,
+    ) -> tuple[WorkflowRun, bool, str]:
+        """Documentation-only fast path: re-render the deterministic README
+        templates for the affected deliverables. Code, dependency manifest,
+        and runtime protocol files are left byte-for-byte unchanged.
+        """
+        spec = run.artifacts.task_agent_spec
+        workspace = run.artifacts.workspace_snapshot
+        assert spec is not None and workspace is not None
+
+        affected_ids = _deliverable_ids_from_findings(latest_node)
+        if not affected_ids:
+            # No location-attributed findings — fall back to all deliverables.
+            affected_ids = {d.id for d in spec.deliverables}
+
+        workspace_root = Path(workspace.root_dir)
+        public_root = Path(workspace.public_dir)
+        updated: list[str] = []
+        shared_codebase = bool(spec.course_structure.shared_codebase)
+        for did in sorted(affected_ids):
+            deliverable = next(
+                (d for d in spec.deliverables if d.id == did), None
+            )
+            if deliverable is None:
+                continue
+            readme_content = self._render_deliverable_readme(spec, did)
+            if shared_codebase:
+                readme_path = public_root / "checks" / did / "README.md"
+            else:
+                readme_path = public_root / "starter" / did / "README.md"
+            readme_path.parent.mkdir(parents=True, exist_ok=True)
+            readme_path.write_text(readme_content, encoding="utf-8")
+            try:
+                relative = readme_path.relative_to(workspace_root)
+            except ValueError:
+                relative = readme_path
+            updated.append(str(relative))
+
+        if not updated:
+            return run, False, "No README files were re-rendered."
+        return (
+            run,
+            True,
+            (
+                "Re-rendered "
+                + ", ".join(updated)
+                + " from the deterministic README template. "
+                "Source code and dependency manifest were not touched "
+                "(documentation-only finding scope)."
+            ),
+        )
+
+    def _render_deliverable_readme(
+        self,
+        spec,
+        deliverable_id: str,
+    ) -> str:
+        deliverable = next(
+            d for d in spec.deliverables if d.id == deliverable_id
+        )
+        brief = deliverable.learner_brief or build_task_agent_deliverable_brief(
+            spec, deliverable
+        )
+        return render_learner_starter_readme(
+            title=f"Starter for {deliverable.title}",
+            brief=brief,
+            summary=deliverable.objective,
+            learning_outcomes=list(deliverable.learning_outcomes),
+            visible_check_command=(
+                spec.runtime_dependencies.visible_check_command
+                or f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+            ),
+            preview_command=(
+                spec.runtime_dependencies.preview_command
+                or default_preview_command(spec, host="127.0.0.1")
+            ),
+            public_checks=deliverable.public_checks,
+        )
 
     def smoke_verify_repair(
         self,
