@@ -31,7 +31,6 @@ from app.services.task_agent_retry_service import TaskAgentRetryService
 from app.services.task_agent_repair_service import TaskAgentRepairService
 from app.services.task_agent_starter_templates import (
     HIDDEN_GRADER_SCRIPT_PATH,
-    HIDDEN_MANIFEST_PATH,
     RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
     RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
 )
