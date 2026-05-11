@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 import urllib.error
@@ -957,6 +958,15 @@ class DockerSandboxRunner:
             "last error:",
             "container logs:",
         )
+        # Docker buildkit always ends with generic wrapper lines that hide the
+        # actual diagnostic. The real cause is the command output (e.g. a line
+        # starting with a timestamp like "1.060 ...") several lines up.
+        buildkit_noise_fragments = (
+            "failed to solve",
+            "failed to build",
+            "did not complete successfully",
+            "exit code:",
+        )
         for text in texts:
             cleaned = (text or "").strip()
             if not cleaned:
@@ -969,7 +979,20 @@ class DockerSandboxRunner:
                     continue
                 if any(fragment in candidate.lower() for fragment in ignored_substrings):
                     continue
+                if any(fragment in candidate.lower() for fragment in buildkit_noise_fragments):
+                    continue
                 if candidate.startswith("---") or candidate.startswith(">>>") or candidate.startswith("^^^"):
+                    continue
+                # Skip Dockerfile context lines like "  12 | >>> RUN ..." or "  10 |     ".
+                if re.match(r"^\s*\d+\s*\|", candidate):
+                    continue
+                # Skip buildkit step headers like "#10 [6/8] RUN ..." or
+                # " > [6/8] RUN ...": these are command-stage labels, not the
+                # diagnostic itself.
+                if re.match(r"^(#\d+\s+\[|\s*>\s*\[)", candidate):
+                    continue
+                # Skip the buildkit Dockerfile-context header like "Dockerfile:12".
+                if re.match(r"^Dockerfile:\d+$", candidate):
                     continue
                 return candidate
         return None

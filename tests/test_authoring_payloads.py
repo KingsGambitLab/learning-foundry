@@ -607,6 +607,30 @@ class AuthoringPayloadTests(unittest.TestCase):
         self.assertEqual(last_attempted["verified_files"][0]["content"], "FROM eclipse-temurin:21\n")
         self.assertTrue(last_attempted["verified_files"][0]["preserve_verbatim"])
 
+    def test_repo_authoring_prompt_warns_about_structured_output_binary_constraint(self) -> None:
+        """Structured outputs can only carry text. The system prompt must warn
+        the model that binary-wrapper files (e.g. `.mvn/wrapper/maven-wrapper.jar`,
+        `gradle/wrapper/gradle-wrapper.jar`) cannot be bundled, so the install
+        script must either generate them or use the system-installed tool.
+        Without this warning the model keeps writing install.sh to invoke
+        `./mvnw` and the build fails because the binary jar is missing.
+        """
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        # The prompt should call out that structured outputs cannot carry binaries.
+        self.assertIn(
+            "binary",
+            source.lower(),
+            "Repo authoring system prompt must explain that structured outputs cannot carry binary assets.",
+        )
+        # Concrete examples of common build-wrapper binary jars should be named.
+        self.assertTrue(
+            "maven-wrapper.jar" in source or "gradle-wrapper.jar" in source,
+            "Repo authoring system prompt should name common binary wrappers (maven-wrapper.jar, gradle-wrapper.jar) the model must not assume it can bundle.",
+        )
+
     def test_repo_authoring_system_prompt_directs_model_to_preserve_passing_stage_files(self) -> None:
         """The system prompt for repo authoring must include explicit guidance
         about `last_attempted_runtime.stage_outcomes`. Without it, the model

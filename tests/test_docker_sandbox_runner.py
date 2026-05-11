@@ -61,6 +61,48 @@ def _make_run(temp_dir: Path):
 
 
 class DockerSandboxRunnerTests(unittest.TestCase):
+    def test_image_build_failure_summary_skips_docker_buildkit_generic_footers(self) -> None:
+        """Docker buildkit always ends with a generic `ERROR: failed to solve:
+        process X did not complete successfully: exit code: N` footer. The
+        actually-diagnostic line lives a few lines above between the `------`
+        separators. _summarize_stage_failure for image_build must walk past
+        the generic footer and land on the real cause.
+        """
+        runner = DockerSandboxRunner()
+
+        build_log = "\n".join(
+            [
+                "#10 [6/8] RUN sh .coursegen/runtime/install.sh",
+                "#10 1.060 -Dmaven.multiModuleProjectDirectory system property is not set.",
+                "#10 ERROR: process \"/bin/sh -c sh .coursegen/runtime/install.sh\" did not complete successfully: exit code: 1",
+                "------",
+                " > [6/8] RUN sh .coursegen/runtime/install.sh:",
+                "1.060 -Dmaven.multiModuleProjectDirectory system property is not set.",
+                "------",
+                "Dockerfile:12",
+                "--------------------",
+                "  10 |     ",
+                "  11 |     RUN chmod +x mvnw .coursegen/runtime/install.sh",
+                "  12 | >>> RUN sh .coursegen/runtime/install.sh",
+                "  13 |     RUN sh .coursegen/runtime/verify.sh",
+                "--------------------",
+                "ERROR: failed to build: failed to solve: process \"/bin/sh -c sh .coursegen/runtime/install.sh\" did not complete successfully: exit code: 1",
+            ]
+        )
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.image_build,
+            error_text="Docker build failed (exit 1).",
+            logs=build_log,
+            default="image build failed",
+        )
+
+        # The summary should surface the actual diagnostic, not the generic Docker footer.
+        self.assertIn("multiModuleProjectDirectory", summary)
+        self.assertNotIn("failed to solve", summary)
+        self.assertNotIn("did not complete successfully", summary)
+
     def test_image_build_failure_summary_uses_log_tail(self) -> None:
         runner = DockerSandboxRunner()
 
@@ -92,7 +134,10 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             default="image build failed",
         )
 
-        self.assertIn("ERROR: failed to solve:", summary)
+        # The summary should surface the actually-diagnostic line (the
+        # COPY/checksum error), not Docker buildkit's generic footer.
+        self.assertIn("failed to calculate checksum", summary)
+        self.assertIn("/mvnw", summary)
         self.assertIn("deliverable_1 failed during image build", summary)
 
     def test_image_build_failure_classifies_with_command_and_exit_code(self) -> None:
@@ -171,7 +216,11 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             self.assertEqual(report.stage_exit_code, 1)
             self.assertFalse(report.compile_succeeded)
             self.assertFalse(report.runtime_succeeded)
-            self.assertIn("ERROR: failed to solve:", report.error or "")
+            # The summary should surface the real diagnostic (failed to compute
+            # cache key for /mvnw), not Docker's generic "failed to solve" footer.
+            self.assertIn("failed to compute cache key", report.error or "")
+            # The full stderr is preserved (tail-truncated) so the model still
+            # sees the buildkit footer alongside the real cause if it wants.
             self.assertIn("ERROR: failed to solve:", report.stderr)
 
     def test_boot_failure_summary_prefers_useful_container_log_line(self) -> None:
