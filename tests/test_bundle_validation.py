@@ -476,3 +476,73 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
         )
         assert not result.valid
         assert any(issue.code == "deprecated_secondary_brief_present" for issue in result.errors)
+
+
+def test_bundle_validation_resolves_readme_refs_against_readme_dir_not_starter_root() -> None:
+    """Bug 1, on the validator side.
+
+    Under the shared-codebase layout, README sits at
+    ``public/checks/<id>/README.md`` and references the script as
+    ``run_visible_checks.py`` (sibling in the same directory). The
+    validator was resolving those references against ``starter_root``
+    (``public/starter/``), which never contains the per-deliverable
+    visible script — so every shared-codebase course got falsely flagged
+    with ``starter_readme_missing_local_reference``.
+
+    Fix: resolve README references against the README's OWN directory.
+    The same rule also works for the legacy non-shared layout, where the
+    README under ``public/starter/<id>/README.md`` references its
+    ``checks/run_visible_checks.py`` sibling subdirectory.
+    """
+    design_spec = _inventory_design()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        store = SQLiteWorkflowStore(db_path=f"{temp_dir}/test.db")
+        workflow_service = WorkflowService(
+            store,
+            materializer=ArtifactMaterializer(base_dir=f"{temp_dir}/generated"),
+        )
+        run = workflow_service.create_run_from_explicit_plan(
+            intake=GenerationIntake(
+                title="Inventory Reservation Service",
+                problem_statement=(
+                    "Build a multi-warehouse inventory reservation service with FastAPI, Postgres, and Redis. "
+                    "Keep reservations correct under concurrency, retries, and stock transfers."
+                ),
+            ),
+            design_spec=design_spec,
+            execute_nodes=False,
+        )
+        bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
+        spec = run.artifacts.task_agent_spec
+        # Pre-condition: this is a shared-codebase course.
+        assert spec.course_structure.shared_codebase
+        # The materializer should have written the README and the visible
+        # script side-by-side under public/checks/<id>/.
+        for deliverable in spec.deliverables:
+            readme_path = (
+                Path(bundle.root_dir) / "public" / "checks" / deliverable.id / "README.md"
+            )
+            visible_script_path = (
+                Path(bundle.root_dir) / "public" / "checks" / deliverable.id / "run_visible_checks.py"
+            )
+            assert readme_path.exists(), f"expected README at {readme_path}"
+            assert visible_script_path.exists(), f"expected script at {visible_script_path}"
+            # The README must reference the script using the sibling-relative
+            # name ('run_visible_checks.py') so the validator's reference
+            # resolution lands on the actual file.
+            readme_content = readme_path.read_text(encoding="utf-8")
+            assert "run_visible_checks.py" in readme_content
+            # And it must NOT use the legacy nested 'checks/' prefix.
+            assert "checks/run_visible_checks.py" not in readme_content
+
+        # End-to-end: validator should pass these references (no
+        # starter_readme_missing_local_reference findings).
+        result = validate_materialized_bundle(spec, bundle)
+        local_ref_errors = [
+            issue for issue in result.errors
+            if issue.code == "starter_readme_missing_local_reference"
+        ]
+        assert not local_ref_errors, (
+            "Validator falsely flagged sibling 'run_visible_checks.py' as missing. "
+            f"Errors: {[i.message for i in local_ref_errors]}"
+        )

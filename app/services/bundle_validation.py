@@ -518,11 +518,18 @@ def validate_materialized_bundle(
         )
         default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
         if readme_path.exists():
+            # Resolve README references relative to the README's OWN directory,
+            # not the starter root. For shared-codebase courses the README
+            # lives at `public/checks/<id>/README.md` and its references
+            # (like `run_visible_checks.py`) are siblings in the same
+            # directory. For legacy non-shared courses the README still lives
+            # under `public/starter/<id>/` and references its `checks/`
+            # subdirectory — same rule: reference root is the README's parent.
             _validate_starter_readme(
                 errors,
                 relative_path=str(readme_path.relative_to(bundle.root_dir)),
                 content=readme_path.read_text(encoding="utf-8"),
-                reference_root=starter_root,
+                reference_root=readme_path.parent,
                 spec=spec,
                 check_local_refs=starter_repo_source not in {"", "starter_default"},
             )
