@@ -1350,5 +1350,142 @@ class TestScriptAuthoringSelfContainedPromptTests(unittest.TestCase):
         self.assertIn("REPORT_PATH", source)
 
 
+class DeterministicVisibleScriptInlinesPublicChecksTests(unittest.TestCase):
+    """Pass 12 (real cause).
+
+    The visible script that ran in the failed Python+FastAPI validation
+    came from the deterministic fallback template
+    ``render_task_agent_visible_checks_script`` — NOT from the OpenAI
+    test-script authoring service (which only runs at the authoring_tests
+    node, after authoring_runtime passes). The deterministic template was
+    written for the pre-Pass-2 layout and reads the per-deliverable
+    manifest at runtime from ``.coursegen/deliverable.json``, which lives
+    nowhere accessible to ``public/checks/<id>/run_visible_checks.py``
+    after Pass 2 (manifest moved to ``private/grader/<id>/``).
+
+    The fix is to inline ``public_checks`` as a Python literal at render
+    time, so the script is fully self-contained and never reads the
+    filesystem.
+    """
+
+    def test_visible_script_inlines_public_checks_as_python_literal(self) -> None:
+        from app.services.task_agent_starter_templates import (
+            render_task_agent_visible_checks_script,
+        )
+        sample_checks = [
+            {
+                "id": "create_thing",
+                "title": "create thing returns 200",
+                "request_method": "POST",
+                "request_path": "/things",
+                "request_body": {"name": "alpha"},
+                "expected_status": 200,
+                "expected_response_contains": ["thing_id"],
+            }
+        ]
+        script = render_task_agent_visible_checks_script(public_checks=sample_checks)
+        # The public_checks data must appear as Python literals in the
+        # rendered script, not be reached for at runtime.
+        self.assertIn("PUBLIC_CHECKS = ", script)
+        self.assertIn('"/things"', script)
+        self.assertIn('"create_thing"', script)
+        self.assertIn('"thing_id"', script)
+
+    def test_visible_script_does_not_read_manifest_at_runtime(self) -> None:
+        from app.services.task_agent_starter_templates import (
+            render_task_agent_visible_checks_script,
+        )
+        script = render_task_agent_visible_checks_script(public_checks=[])
+        # Specifically: the legacy patterns must not appear anywhere.
+        self.assertNotIn("MANIFEST_PATH", script,
+                         "Visible script must NOT reference a runtime manifest path.")
+        self.assertNotIn(".read_text(", script,
+                         "Visible script must NOT call read_text on any file.")
+        self.assertNotIn(".coursegen/deliverable.json", script,
+                         "Visible script must NOT reach for the legacy manifest path.")
+        self.assertNotIn("Path(__file__).resolve().parents", script,
+                         "Visible script must NOT compute paths from __file__.")
+
+    def test_visible_script_only_reads_BASE_URL_and_REPORT_PATH_env(self) -> None:
+        from app.services.task_agent_starter_templates import (
+            render_task_agent_visible_checks_script,
+        )
+        script = render_task_agent_visible_checks_script(public_checks=[])
+        # The only runtime inputs allowed are these two env vars.
+        env_reads = [line for line in script.splitlines() if "os.environ" in line]
+        for line in env_reads:
+            self.assertTrue(
+                "BASE_URL" in line or "REPORT_PATH" in line,
+                f"Unexpected env var read: {line!r}. Only BASE_URL and REPORT_PATH allowed.",
+            )
+
+    def test_build_task_agent_starter_files_threads_public_checks(self) -> None:
+        """``build_task_agent_starter_files`` must pass the per-deliverable
+        ``public_checks`` into the visible-script renderer so the inlined
+        literals reflect the deliverable's actual contract surface.
+        """
+        from app.domain.task_agent import (
+            CourseStructureSpec,
+            DeliverableSpec,
+            PublicCheckSpec,
+            RuntimeDependencySpec,
+            TaskAgentServiceSpec,
+            CapabilitySpec,
+            AssessmentStrategySpec,
+            ExecutionSurface,
+            WorkspaceScope,
+            ProgressionMode,
+        )
+        from app.domain.registry import PackageType, StarterType
+        from app.services.task_agent_starter_templates import (
+            build_task_agent_starter_files,
+        )
+
+        spec = TaskAgentServiceSpec(
+            title="t",
+            summary="s",
+            package_type=PackageType.progressive_codebase_course,
+            course_structure=CourseStructureSpec(
+                package_type=PackageType.progressive_codebase_course,
+                workspace_scope=WorkspaceScope.shared_course_workspace,
+                progression_mode=ProgressionMode.independent_deliverables,
+                shared_codebase=True,
+            ),
+            runtime_dependencies=RuntimeDependencySpec(
+                execution_surface=ExecutionSurface.http_service,
+                starter_type=StarterType.partial,
+            ),
+            capabilities=CapabilitySpec(),
+            assessment_strategy=AssessmentStrategySpec(),
+            deliverables=[
+                DeliverableSpec(
+                    id="deliverable_1",
+                    title="D1",
+                    objective="do d1",
+                    public_checks=[
+                        PublicCheckSpec(
+                            id="get_resource",
+                            title="GET /things/{id} returns 200",
+                            learner_goal="basic read",
+                            request_method="GET",
+                            request_path="/things/abc-123",
+                            request_body={},
+                            expected_status=200,
+                            expected_response_contains=["thing_id"],
+                        )
+                    ],
+                ),
+                DeliverableSpec(id="deliverable_2", title="D2", objective="do d2"),
+            ],
+        )
+        files = build_task_agent_starter_files(spec, "deliverable_1")
+        script = files["checks/run_visible_checks.py"]
+        # The deliverable-specific check fields must be in the script literal,
+        # not read from a manifest at runtime.
+        self.assertIn("/things/abc-123", script)
+        self.assertIn("thing_id", script)
+        self.assertIn("get_resource", script)
+
+
 if __name__ == "__main__":
     unittest.main()
