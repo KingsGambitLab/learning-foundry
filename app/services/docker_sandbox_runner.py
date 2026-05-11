@@ -344,6 +344,19 @@ class DockerSandboxRunner:
 
         shared_codebase = bool(spec.course_structure.shared_codebase)
         shared_starter_root = workspace_root / "starter"
+        # TODO(sandbox-share-boot): For shared-codebase courses, this loop still
+        # builds and boots the runtime ONCE per deliverable, against the same
+        # shared starter root. The correct shape is to boot once and execute
+        # each deliverable's per-deliverable visible check script
+        # (public/checks/<id>/run_visible_checks.py) against the single running
+        # process, then collect per-deliverable reports. The current visible
+        # check command pattern (`sh .coursegen/runtime/check_visible.sh`)
+        # routes to `checks/run_visible_checks.py` under the cwd; for shared
+        # courses, the per-deliverable visible script lives outside the cwd
+        # at public/checks/<id>/, so this loop only exercises the default
+        # template stub and not the authored per-deliverable suites. The
+        # single-boot rewrite is its own change; this pass only repairs
+        # path-correctness for non-sandbox callers.
         for deliverable in spec.deliverables:
             if shared_codebase:
                 starter_root = shared_starter_root

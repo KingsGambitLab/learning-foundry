@@ -426,9 +426,24 @@ class FakeRepoAuthoringService:
             )
         updated_files: list[str] = []
         public_root = Path(workspace.public_dir)
+        workspace_root = Path(workspace.root_dir)
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            # Shared courses share one starter root; the per-deliverable manifest
+            # lives in private/grader/<id>/deliverable.json. Legacy non-shared
+            # courses keep the per-deliverable starter subtree + manifest.
+            if shared_codebase:
+                starter_root = public_root / "starter"
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             if not manifest_path.exists():
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -550,15 +565,36 @@ class FakeTestScriptAuthoringService:
                 "",
             ]
         )
+        workspace_root = Path(workspace.root_dir)
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            visible_path = starter_root / "checks" / "run_visible_checks.py"
-            hidden_path = starter_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+            if shared_codebase:
+                visible_path = (
+                    public_root / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                hidden_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                visible_path = starter_root / "checks" / "run_visible_checks.py"
+                hidden_path = starter_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             visible_path.parent.mkdir(parents=True, exist_ok=True)
             hidden_path.parent.mkdir(parents=True, exist_ok=True)
             visible_path.write_text(passing_script, encoding="utf-8")
             hidden_path.write_text(passing_script, encoding="utf-8")
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["generated_test_scripts"] = {
                 "source": "openai_live",
@@ -590,23 +626,31 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
         success = True
         workspace_root = workspace.public_dir if workspace is not None else "/tmp/missing-workspace"
         if run.artifacts.task_agent_spec is not None and workspace is not None:
+            spec = run.artifacts.task_agent_spec
             public_dir = Path(workspace.public_dir)
-            for deliverable in run.artifacts.task_agent_spec.deliverables:
-                editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            # Shared courses keep one starter root at public/starter/; legacy
+            # non-shared courses use per-deliverable subtree public/starter/<id>/.
+            for deliverable in spec.deliverables:
+                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
+                if shared_codebase:
+                    starter_root = public_dir / "starter"
+                else:
+                    starter_root = public_dir / "starter" / deliverable.id
                 compile_targets = [
-                    public_dir / "starter" / deliverable.id / relative_path
+                    starter_root / relative_path
                     for relative_path in editable_paths
                     if relative_path.endswith(".py")
                 ]
                 content_targets = [
-                    public_dir / "starter" / deliverable.id / relative_path
+                    starter_root / relative_path
                     for relative_path in editable_paths
                     if not relative_path.endswith(".py")
                 ]
                 missing_targets = [
-                    str((public_dir / "starter" / deliverable.id / relative_path).relative_to(public_dir))
+                    str((starter_root / relative_path).relative_to(public_dir))
                     for relative_path in editable_paths
-                    if not (public_dir / "starter" / deliverable.id / relative_path).exists()
+                    if not (starter_root / relative_path).exists()
                 ]
                 try:
                     if missing_targets:
@@ -662,16 +706,21 @@ class BrokenFirstWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
         run, result = super().author_workspace(run)
         self.author_calls += 1
         if self.author_calls == 1 and run.artifacts.workspace_snapshot is not None:
-            deliverable = run.artifacts.task_agent_spec.deliverables[0]
-            editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+            spec = run.artifacts.task_agent_spec
+            deliverable = spec.deliverables[0]
+            editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
             if not editable_paths:
                 return run, result
-            broken_path = (
-                Path(run.artifacts.workspace_snapshot.public_dir)
-                / "starter"
-                / deliverable.id
-                / editable_paths[0]
-            )
+            # Shared courses share one starter root; legacy non-shared courses
+            # use per-deliverable subtree.
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            public_dir = Path(run.artifacts.workspace_snapshot.public_dir)
+            if shared_codebase:
+                broken_path = public_dir / "starter" / editable_paths[0]
+            else:
+                broken_path = (
+                    public_dir / "starter" / deliverable.id / editable_paths[0]
+                )
             broken_path.parent.mkdir(parents=True, exist_ok=True)
             broken_contents = "def broken(:\n" if broken_path.suffix == ".py" else "BROKEN_STARTER_SENTINEL\n"
             broken_path.write_text(broken_contents, encoding="utf-8")
