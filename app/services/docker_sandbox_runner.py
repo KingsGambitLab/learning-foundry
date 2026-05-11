@@ -398,6 +398,7 @@ class DockerSandboxRunner:
             runtime_image_ready = False
             current_runtime_workspace: Path | None = None
             fail_fast_triggered = False
+            dependency_services: list[dict] = []
             try:
                 manifest = self.runtime_harness._runtime_manifest(starter_root)
                 materialization = self.dependency_contract_materializer.materialize(
@@ -463,7 +464,7 @@ class DockerSandboxRunner:
                     runtime_image_ready = True
                     if self.runtime_harness._image_exists(image_name):
                         any_cached = True
-                    dependency_services = self.runtime_harness._dependency_services(runtime_workspace)
+                    dependency_services = self.runtime_harness._dependency_services(runtime_workspace) or []
                     log_coursegen_event(
                         "sandbox_deliverable_support_services_starting",
                         workflow_run_id=workflow_run_id,
@@ -554,6 +555,15 @@ class DockerSandboxRunner:
                         report_stderr = "\n".join(
                             part for part in [run_result.stderr, container_stderr or logs] if part
                         )
+                        (
+                            app_stdout_tail,
+                            app_exit_state,
+                            sidecar_diagnostics,
+                        ) = self._collect_failure_diagnostics(
+                            app_container_name=container_name,
+                            dependency_services=dependency_services,
+                            sidecar_container_prefix=container_name,
+                        )
                         deliverable_reports.append(
                             DeliverableSandboxReport(
                                 deliverable_id=deliverable.id,
@@ -576,6 +586,9 @@ class DockerSandboxRunner:
                                     logs=container_stderr or logs,
                                     default="Could not start the starter runtime container.",
                                 ),
+                                stdout_tail=app_stdout_tail,
+                                exit_state=app_exit_state,
+                                sidecar_diagnostics=sidecar_diagnostics,
                             )
                         )
                         fail_fast_triggered = fail_fast
@@ -604,7 +617,7 @@ class DockerSandboxRunner:
                     deliverable_id=deliverable.id,
                     base_url=base_url,
                 )
-                contract_passed, contract_output, contract_error = self._probe_contract_smoke(manifest, base_url)
+                contract_passed, contract_output, contract_error, contract_http_response = self._probe_contract_smoke(manifest, base_url)
                 checks_passed, check_output, check_error = self._run_visible_suite(
                     starter_root=starter_root,
                     manifest=manifest,
@@ -634,6 +647,13 @@ class DockerSandboxRunner:
                     checks_passed=checks_passed,
                     error=check_error,
                 )
+                contract_failure_diagnostics = None
+                if not contract_passed or not checks_passed:
+                    contract_failure_diagnostics = self._collect_failure_diagnostics(
+                        app_container_name=container_name,
+                        dependency_services=dependency_services,
+                        sidecar_container_prefix=container_name,
+                    )
                 deliverable_reports.append(
                         DeliverableSandboxReport(
                             deliverable_id=deliverable.id,
@@ -650,6 +670,22 @@ class DockerSandboxRunner:
                             stdout=combined_output,
                             stderr=logs,
                             error=contract_error or check_error,
+                            stdout_tail=(
+                                contract_failure_diagnostics[0]
+                                if contract_failure_diagnostics
+                                else None
+                            ),
+                            exit_state=(
+                                contract_failure_diagnostics[1]
+                                if contract_failure_diagnostics
+                                else None
+                            ),
+                            sidecar_diagnostics=(
+                                contract_failure_diagnostics[2]
+                                if contract_failure_diagnostics
+                                else None
+                            ),
+                            http_response=contract_http_response,
                         )
                     )
                 fail_fast_triggered = fail_fast and (not contract_passed or not checks_passed)
@@ -693,6 +729,7 @@ class DockerSandboxRunner:
                             logs=combined_log,
                             default="Could not build the starter runtime image.",
                         ),
+                        stdout_tail=build_stdout_tail or None,
                     )
                 )
                 fail_fast_triggered = fail_fast
@@ -717,6 +754,15 @@ class DockerSandboxRunner:
                     error=str(exc),
                 )
                 run_stderr_parts.append(f"[{deliverable.id}] {exc}\n{logs}".strip())
+                (
+                    app_stdout_tail,
+                    app_exit_state,
+                    sidecar_diagnostics,
+                ) = self._collect_failure_diagnostics(
+                    app_container_name=container_name,
+                    dependency_services=dependency_services,
+                    sidecar_container_prefix=container_name,
+                )
                 deliverable_reports.append(
                     DeliverableSandboxReport(
                         deliverable_id=deliverable.id,
@@ -742,6 +788,9 @@ class DockerSandboxRunner:
                             logs=container_stderr or logs,
                             default=str(exc),
                         ),
+                        stdout_tail=app_stdout_tail,
+                        exit_state=app_exit_state,
+                        sidecar_diagnostics=sidecar_diagnostics,
                     )
                 )
                 fail_fast_triggered = fail_fast
@@ -982,6 +1031,7 @@ class DockerSandboxRunner:
                                     logs=combined_log,
                                     default="Could not build the starter runtime image.",
                                 ),
+                                stdout_tail=build_stdout_tail or None,
                             )
                         )
                     return self._finalize_starter_result(
@@ -1100,6 +1150,15 @@ class DockerSandboxRunner:
                     report_stderr = "\n".join(
                         part for part in [run_result.stderr, container_stderr or logs] if part
                     )
+                    (
+                        app_stdout_tail,
+                        app_exit_state,
+                        sidecar_diagnostics,
+                    ) = self._collect_failure_diagnostics(
+                        app_container_name=container_name,
+                        dependency_services=dependency_services,
+                        sidecar_container_prefix=container_name,
+                    )
                     for deliverable in spec.deliverables:
                         deliverable_reports.append(
                             DeliverableSandboxReport(
@@ -1125,6 +1184,9 @@ class DockerSandboxRunner:
                                     logs=container_stderr or logs,
                                     default="Could not start the starter runtime container.",
                                 ),
+                                stdout_tail=app_stdout_tail,
+                                exit_state=app_exit_state,
+                                sidecar_diagnostics=sidecar_diagnostics,
                             )
                         )
                     return self._finalize_starter_result(
@@ -1172,6 +1234,15 @@ class DockerSandboxRunner:
                     # first deliverable so the operator sees the failure
                     # without N copies of the same boot error.
                     primary = spec.deliverables[0]
+                    (
+                        app_stdout_tail,
+                        app_exit_state,
+                        sidecar_diagnostics,
+                    ) = self._collect_failure_diagnostics(
+                        app_container_name=container_name,
+                        dependency_services=dependency_services,
+                        sidecar_container_prefix=container_name,
+                    )
                     deliverable_reports.append(
                         DeliverableSandboxReport(
                             deliverable_id=primary.id,
@@ -1193,6 +1264,9 @@ class DockerSandboxRunner:
                                 logs=container_stderr or logs,
                                 default=str(exc),
                             ),
+                            stdout_tail=app_stdout_tail,
+                            exit_state=app_exit_state,
+                            sidecar_diagnostics=sidecar_diagnostics,
                         )
                     )
                     return self._finalize_starter_result(
@@ -1261,6 +1335,17 @@ class DockerSandboxRunner:
             run_stderr_parts.append(f"[shared] {exc}\n{logs}".strip())
             if not deliverable_reports and not boot_failure_reported:
                 primary = spec.deliverables[0]
+                (
+                    app_stdout_tail,
+                    app_exit_state,
+                    sidecar_diagnostics,
+                ) = self._collect_failure_diagnostics(
+                    app_container_name=container_name,
+                    dependency_services=(
+                        dependency_services if "dependency_services" in locals() else None
+                    ),
+                    sidecar_container_prefix=container_name,
+                )
                 deliverable_reports.append(
                     DeliverableSandboxReport(
                         deliverable_id=primary.id,
@@ -1287,6 +1372,9 @@ class DockerSandboxRunner:
                             logs=container_stderr or logs,
                             default=str(exc),
                         ),
+                        stdout_tail=app_stdout_tail,
+                        exit_state=app_exit_state,
+                        sidecar_diagnostics=sidecar_diagnostics,
                     )
                 )
         finally:
@@ -1418,7 +1506,7 @@ class DockerSandboxRunner:
             deliverable_id=deliverable.id,
             base_url=base_url,
         )
-        contract_passed, contract_output, contract_error = self._probe_contract_smoke(
+        contract_passed, contract_output, contract_error, contract_http_response = self._probe_contract_smoke(
             manifest, base_url
         )
 
@@ -1487,6 +1575,7 @@ class DockerSandboxRunner:
             stdout=combined_output,
             stderr="",
             error=contract_error or check_error,
+            http_response=contract_http_response,
         )
         log_coursegen_event(
             "sandbox_deliverable_completed",
@@ -1517,31 +1606,71 @@ class DockerSandboxRunner:
         cache_key = self._workspace_cache_key(workspace_root)
         return f"{self.cache_namespace}:{cache_key[:24]}"
 
-    def _probe_contract_smoke(self, manifest: dict, base_url: str) -> tuple[bool, str, str | None]:
+    def _probe_contract_smoke(
+        self, manifest: dict, base_url: str
+    ) -> tuple[bool, str, str | None, dict | None]:
+        """Run each manifest-declared public check against the booted app.
+
+        Returns ``(passed, summary_text, error_message, http_response)``.
+        The last element (Pass 8) captures the FIRST failed HTTP exchange
+        verbatim so the LLM sees the response body — not just the
+        ``HTTP 500`` status. Body / headers / status / request_method /
+        request_path / request_body are all preserved so repair has the
+        full canonical diagnostic for contract failures.
+        """
         public_checks = manifest.get("public_checks") or []
         if not public_checks:
-            return False, "No public checks were configured for this deliverable.", "No public checks were configured."
+            return (
+                False,
+                "No public checks were configured for this deliverable.",
+                "No public checks were configured.",
+                None,
+            )
         contract_passed = True
         lines: list[str] = []
+        first_failure: dict | None = None
         for check in public_checks:
             if not isinstance(check, dict):
                 continue
             title = str(check.get("title") or check.get("request_path") or "visible check")
             method = str(check.get("request_method") or "POST").upper()
             request_path = str(check.get("request_path") or "").strip()
+            request_body = check.get("request_body") or None
             if not request_path.startswith("/"):
                 contract_passed = False
                 lines.append(f"[FAIL] {title}: invalid request path")
                 continue
             try:
-                response = self._json_request(method, f"{base_url}{request_path}", check.get("request_body") or None)
+                self._json_request(method, f"{base_url}{request_path}", request_body)
             except urllib.error.HTTPError as exc:
                 contract_passed = False
+                response_body = self._read_http_error_body(exc)
+                response_headers = self._http_error_headers(exc)
                 lines.append(f"[FAIL] {title}: HTTP {exc.code}")
+                if response_body:
+                    lines.append(f"  response: {response_body[:500]}")
+                if first_failure is None:
+                    first_failure = {
+                        "request_method": method,
+                        "request_path": request_path,
+                        "request_body": request_body,
+                        "response_status": exc.code,
+                        "response_headers": response_headers,
+                        "response_body_text": response_body,
+                    }
                 continue
             except Exception as exc:  # noqa: BLE001
                 contract_passed = False
                 lines.append(f"[FAIL] {title}: {exc}")
+                if first_failure is None:
+                    first_failure = {
+                        "request_method": method,
+                        "request_path": request_path,
+                        "request_body": request_body,
+                        "response_status": None,
+                        "response_headers": None,
+                        "response_body_text": str(exc),
+                    }
                 continue
 
             expected_status = int(check.get("expected_status") or 200)
@@ -1554,8 +1683,45 @@ class DockerSandboxRunner:
         if contract_passed:
             lines.append("")
             lines.append("Starter deliverable kept the public contract stable in Docker.")
-            return True, "\n".join(lines), None
-        return False, "\n".join(lines), "One or more starter smoke checks could not exercise the published contract."
+            return True, "\n".join(lines), None, None
+        return (
+            False,
+            "\n".join(lines),
+            "One or more starter smoke checks could not exercise the published contract.",
+            first_failure,
+        )
+
+    def _read_http_error_body(self, exc: urllib.error.HTTPError) -> str:
+        """Best-effort verbatim read of the HTTP error body."""
+        body: bytes | None = None
+        try:
+            body = exc.read() if hasattr(exc, "read") else None
+        except Exception:  # noqa: BLE001
+            body = None
+        if body is None:
+            fp = getattr(exc, "fp", None)
+            if fp is not None:
+                try:
+                    body = fp.read()
+                except Exception:  # noqa: BLE001
+                    body = None
+        if not body:
+            return ""
+        if isinstance(body, bytes):
+            try:
+                return body.decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                return body.decode("latin-1", errors="replace")
+        return str(body)
+
+    def _http_error_headers(self, exc: urllib.error.HTTPError) -> dict | None:
+        headers = getattr(exc, "headers", None)
+        if headers is None:
+            return None
+        try:
+            return {key: value for key, value in headers.items()}
+        except Exception:  # noqa: BLE001
+            return None
 
     def _run_visible_suite(
         self,
@@ -1627,6 +1793,101 @@ class DockerSandboxRunner:
             if command:
                 return command
         return list(fallback)
+
+    def _collect_failure_diagnostics(
+        self,
+        *,
+        app_container_name: str | None,
+        dependency_services: list[dict] | None,
+        sidecar_container_prefix: str | None,
+    ) -> tuple[str | None, dict | None, dict[str, dict] | None]:
+        """Capture the structured diagnostic surface for a failed deliverable.
+
+        Returns ``(app_stdout_tail, app_exit_state, sidecar_diagnostics)``:
+
+        - ``app_stdout_tail``: last 100 lines of the app container's stdout
+          (framework boot logs: Spring Boot, gunicorn, structured loggers).
+          The harness already captures stderr separately into
+          ``report.stderr``; stdout was the previous blind spot.
+        - ``app_exit_state``: ``{exit_code, oom_killed, status, error}`` from
+          ``docker inspect``. Surfaces OOM kills and other non-stderr exit
+          reasons.
+        - ``sidecar_diagnostics``: ``{service_id: {stderr_tail, stdout_tail,
+          exit_state}}`` for every sidecar started for this deliverable. The
+          canonical example: app reports "connection refused", but postgres
+          was OOMKilled — the real cause lives in the sidecar's diagnostics.
+        """
+        def _coerce_text(value: object) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                stripped = value.strip()
+                return stripped or None
+            return None
+
+        def _coerce_state(value: object) -> dict | None:
+            return value if isinstance(value, dict) else None
+
+        app_stdout_tail: str | None = None
+        app_exit_state: dict | None = None
+        if app_container_name:
+            try:
+                app_stdout_tail = _coerce_text(
+                    self.runtime_harness._container_stdout(app_container_name)
+                )
+            except Exception:  # noqa: BLE001
+                app_stdout_tail = None
+            try:
+                app_exit_state = _coerce_state(
+                    self.runtime_harness._container_exit_state(app_container_name)
+                )
+            except Exception:  # noqa: BLE001
+                app_exit_state = None
+
+        sidecar_diagnostics: dict[str, dict] | None = None
+        if dependency_services and sidecar_container_prefix:
+            sidecar_diagnostics = {}
+            for service in dependency_services:
+                if not isinstance(service, dict):
+                    continue
+                service_id = str(service.get("service_id") or "").strip()
+                if not service_id:
+                    continue
+                try:
+                    sidecar_name = self.runtime_harness._service_container_name(
+                        sidecar_container_prefix, service_id
+                    )
+                except Exception:  # noqa: BLE001
+                    sidecar_name = None
+                if not isinstance(sidecar_name, str) or not sidecar_name:
+                    continue
+                try:
+                    stderr_tail = _coerce_text(
+                        self.runtime_harness._container_stderr(sidecar_name)
+                    )
+                except Exception:  # noqa: BLE001
+                    stderr_tail = None
+                try:
+                    stdout_tail = _coerce_text(
+                        self.runtime_harness._container_stdout(sidecar_name)
+                    )
+                except Exception:  # noqa: BLE001
+                    stdout_tail = None
+                try:
+                    exit_state = _coerce_state(
+                        self.runtime_harness._container_exit_state(sidecar_name)
+                    )
+                except Exception:  # noqa: BLE001
+                    exit_state = None
+                sidecar_diagnostics[service_id] = {
+                    "stderr_tail": stderr_tail,
+                    "stdout_tail": stdout_tail,
+                    "exit_state": exit_state,
+                }
+            if not sidecar_diagnostics:
+                sidecar_diagnostics = None
+
+        return app_stdout_tail, app_exit_state, sidecar_diagnostics
 
     def _image_build_diagnostic_line(self, build_stderr: str | None) -> str | None:
         """Return the real error line from a docker buildkit failure.

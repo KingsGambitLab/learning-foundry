@@ -347,6 +347,260 @@ class DockerSandboxRunnerTests(unittest.TestCase):
         # The generic stopped-during headline must NOT replace the diagnostic.
         self.assertNotIn("stopped during 'install' before health", summary)
 
+    def test_sandbox_runner_captures_sidecar_diagnostics_on_failure(self) -> None:
+        """When the app container fails to boot and the runtime plan has
+        sidecar services (postgres, redis), the harness must capture each
+        sidecar's stderr / stdout / exit_state into
+        ``DeliverableSandboxReport.sidecar_diagnostics`` keyed by
+        service_id, plus the app container's own stdout_tail and
+        exit_state.
+        """
+        from app.services.learner_studio_service import RuntimeImageBuildError  # noqa: F401
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+
+            runner = DockerSandboxRunner()
+            runner.runtime_harness = Mock()
+            runner.runtime_harness._allocate_port.side_effect = [
+                18001,
+                18002,
+                18003,
+                18004,
+            ]
+            runner.runtime_harness._runtime_manifest.return_value = {}
+            runner.runtime_harness._ephemeral_runtime_workspace.side_effect = (
+                lambda starter_root: nullcontext(starter_root)
+            )
+            runner.runtime_harness._workspace_runtime_image_name.return_value = (
+                "course-gen-runtime:test"
+            )
+            runner.runtime_harness._ensure_runtime_image_available.return_value = None
+            runner.runtime_harness._image_exists.return_value = True
+            runner.runtime_harness._dependency_services.return_value = [
+                {"service_id": "postgres", "container_image": "postgres:16"},
+                {"service_id": "redis", "container_image": "redis:7"},
+            ]
+            runner.runtime_harness._start_runtime_support_services.return_value = None
+            runner.runtime_harness._docker_env_args.return_value = []
+            runner.runtime_harness._app_runtime_environment.return_value = {}
+            runner.runtime_harness._runtime_shell_command.return_value = [
+                "sh",
+                "-c",
+                "echo run",
+            ]
+            runner.runtime_harness._runtime_launch_script.return_value = "echo run"
+            runner.runtime_harness._healthcheck_path.return_value = "/health"
+            runner.runtime_harness._container_logs.return_value = "app boot failed"
+            runner.runtime_harness._container_stderr.return_value = (
+                "Connection to postgres:5432 refused"
+            )
+            runner.runtime_harness._container_stdout.return_value = (
+                "Spring Boot started, attempting db connection"
+            )
+            # Container exit_state: app container exited cleanly with code 1,
+            # postgres was OOMKilled.
+            exit_states = {
+                # Per-app and per-sidecar containers
+            }
+
+            def _exit_state(name: str):
+                if "postgres" in name:
+                    return {
+                        "exit_code": 137,
+                        "oom_killed": True,
+                        "status": "exited",
+                        "error": None,
+                    }
+                if "redis" in name:
+                    return {
+                        "exit_code": 0,
+                        "oom_killed": False,
+                        "status": "running",
+                        "error": None,
+                    }
+                return {
+                    "exit_code": 1,
+                    "oom_killed": False,
+                    "status": "exited",
+                    "error": None,
+                }
+
+            runner.runtime_harness._container_exit_state.side_effect = _exit_state
+
+            def _sidecar_stderr(name: str) -> str:
+                if "postgres" in name:
+                    return "FATAL: out of memory"
+                if "redis" in name:
+                    return ""
+                return "app stderr"
+
+            def _sidecar_stdout(name: str) -> str:
+                if "postgres" in name:
+                    return ""
+                if "redis" in name:
+                    return "Ready to accept connections"
+                return "Spring Boot started, attempting db connection"
+
+            runner.runtime_harness._service_container_name.side_effect = (
+                lambda prefix, sid: f"{prefix}-{sid}"
+            )
+            runner.runtime_harness._remove_runtime_support.return_value = None
+            runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = (
+                "[coursegen-runtime-stage] "
+            )
+            runner.runtime_harness._runtime_stage_from_logs.return_value = "boot"
+            runner.runtime_harness._runtime_stage_command.return_value = []
+            runner.dependency_contract_materializer.materialize = Mock(
+                return_value=SimpleNamespace(
+                    attempted=True,
+                    succeeded=True,
+                    stdout="",
+                    stderr="",
+                    image_name="course-gen-runtime:test",
+                    synced_paths=[],
+                    command=[],
+                    return_code=0,
+                    error=None,
+                )
+            )
+
+            # Force `docker run -d` to fail (returncode != 0).
+            def _fake_run(cmd, **kwargs):
+                # Dispatch sidecar stdout/stderr capture calls (the harness's
+                # _container_stdout / _container_stderr are mocked above), so
+                # the only subprocess.run we need to handle is the actual
+                # docker run command. Return failure.
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="docker run failed"
+                )
+
+            # Route stdout/stderr capture calls through our fake stream lookups.
+            runner.runtime_harness._container_stderr.side_effect = _sidecar_stderr
+            runner.runtime_harness._container_stdout.side_effect = _sidecar_stdout
+
+            with patch(
+                "app.services.docker_sandbox_runner.subprocess.run",
+                side_effect=_fake_run,
+            ):
+                result = runner._execute_starter_harness(
+                    workspace_root=Path(workspace.public_dir),
+                    spec=spec,
+                    workflow_run_id=run.id,
+                    now=datetime.now(UTC),
+                    started=time.perf_counter(),
+                )
+
+            # The runner must have produced reports.
+            self.assertGreaterEqual(len(result.deliverable_reports), 1)
+            failed_report = next(
+                (r for r in result.deliverable_reports if not r.runtime_succeeded),
+                None,
+            )
+            self.assertIsNotNone(
+                failed_report, "Expected at least one failed deliverable report."
+            )
+            # New fields on the report:
+            self.assertIsNotNone(
+                failed_report.sidecar_diagnostics,
+                "sidecar_diagnostics should be populated on failure",
+            )
+            self.assertIn("postgres", failed_report.sidecar_diagnostics)
+            self.assertIn("redis", failed_report.sidecar_diagnostics)
+            postgres_diag = failed_report.sidecar_diagnostics["postgres"]
+            # Each sidecar carries stderr_tail, stdout_tail, exit_state.
+            self.assertIn("stderr_tail", postgres_diag)
+            self.assertIn("stdout_tail", postgres_diag)
+            self.assertIn("exit_state", postgres_diag)
+            self.assertIn("out of memory", postgres_diag["stderr_tail"])
+            self.assertTrue(postgres_diag["exit_state"]["oom_killed"])
+            redis_diag = failed_report.sidecar_diagnostics["redis"]
+            self.assertIn("Ready to accept connections", redis_diag["stdout_tail"])
+
+            # App-container exit_state and stdout_tail are also set.
+            self.assertIsNotNone(failed_report.exit_state)
+            self.assertEqual(failed_report.exit_state["exit_code"], 1)
+            self.assertIsNotNone(failed_report.stdout_tail)
+            self.assertIn("Spring Boot", failed_report.stdout_tail)
+
+    def test_contract_smoke_captures_response_body_verbatim(self) -> None:
+        """When a contract probe gets a non-2xx HTTP response, the runner
+        must capture the verbatim response body / status / headers /
+        request_method / request_path / request_body into
+        ``DeliverableSandboxReport.http_response``. The current generic
+        '[FAIL] ... HTTP 500' line loses the response body.
+        """
+        runner = DockerSandboxRunner()
+
+        manifest = {
+            "public_checks": [
+                {
+                    "title": "ledger debit returns balance",
+                    "request_method": "POST",
+                    "request_path": "/ledger/debit",
+                    "request_body": {"account_id": "a1", "amount": 100},
+                    "expected_status": 200,
+                }
+            ]
+        }
+
+        class _Resp:
+            def __init__(self):
+                self.status = 500
+                self.headers = {"content-type": "application/json"}
+
+            def read(self):
+                return (
+                    b'{"error": "NoSuchAccount", "detail": "account a1 not seeded"}'
+                )
+
+        class _HTTPError(Exception):
+            def __init__(self):
+                self.code = 500
+                self.headers = {"content-type": "application/json"}
+                self.fp = SimpleNamespace(
+                    read=lambda: b'{"error": "NoSuchAccount", '
+                    b'"detail": "account a1 not seeded"}'
+                )
+
+            def read(self):
+                return (
+                    b'{"error": "NoSuchAccount", "detail": "account a1 not seeded"}'
+                )
+
+        import urllib.error
+
+        http_error = urllib.error.HTTPError(
+            url="http://127.0.0.1:18001/ledger/debit",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,
+            fp=SimpleNamespace(
+                read=lambda: b'{"error": "NoSuchAccount", '
+                b'"detail": "account a1 not seeded"}'
+            ),
+        )
+
+        with patch.object(runner, "_json_request", side_effect=http_error):
+            passed, output, error, response = runner._probe_contract_smoke(
+                manifest, "http://127.0.0.1:18001"
+            )
+
+        self.assertFalse(passed)
+        self.assertIsNotNone(response)
+        self.assertEqual(response["response_status"], 500)
+        self.assertEqual(response["request_method"], "POST")
+        self.assertEqual(response["request_path"], "/ledger/debit")
+        self.assertIn("NoSuchAccount", response["response_body_text"])
+        self.assertEqual(
+            response["request_body"], {"account_id": "a1", "amount": 100}
+        )
+
     def test_summary_falls_back_to_stage_label_when_no_text_available(self) -> None:
         runner = DockerSandboxRunner()
 
@@ -446,7 +700,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
                         returncode=0, stdout="container-id", stderr=""
                     ),
                 ),
-                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None)),
+                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None, None)),
             ):
                 result = runner._execute_starter_harness(
                     workspace_root=Path(workspace.public_dir),
@@ -588,7 +842,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
                         returncode=0, stdout="container-id", stderr=""
                     ),
                 ),
-                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None)),
+                patch.object(runner, "_probe_contract_smoke", return_value=(True, "", None, None)),
             ):
                 result = runner._execute_starter_harness(
                     workspace_root=Path(workspace.public_dir),

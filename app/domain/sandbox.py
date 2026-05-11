@@ -48,6 +48,12 @@ class DeliverableSandboxReport(BaseModel):
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    # Extended diagnostic surface (Pass 8). All optional so legacy callers
+    # and tests that construct a minimal report keep working.
+    stdout_tail: str | None = None
+    exit_state: dict | None = None
+    sidecar_diagnostics: dict[str, dict] | None = None
+    http_response: dict | None = None
 
 
 class SandboxExecutionResult(BaseModel):
