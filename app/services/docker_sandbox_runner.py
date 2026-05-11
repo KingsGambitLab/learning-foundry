@@ -333,6 +333,7 @@ class DockerSandboxRunner:
         all_builds_succeeded = True
         all_runs_succeeded = True
         any_cached = False
+        fail_fast = bool(spec.course_structure.shared_codebase)
         log_coursegen_event(
             "sandbox_starter_harness_started",
             workflow_run_id=workflow_run_id,
@@ -375,6 +376,7 @@ class DockerSandboxRunner:
             logs = ""
             runtime_image_ready = False
             current_runtime_workspace: Path | None = None
+            fail_fast_triggered = False
             try:
                 manifest = self.runtime_harness._runtime_manifest(starter_root)
                 materialization = self.dependency_contract_materializer.materialize(
@@ -423,6 +425,7 @@ class DockerSandboxRunner:
                             or "Dependency contract materialization failed before runtime boot.",
                         )
                     )
+                    fail_fast_triggered = fail_fast
                     continue
                 with self.runtime_harness._ephemeral_runtime_workspace(starter_root) as runtime_workspace:
                     current_runtime_workspace = runtime_workspace
@@ -550,6 +553,7 @@ class DockerSandboxRunner:
                                 ),
                             )
                         )
+                        fail_fast_triggered = fail_fast
                         continue
 
                     healthcheck_path = self.runtime_harness._healthcheck_path(runtime_workspace, spec)
@@ -623,6 +627,7 @@ class DockerSandboxRunner:
                             error=contract_error or check_error,
                         )
                     )
+                fail_fast_triggered = fail_fast and (not contract_passed or not checks_passed)
                 log_coursegen_event(
                     "sandbox_deliverable_completed",
                     workflow_run_id=workflow_run_id,
@@ -677,12 +682,21 @@ class DockerSandboxRunner:
                         ),
                     )
                 )
+                fail_fast_triggered = fail_fast
             finally:
                 self.runtime_harness._remove_runtime_support(
                     starter_root,
                     network_name=network_name,
                     container_prefix=container_name,
                 )
+            if fail_fast_triggered:
+                log_coursegen_event(
+                    "sandbox_fail_fast_stopped_after_deliverable",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    shared_codebase=spec.course_structure.shared_codebase,
+                )
+                break
 
         success = all_builds_succeeded and all_runs_succeeded and bool(deliverable_reports)
         result = SandboxExecutionResult(
