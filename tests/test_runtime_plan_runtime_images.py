@@ -39,6 +39,12 @@ def _build_spec(
         package_type_hint=PackageType.progressive_codebase_course,
     )
     assert inferred.design_spec is not None
+    # In production, primary_editable_paths is authored by the OpenAI task-agent
+    # call (which decides based on the chosen stack). These tests bypass that
+    # call, so seed a placeholder editable file so the validation downstream of
+    # the scaffold builder has something to bind primary_editable_paths to.
+    if not inferred.design_spec.runtime_dependencies.editable_files:
+        inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
     spec, _origin = build_task_agent_scaffold(
         title=title,
         summary=summary,

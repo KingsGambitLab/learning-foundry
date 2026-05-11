@@ -117,6 +117,12 @@ def _materialized_run(temp_dir: str):
         package_type_hint=intake.package_type_hint,
     )
     assert inferred.design_spec is not None
+    # In production, primary_editable_paths is authored by the OpenAI task-agent
+    # call (model picks files based on the chosen stack). These tests bypass that
+    # call, so seed a FastAPI-shaped editable file at the design-spec level
+    # before the run is created — every downstream artifact (manifest, brief,
+    # starter surface) reads from this.
+    inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
@@ -130,6 +136,55 @@ def _materialized_run(temp_dir: str):
 
 
 class AuthoringPayloadTests(unittest.TestCase):
+    def test_runtime_entrypoint_heuristic_is_not_used_for_editable_files(self) -> None:
+        """The initial assignment design must not hardcode a language-specific
+        primary editable path. The model is responsible for authoring
+        `learner_starter_surface.primary_editable_paths` based on the actual
+        stack and the files it produces.
+        """
+        from app.services import assignment_design_inference
+        from app.services.assignment_design_inference import infer_assignment_design
+
+        self.assertFalse(
+            hasattr(assignment_design_inference, "runtime_entrypoint_for_stack"),
+            "runtime_entrypoint_for_stack is a banned language heuristic; "
+            "delete it and let the model author primary_editable_paths instead.",
+        )
+
+        inferred = infer_assignment_design(
+            title="Payment intents",
+            problem_statement="Build a payment intent service.",
+            implementation_language="java",
+            application_framework="spring-boot",
+            primary_database="postgres",
+            cache_backend="redis",
+        )
+        assert inferred.design_spec is not None
+        self.assertEqual(
+            list(inferred.design_spec.runtime_dependencies.editable_files),
+            [],
+            "Initial design should not pre-commit a language-specific editable file; "
+            "leave it empty for the authoring model to fill in.",
+        )
+
+    def test_starter_surface_customization_accepts_primary_editable_paths(self) -> None:
+        """The customization patch must let the model author the primary editable
+        paths so they reflect the real chosen stack and authored layout.
+        """
+        from app.services.openai_task_agent_authoring import StarterSurfaceCustomization
+
+        surface = StarterSurfaceCustomization(
+            starter_summary="Implement the dispute ledger flow.",
+            primary_editable_paths=[
+                "src/main/java/com/coursegen/payments/DisputeLedgerApplication.java"
+            ],
+        )
+
+        self.assertEqual(
+            surface.primary_editable_paths,
+            ["src/main/java/com/coursegen/payments/DisputeLedgerApplication.java"],
+        )
+
     def test_repo_authoring_writes_shebang_files_as_executable(self) -> None:
         import os
         import stat

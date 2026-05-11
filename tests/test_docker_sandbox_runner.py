@@ -49,6 +49,8 @@ def _make_run(temp_dir: Path):
         data_sources=intake.data_sources,
     )
     assert inferred.design_spec is not None
+    if not inferred.design_spec.runtime_dependencies.editable_files:
+        inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,

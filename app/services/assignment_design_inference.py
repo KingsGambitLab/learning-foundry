@@ -597,29 +597,6 @@ def infer_package_manager(
     return None
 
 
-def runtime_entrypoint_for_stack(
-    *,
-    implementation_language: str | None,
-    application_framework: str | None,
-) -> str:
-    normalized_language = (implementation_language or "").strip().lower() or None
-    normalized_framework = (application_framework or "").strip().lower() or None
-
-    if normalized_language == "python":
-        if normalized_framework == "django":
-            return "manage.py"
-        return "app.py"
-    if normalized_language == "typescript":
-        return "src/main.ts"
-    if normalized_language == "javascript":
-        return "src/main.js"
-    if normalized_language == "go":
-        return "main.go"
-    if normalized_language == "rust":
-        return "src/main.rs"
-    return "app.py"
-
-
 def runtime_container_image_for_stack(
     *,
     implementation_language: str | None,
@@ -740,11 +717,6 @@ def build_project_runtime_plan(
         if allow_inference
         else None
     )
-    entrypoint_path = runtime_entrypoint_for_stack(
-        implementation_language=implementation_language,
-        application_framework=application_framework,
-    )
-
     services: list[ProjectRuntimeServiceSpec] = [
         ProjectRuntimeServiceSpec(
             service_id="app",
@@ -752,7 +724,7 @@ def build_project_runtime_plan(
             technology=application_framework or implementation_language,
                 version_hint=resolved_framework_version or resolved_language_version,
                 package_manager=resolved_package_manager,
-                entrypoint_path=entrypoint_path,
+                entrypoint_path=None,
                 container_image=runtime_container_image_for_stack(
                     implementation_language=implementation_language,
                     language_version=resolved_language_version,
@@ -997,11 +969,7 @@ def build_assignment_design(
     local_run_command = fallback_local_run_command
     preview_command = fallback_preview_command
     visible_check_command = fallback_visible_check_command
-    editable_files = (
-        [app_service.entrypoint_path]
-        if app_service is not None and app_service.entrypoint_path
-        else []
-    )
+    editable_files: list[str] = []
     visible_fixture_files = [
         source.workspace_path
         for source in source_specs

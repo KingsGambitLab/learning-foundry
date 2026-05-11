@@ -172,6 +172,12 @@ def _make_run(temp_dir: Path):
         data_sources=intake.data_sources,
     )
     assert inferred.design_spec is not None
+    # In production, primary_editable_paths is authored by the OpenAI task-agent
+    # call. These tests bypass that call, so seed a FastAPI-shaped editable file
+    # at the design-spec level — downstream artifacts derive primary_editable_paths
+    # and brief.files_to_edit from runtime_dependencies.editable_files.
+    if not inferred.design_spec.runtime_dependencies.editable_files:
+        inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
