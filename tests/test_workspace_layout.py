@@ -196,6 +196,58 @@ class SharedCodebaseWorkspaceLayoutTests(unittest.TestCase):
                     f"public/starter/.coursegen/runtime/{script_name} must exist on the shared root",
                 )
 
+    def test_shared_course_manifest_lives_at_starter_root_once(self) -> None:
+        """`public/starter/.coursegen/course.json` is a single shared manifest
+        carrying the course-level fields that previously got duplicated into
+        every `private/grader/<id>/deliverable.json`. After Pass 2 it must
+        exist once at the shared starter root and carry one consistent
+        `runtime_plan` for the whole course."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(workspace)
+
+            course_manifest_path = (
+                Path(workspace.public_dir) / "starter" / ".coursegen" / "course.json"
+            )
+            self.assertTrue(
+                course_manifest_path.exists(),
+                f"Shared course manifest must live at {course_manifest_path}",
+            )
+            course_payload = json.loads(course_manifest_path.read_text(encoding="utf-8"))
+            self.assertIn(
+                "runtime_plan",
+                course_payload,
+                "Shared course manifest must carry the course runtime_plan once.",
+            )
+            self.assertIn(
+                "runtime_dependencies",
+                course_payload,
+                "Shared course manifest must carry runtime_dependencies once.",
+            )
+            self.assertIn(
+                "course_structure",
+                course_payload,
+                "Shared course manifest must carry course_structure once.",
+            )
+            self.assertIn(
+                "public_endpoints",
+                course_payload,
+                "Shared course manifest must carry public_endpoints once.",
+            )
+            self.assertEqual(
+                course_payload["runtime_plan"],
+                spec.project_contract.runtime_plan.model_dump(mode="json"),
+                "Shared course runtime_plan must match the authoritative spec value.",
+            )
+            self.assertEqual(
+                course_payload["runtime_dependencies"],
+                spec.runtime_dependencies.model_dump(mode="json"),
+                "Shared course runtime_dependencies must match the authoritative spec value.",
+            )
+
 
 class ProgressiveBundleSharedRootTests(unittest.TestCase):
     """The shared-codebase progressive authoring bundle must write
