@@ -1628,6 +1628,78 @@ class DockerSandboxRunner:
                 return command
         return list(fallback)
 
+    def _image_build_diagnostic_line(self, build_stderr: str | None) -> str | None:
+        """Return the real error line from a docker buildkit failure.
+
+        Buildkit emits structured failure blocks like::
+
+            #10 0.5 go: ... requires go >= 1.23 (running go 1.22.4)
+            #10 ERROR: process did not complete successfully: exit code: 1
+            ------
+             > [6/8] RUN sh .coursegen/runtime/install.sh:
+            0.5 go: ... requires go >= 1.23 (running go 1.22.4)
+            ------
+            Dockerfile:14
+            --------------------
+              14 | >>> RUN sh .coursegen/runtime/install.sh
+            --------------------
+            ERROR: failed to build: failed to solve: process did not complete successfully: exit code: 1
+
+        The LAST line is a generic footer; the canonical signal is the
+        ``error:`` / ``ERROR:`` line BEFORE the first ``------`` (or
+        ``--------------------``) separator. We walk the stream looking
+        for the last ``error``-bearing line that appears before any
+        separator. Falls back to the last non-blank line (Pass 7
+        behaviour) when no separator is present, so non-buildkit build
+        failures still get a useful headline.
+        """
+        if not build_stderr:
+            return None
+        text = build_stderr.strip()
+        if not text:
+            return None
+        lines = text.splitlines()
+        first_sep_index: int | None = None
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if stripped and set(stripped) <= {"-"} and len(stripped) >= 3:
+                first_sep_index = idx
+                break
+        if first_sep_index is None:
+            # No buildkit-style separator: fall back to Pass 7 tail behaviour
+            # — pick the last non-blank line that looks error-bearing.
+            non_blank = [line for line in lines if line.strip()]
+            if not non_blank:
+                return None
+            for candidate in reversed(non_blank):
+                lowered = candidate.lower()
+                if "error" in lowered or "fail" in lowered:
+                    return candidate.strip()
+            return non_blank[-1].strip()
+        # Buildkit case: walk the lines BEFORE the first separator and pick
+        # the last one that looks like a real error (contains 'error',
+        # 'requires', or 'cannot'). Skip the generic 'process did not
+        # complete successfully' wrapper — it's always present and useless.
+        before = [line for line in lines[:first_sep_index] if line.strip()]
+        for candidate in reversed(before):
+            lowered = candidate.lower()
+            if "did not complete successfully" in lowered:
+                continue
+            if (
+                "error" in lowered
+                or "requires" in lowered
+                or "cannot" in lowered
+                or "fail" in lowered
+                or "not found" in lowered
+                or "no such" in lowered
+            ):
+                return candidate.strip()
+        # Nothing useful before the separator: return the last non-blank
+        # line before the separator anyway (better than the footer).
+        if before:
+            return before[-1].strip()
+        return None
+
     def _summarize_stage_failure(
         self,
         *,
@@ -1644,21 +1716,28 @@ class DockerSandboxRunner:
         deliverable failed at which stage, plus a ~3-line tail teaser. The
         full stderr is the canonical diagnostic.
 
-        Replaces previous per-stage line-picking heuristics that had to be
-        patched for every new ecosystem footer (buildkit, maven, Go
-        toolchain, etc.).
+        ``image_build`` is the one stage that needs special handling: docker
+        buildkit emits a generic ``failed to solve`` footer AFTER the real
+        ``RUN`` step error. For that stage we use
+        :meth:`_image_build_diagnostic_line` to walk past the footer to the
+        real cause. Every other stage's canonical signal is at the tail of
+        stderr already.
         """
         stage_label = (
             failed_stage.value.replace("_", " ")
             if failed_stage is not None
             else "runtime"
         )
-        # Prefer the container's stderr/logs (more focused, since the harness
-        # now feeds stderr-only here) over an opaque exception string. Fall
-        # back to whatever caller passed if logs are empty.
         source = (logs or error_text or "").strip()
         if not source:
             return f"{deliverable_id} failed during {stage_label}."
+        if failed_stage == SandboxFailureStage.image_build:
+            diagnostic = self._image_build_diagnostic_line(source)
+            if diagnostic:
+                return f"{deliverable_id} failed during {stage_label}: {diagnostic}"
+        # Prefer the container's stderr/logs (more focused, since the harness
+        # now feeds stderr-only here) over an opaque exception string. Fall
+        # back to whatever caller passed if logs are empty.
         tail_lines = [line for line in source.splitlines() if line.strip()][-3:]
         teaser = " | ".join(tail_lines)
         return f"{deliverable_id} failed during {stage_label}: {teaser}"

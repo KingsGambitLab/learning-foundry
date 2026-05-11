@@ -61,6 +61,98 @@ def _make_run(temp_dir: Path):
 
 
 class DockerSandboxRunnerTests(unittest.TestCase):
+    def test_image_build_diagnostic_line_walks_past_buildkit_footer(self) -> None:
+        """The buildkit footer (`failed to solve: process did not complete
+        successfully`) is generic — the REAL diagnostic is the last
+        ``ERROR:`` line BEFORE the ``------`` separator block. The
+        helper must find it.
+        """
+        runner = DockerSandboxRunner()
+
+        build_stderr = "\n".join(
+            [
+                "#10 [6/8] RUN sh .coursegen/runtime/install.sh",
+                "#10 0.4 go: downloading github.com/rogpeppe/go-internal v1.14.1",
+                "#10 0.5 go: github.com/rogpeppe/go-internal@v1.14.1 requires go >= 1.23 (running go 1.22.4)",
+                "#10 ERROR: process \"/bin/sh -c sh .coursegen/runtime/install.sh\" did not complete successfully: exit code: 1",
+                "------",
+                " > [6/8] RUN sh .coursegen/runtime/install.sh:",
+                "0.5 go: github.com/rogpeppe/go-internal@v1.14.1 requires go >= 1.23 (running go 1.22.4)",
+                "------",
+                "Dockerfile:14",
+                "--------------------",
+                "  12 |     ",
+                "  13 |     COPY . .",
+                "  14 | >>> RUN sh .coursegen/runtime/install.sh",
+                "  15 |     ",
+                "  16 |     CMD [\"sh\", \"-c\", \"sh .coursegen/runtime/run.sh\"]",
+                "--------------------",
+                "ERROR: failed to build: failed to solve: process \"/bin/sh -c sh .coursegen/runtime/install.sh\" did not complete successfully: exit code: 1",
+            ]
+        )
+
+        line = runner._image_build_diagnostic_line(build_stderr)
+
+        self.assertIsNotNone(line)
+        # The real cause must be selected, not the generic footer.
+        self.assertIn("requires go >= 1.23", line)
+        self.assertNotIn("failed to solve", line)
+
+    def test_image_build_diagnostic_line_falls_back_to_tail_without_separator(self) -> None:
+        """Without ``------`` separators, fall back to the last non-blank
+        ERROR-ish line (Pass 7 behaviour)."""
+        runner = DockerSandboxRunner()
+
+        build_stderr = "\n".join(
+            [
+                "Sending build context to Docker daemon  1.234kB",
+                "Step 5/10 : RUN apt-get install -y nope",
+                "ERROR: unable to locate package nope",
+            ]
+        )
+
+        line = runner._image_build_diagnostic_line(build_stderr)
+
+        self.assertIsNotNone(line)
+        self.assertIn("unable to locate package nope", line)
+
+    def test_image_build_diagnostic_line_returns_none_for_empty(self) -> None:
+        runner = DockerSandboxRunner()
+        self.assertIsNone(runner._image_build_diagnostic_line(""))
+        self.assertIsNone(runner._image_build_diagnostic_line(None))
+
+    def test_summarize_stage_failure_for_image_build_uses_diagnostic_line(self) -> None:
+        """For image_build failures with a buildkit ``------`` separator
+        present, _summarize_stage_failure must surface the REAL error
+        (the line before the separator block) instead of the buildkit
+        ``failed to solve`` footer that comes after.
+        """
+        runner = DockerSandboxRunner()
+
+        build_stderr = "\n".join(
+            [
+                "#10 0.4 go: downloading github.com/rogpeppe/go-internal v1.14.1",
+                "#10 0.5 go: github.com/rogpeppe/go-internal@v1.14.1 requires go >= 1.23 (running go 1.22.4)",
+                "#10 ERROR: process did not complete successfully: exit code: 1",
+                "--------------------",
+                "  14 | >>> RUN sh .coursegen/runtime/install.sh",
+                "--------------------",
+                "ERROR: failed to build: failed to solve: process \"/bin/sh -c sh .coursegen/runtime/install.sh\" did not complete successfully: exit code: 1",
+            ]
+        )
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.image_build,
+            error_text="Docker build failed (exit 1).",
+            logs=build_stderr,
+            default="image build failed",
+        )
+
+        self.assertIn("deliverable_1 failed during image build", summary)
+        # Headline must contain the real Go diagnostic.
+        self.assertIn("requires go >= 1.23", summary)
+
     def test_image_build_failure_summary_includes_buildkit_diagnostic(self) -> None:
         """For docker buildkit failures, the stderr tail naturally contains
         the real diagnostic (ERROR: ... checksum/not found / requires X / ...).
