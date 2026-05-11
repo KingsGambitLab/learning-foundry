@@ -382,5 +382,314 @@ class ProgressiveBundleSharedRootTests(unittest.TestCase):
                 )
 
 
+class Pass5CallSiteShareCodebasePathTests(unittest.TestCase):
+    """Pass 5: every caller that constructs `public/starter/<deliverable.id>` must
+    branch on shared_codebase. For shared-codebase courses the visible scripts live
+    at `public/checks/<id>/run_visible_checks.py` and the hidden scripts at
+    `private/grader/<id>/run_hidden_checks.py`; the shared code lives at
+    `public/starter/` (no deliverable.id segment).
+    """
+
+    def test_authoring_tests_node_resolves_visible_path_under_public_checks(self) -> None:
+        """`_authoring_tests_node` in `langgraph_assignment_graph.py` must read
+        the visible/hidden check scripts from the shared layout (public/checks/<id>/
+        and private/grader/<id>/) and NOT from public/starter/<id>/.
+
+        Verifies the positive path: with the new layout fully materialized, the
+        node must pass (no missing-scripts finding). With the current code that
+        reads public/starter/<id>/checks/run_visible_checks.py, this fails because
+        that path never exists in the new layout.
+        """
+        from app.services.docker_sandbox_runner import DockerSandboxRunner
+        from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
+        from app.services.openai_test_script_authoring import (
+            TestScriptAuthoringResult,
+            TestScriptAuthoringSource,
+        )
+
+        class _NoOpTestAuthoring:
+            def author_workspace_tests(self, run, **kwargs):  # noqa: ANN003
+                return run, TestScriptAuthoringResult(
+                    source=TestScriptAuthoringSource.unavailable,
+                    updated_files=[],
+                    usage=None,
+                    notes=[],
+                    message="left scripts in place",
+                    available=False,
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(workspace)
+            self.assertTrue(spec.course_structure.shared_codebase)
+
+            # Pre-condition: shared-layout scripts exist (materialized).
+            for deliverable in spec.deliverables:
+                shared_visible = (
+                    Path(workspace.public_dir)
+                    / "checks"
+                    / deliverable.id
+                    / "run_visible_checks.py"
+                )
+                shared_hidden = (
+                    Path(workspace.root_dir)
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+                self.assertTrue(
+                    shared_visible.exists(),
+                    f"Pre-condition: shared visible script must exist at {shared_visible}",
+                )
+                self.assertTrue(
+                    shared_hidden.exists(),
+                    f"Pre-condition: shared hidden script must exist at {shared_hidden}",
+                )
+
+            graph = LangGraphAssignmentGraph(
+                DockerSandboxRunner(),
+                test_authoring_service=_NoOpTestAuthoring(),
+            )
+            state = {
+                "run": run,
+                "node_executions": [],
+                "active_iteration": 1,
+                "authoring_attempt": 1,
+                "reviewer_attempt": 0,
+                "cached_sandbox_result": None,
+                "next_retry_node": None,
+            }
+
+            updated = graph._authoring_tests_node(state)
+            latest = updated["node_executions"][-1]
+
+            self.assertFalse(
+                any(
+                    finding.code == "generated_test_scripts_missing"
+                    for finding in latest.findings
+                ),
+                "Authoring-tests node must NOT report a generated_test_scripts_missing "
+                "finding when shared-layout scripts are in place. With the legacy "
+                "code reading public/starter/<id>/checks/run_visible_checks.py, this "
+                "fails because that legacy path is empty for shared-codebase courses.",
+            )
+
+    def test_reviewer_code_node_reads_app_files_from_shared_starter(self) -> None:
+        """`_reviewer_code_node` in `langgraph_assignment_graph.py` must inspect
+        learner-editable app files at `public/starter/<file>` for shared-codebase
+        courses, NOT `public/starter/<deliverable.id>/<file>`.
+
+        Verifies that an authored (non-placeholder, non-wrapper) app file at the
+        SHARED root is recognized as real code. With the legacy buggy code at
+        line 946 reading public/starter/<id>/<file>, the file is unreadable
+        (OSError -> deliverable_has_placeholder = True), which produces a
+        false-positive placeholder finding.
+        """
+        from app.services.docker_sandbox_runner import DockerSandboxRunner
+        from app.services.langgraph_assignment_graph import LangGraphAssignmentGraph
+        from app.services.task_agent_contract_surface import (
+            learner_editable_paths_for_deliverable,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(workspace)
+            self.assertTrue(spec.course_structure.shared_codebase)
+
+            first_deliverable = spec.deliverables[0]
+            editable_paths = learner_editable_paths_for_deliverable(spec, first_deliverable)
+            self.assertTrue(editable_paths, "Pre-condition: editable_paths must be non-empty")
+
+            # Author a REAL (non-placeholder, non-wrapper) body at the SHARED root.
+            # A correct reviewer reads from public/starter/<file> and reports no
+            # placeholder. A buggy reviewer reads public/starter/<id>/<file>,
+            # which doesn't exist, marks placeholder, and reports a false positive.
+            shared_starter = Path(workspace.public_dir) / "starter"
+            real_path = shared_starter / editable_paths[0]
+            real_path.parent.mkdir(parents=True, exist_ok=True)
+            real_path.write_text(
+                "from fastapi import FastAPI\n"
+                "\n"
+                "app = FastAPI()\n"
+                "\n"
+                "@app.get('/run')\n"
+                "def run():\n"
+                "    return {'status': 'ok'}\n",
+                encoding="utf-8",
+            )
+
+            graph = LangGraphAssignmentGraph(DockerSandboxRunner())
+            from datetime import UTC, datetime as _dt
+
+            from app.domain.sandbox import (
+                SandboxExecutionResult,
+                SandboxExecutionStatus,
+            )
+
+            state = {
+                "run": run,
+                "node_executions": [],
+                "active_iteration": 1,
+                "authoring_attempt": 1,
+                "reviewer_attempt": 0,
+                "cached_sandbox_result": SandboxExecutionResult(
+                    status=SandboxExecutionStatus.passed,
+                    available=True,
+                    build_succeeded=True,
+                    run_succeeded=True,
+                    generated_at=_dt.now(UTC),
+                ),
+                "next_retry_node": None,
+            }
+
+            updated = graph._reviewer_code_node(state)
+            latest = updated["node_executions"][-1]
+            self.assertFalse(
+                any(
+                    finding.code == "placeholder_starter_endpoints_remain"
+                    for finding in latest.findings
+                ),
+                "Reviewer-code node must NOT report a placeholder for a real "
+                "app file at the SHARED starter root. With the legacy code "
+                "reading public/starter/<id>/<file>, the file is unreadable and "
+                "the reviewer falsely flags it as a placeholder.",
+            )
+
+    def test_openai_test_script_authoring_writes_visible_to_public_checks_for_shared(self) -> None:
+        """`OpenAITestScriptAuthoringService.author_workspace_tests` must write
+        visible/hidden scripts to the SHARED layout for shared-codebase courses:
+        public/checks/<id>/run_visible_checks.py
+        private/grader/<id>/run_hidden_checks.py
+        """
+        from app.services.openai_test_script_authoring import (
+            OpenAITestScriptAuthoringService,
+        )
+
+        # Fake an OpenAI client that returns known scripts.
+        passing_visible = "print('visible script body')\n"
+        passing_hidden = "print('hidden script body')\n"
+
+        class _FakeUsage:
+            input_tokens = 1
+            output_tokens = 1
+            total_tokens = 2
+            input_tokens_details = type("D", (), {"cached_tokens": 0})()
+            output_tokens_details = type("D", (), {"reasoning_tokens": 0})()
+
+        class _FakeParsed:
+            def __init__(self, visible: str, hidden: str) -> None:
+                self.visible_script = visible
+                self.hidden_script = hidden
+                self.notes: list[str] = []
+
+        class _FakeResponse:
+            def __init__(self, parsed) -> None:
+                self.output_parsed = parsed
+                self.usage = _FakeUsage()
+
+        class _FakeAPI:
+            def __init__(self, parsed) -> None:
+                self._parsed = parsed
+                self.calls: list[dict] = []
+
+            def parse(self, **kwargs):
+                self.calls.append(kwargs)
+                return _FakeResponse(self._parsed)
+
+        class _FakeClient:
+            def __init__(self, parsed) -> None:
+                self.responses = _FakeAPI(parsed)
+
+        parsed = _FakeParsed(passing_visible, passing_hidden)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(workspace)
+            self.assertTrue(spec.course_structure.shared_codebase)
+
+            import os as _os
+
+            _os.environ["OPENAI_API_KEY"] = "test-key"
+            service = OpenAITestScriptAuthoringService(
+                enabled=True,
+                client_factory=lambda **_: _FakeClient(parsed),
+                env_file=None,
+            )
+            run, result = service.author_workspace_tests(run)
+            self.assertTrue(
+                result.available,
+                f"test-script authoring should succeed but got: {result.message}",
+            )
+
+            workspace_root = Path(workspace.root_dir)
+            public_root = Path(workspace.public_dir)
+            for deliverable in spec.deliverables:
+                shared_visible = (
+                    public_root / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                shared_hidden = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+                self.assertTrue(
+                    shared_visible.exists(),
+                    f"Shared-layout visible script missing at {shared_visible}",
+                )
+                self.assertTrue(
+                    shared_hidden.exists(),
+                    f"Shared-layout hidden script missing at {shared_hidden}",
+                )
+                self.assertIn(
+                    "visible script body",
+                    shared_visible.read_text(encoding="utf-8"),
+                    "Visible script under public/checks/<id>/ must carry authored content.",
+                )
+                self.assertIn(
+                    "hidden script body",
+                    shared_hidden.read_text(encoding="utf-8"),
+                    "Hidden script under private/grader/<id>/ must carry authored content.",
+                )
+
+                # Must NOT write to legacy public/starter/<id>/ layout for shared courses.
+                legacy_visible = (
+                    public_root
+                    / "starter"
+                    / deliverable.id
+                    / "checks"
+                    / "run_visible_checks.py"
+                )
+                legacy_hidden = (
+                    public_root
+                    / "starter"
+                    / deliverable.id
+                    / ".coursegen"
+                    / "grader"
+                    / "run_hidden_checks.py"
+                )
+                self.assertFalse(
+                    legacy_visible.exists(),
+                    f"Legacy public/starter/<id>/checks/run_visible_checks.py "
+                    f"must NOT be written for shared courses: {legacy_visible}",
+                )
+                self.assertFalse(
+                    legacy_hidden.exists(),
+                    f"Legacy public/starter/<id>/.coursegen/grader/run_hidden_checks.py "
+                    f"must NOT be written for shared courses: {legacy_hidden}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
