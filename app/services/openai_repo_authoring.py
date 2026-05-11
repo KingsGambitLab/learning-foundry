@@ -338,6 +338,7 @@ class OpenAIStarterRepoAuthoringService:
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "shared_codebase": True,
+            "course_starter_type": spec.runtime_dependencies.starter_type.value,
             "repair_scope_deliverable_ids": deliverable_ids,
             "shared_repo_root": shared_root.name,
             "manifest": shared_manifest,
@@ -466,6 +467,12 @@ class OpenAIStarterRepoAuthoringService:
                         "but must not repeat the shared runtime protocol files. "
                         "`dependency_contract` must describe the dependency/build contract for that shared repo. "
                         "Treat deliverables only as milestone briefs/tests/gates over the same app, not as separate repo states. "
+                        "The course-level `course_starter_type` field in the payload is either `empty` or `partial`. Default to `partial` unless the payload explicitly says `empty`. "
+                        "For a `partial` starter: implement the full scaffold — project skeleton, framework wiring, dependency manifests, data schema, repository layer, type definitions, configuration, and any boilerplate the framework needs to boot. "
+                        "Leave every API handler, primary service method, and route body as an explicit unimplemented stub that throws or raises a language-appropriate not-implemented exception (`UnsupportedOperationException` in Java/Kotlin, `NotImplementedError` in Python, `errors.New(\"not implemented\")` in Go, `throw new Error('not implemented')` in TypeScript, etc.). "
+                        "Do not return placeholder data, default fixtures, hardcoded success responses, or `Optional.empty()` 200s. The starter MUST boot and stay up (health endpoint returns 200), but every business endpoint must throw the not-implemented exception when called. "
+                        "The visible and hidden tests are authored separately and are EXPECTED to fail against this starter — that is the whole point. If your starter accidentally implements deliverable logic, the test-strength baseline will catch it. "
+                        "For an `empty` starter: author only the minimum project skeleton needed to boot — framework wiring, dependency manifest, application entry, and a single health endpoint. No business code, no schema, no repository layer, no stubs. "
                         "Preserve one package root, one build identity, and one shared module structure across the whole course. "
                         "Do not write `README.md`, `.coursegen/grader/*`, `checks/*`, or `.vscode/*`; those belong to the harness protocol. "
                         "Lockfiles, build artifacts, logs, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
