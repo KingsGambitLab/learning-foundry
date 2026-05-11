@@ -890,7 +890,9 @@ class SQLiteWorkflowStore:
                         "task_agent_spec": self._normalize_task_agent_spec_payload(task_agent_spec),
                     },
                 }
-        return payload
+        # Pre-refactor rows may carry the legacy 4-value `starter_type` strings
+        # at intake.starter_type and other nested specs. Coerce recursively.
+        return self._coerce_starter_type_recursively(payload)
 
     @staticmethod
     def _coerce_legacy_starter_type(value: object) -> str | None:
@@ -1123,6 +1125,24 @@ class SQLiteWorkflowStore:
                 **payload,
                 "course_family_id": payload.get("id"),
             }
+        # CourseRun payloads carry several nested specs (generated_plan,
+        # shared_design_spec, design_spec, runtime_dependencies, ...) — each of
+        # which may have a legacy `starter_type` string written by pre-refactor
+        # rows. Walk the whole tree and coerce.
+        return self._coerce_starter_type_recursively(payload)
+
+    def _coerce_starter_type_recursively(self, payload):
+        if isinstance(payload, dict):
+            coerced: dict = {}
+            for key, value in payload.items():
+                if key == "starter_type":
+                    normalized = self._coerce_legacy_starter_type(value)
+                    coerced[key] = normalized if normalized is not None else value
+                else:
+                    coerced[key] = self._coerce_starter_type_recursively(value)
+            return coerced
+        if isinstance(payload, list):
+            return [self._coerce_starter_type_recursively(item) for item in payload]
         return payload
 
     def _normalize_learner_enrollment_payload(self, payload: dict) -> dict:
