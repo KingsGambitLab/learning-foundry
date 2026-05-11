@@ -45,10 +45,15 @@ class StarterTypeEnumShapeTests(unittest.TestCase):
 
 
 class ExpectationIssuesUnderNewEnumTests(unittest.TestCase):
-    """The baseline verifier's `_expectation_issues` must flag partial-starter
-    passes as errors. With the enum collapse, both `empty` and `partial`
+    """The baseline verifier's `_expectation_issues` must flag pre-implementation
+    starter passes as errors. With the enum collapse, both `empty` and `partial`
     behave identically (must not pass starter suites); the legacy
-    working_buggy/working_suboptimal branch is dead and must be removed.
+    working_buggy/working_suboptimal branch is dead and removed.
+
+    Pass 3 also collapsed the two old per-suite codes
+    (``starter_visible_tests_passed_partial_repo`` and
+    ``..._hidden_tests_passed_partial_repo``) into one attributable code:
+    ``starter_suite_passed_pre_implementation``.
     """
 
     def _report(self, *, suite_type: str, passed: bool) -> GeneratedTestSuiteReport:
@@ -60,42 +65,76 @@ class ExpectationIssuesUnderNewEnumTests(unittest.TestCase):
             passed=passed,
         )
 
-    def _passing_starter_outcomes(self) -> list[BaselineSuiteOutcome]:
+    def _passing_starter_outcomes(self, deliverable_id: str = "deliverable_1") -> list[BaselineSuiteOutcome]:
         return [
             BaselineSuiteOutcome(
                 baseline="starter_repo",
                 suite_type="visible",
                 report=self._report(suite_type="visible", passed=True),
+                deliverable_id=deliverable_id,
             ),
             BaselineSuiteOutcome(
                 baseline="starter_repo",
                 suite_type="hidden",
                 report=self._report(suite_type="hidden", passed=True),
+                deliverable_id=deliverable_id,
             ),
             BaselineSuiteOutcome(
                 baseline="empty_repo",
                 suite_type="visible",
                 report=self._report(suite_type="visible", passed=False),
+                deliverable_id=deliverable_id,
             ),
             BaselineSuiteOutcome(
                 baseline="empty_repo",
                 suite_type="hidden",
                 report=self._report(suite_type="hidden", passed=False),
+                deliverable_id=deliverable_id,
             ),
         ]
+
+    def _spec_with_starter_type(self, starter_type: StarterType):
+        """Build a minimal spec carrying `runtime_dependencies.starter_type`
+        so `_expectation_issues(outcomes, spec)` can read it.
+
+        Uses SimpleNamespace shims rather than constructing the full pydantic
+        spec because `_expectation_issues` only reads two attributes
+        (``spec.runtime_dependencies.starter_type`` and ``spec.deliverables``).
+        """
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            runtime_dependencies=SimpleNamespace(starter_type=starter_type),
+            deliverables=[SimpleNamespace(id="deliverable_1")],
+        )
 
     def test_partial_starter_passing_visible_and_hidden_is_flagged(self) -> None:
         verifier = GeneratedTestBaselineVerifier()
         outcomes = self._passing_starter_outcomes()
-        errors = verifier._expectation_issues(outcomes, StarterType.partial)
+        errors = verifier._expectation_issues(
+            outcomes,
+            self._spec_with_starter_type(StarterType.partial),
+        )
         codes = {issue.code for issue in errors}
-        self.assertIn("starter_visible_tests_passed_partial_repo", codes)
-        self.assertIn("starter_hidden_tests_passed_partial_repo", codes)
+        self.assertIn("starter_suite_passed_pre_implementation", codes)
+        # Both visible and hidden offending suites are emitted.
+        offending_suites = {
+            issue.suite_type for issue in errors
+            if issue.code == "starter_suite_passed_pre_implementation"
+        }
+        self.assertEqual(offending_suites, {"visible", "hidden"})
 
     def test_empty_starter_passing_visible_and_hidden_is_flagged(self) -> None:
         verifier = GeneratedTestBaselineVerifier()
         outcomes = self._passing_starter_outcomes()
-        errors = verifier._expectation_issues(outcomes, StarterType.empty)
+        errors = verifier._expectation_issues(
+            outcomes,
+            self._spec_with_starter_type(StarterType.empty),
+        )
         codes = {issue.code for issue in errors}
-        self.assertIn("starter_visible_tests_passed_partial_repo", codes)
-        self.assertIn("starter_hidden_tests_passed_partial_repo", codes)
+        self.assertIn("starter_suite_passed_pre_implementation", codes)
+        offending_suites = {
+            issue.suite_type for issue in errors
+            if issue.code == "starter_suite_passed_pre_implementation"
+        }
+        self.assertEqual(offending_suites, {"visible", "hidden"})

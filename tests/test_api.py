@@ -407,7 +407,7 @@ class FakeTaskAgentAuthoringService:
 
 
 class _AlwaysValidBaselineVerifier:
-    def verify_deliverable(self, **kwargs):  # noqa: ANN003
+    def verify_course(self, **kwargs):  # noqa: ANN003
         return BaselineValidationResult(valid=True)
 
 
