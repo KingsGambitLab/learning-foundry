@@ -691,5 +691,53 @@ class Pass5CallSiteShareCodebasePathTests(unittest.TestCase):
                 )
 
 
+class SharedRuntimeManifestFallbackTests(unittest.TestCase):
+    """`LearnerStudioService._runtime_manifest` must fall back to
+    `.coursegen/course.json` at the shared starter root when
+    `.coursegen/deliverable.json` is absent. Without this fallback the harness
+    can't see the runtime_plan's sidecar services for shared-codebase courses,
+    `_dependency_services` returns 0, postgres/redis are never started, and
+    install crashes before health.
+    """
+
+    def test_runtime_manifest_falls_back_to_course_json_for_shared_root(self) -> None:
+        from app.services.learner_studio_service import LearnerStudioService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            starter_root = Path(tmp) / "starter"
+            (starter_root / ".coursegen").mkdir(parents=True)
+            course_manifest = {
+                "runtime_plan": {
+                    "services": [
+                        {"service_id": "app", "technology": "gin"},
+                        {
+                            "service_id": "postgres",
+                            "technology": "postgres",
+                            "container_image": "postgres:16-alpine",
+                        },
+                        {
+                            "service_id": "redis",
+                            "technology": "redis",
+                            "container_image": "redis:7-alpine",
+                        },
+                    ]
+                }
+            }
+            (starter_root / ".coursegen" / "course.json").write_text(
+                json.dumps(course_manifest), encoding="utf-8"
+            )
+
+            service = LearnerStudioService()
+            dependency_services = service._dependency_services(starter_root)
+
+            service_ids = sorted(str(s.get("service_id")) for s in dependency_services)
+            self.assertEqual(
+                service_ids,
+                ["postgres", "redis"],
+                f"Expected postgres + redis sidecars from course.json fallback; "
+                f"got {service_ids}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

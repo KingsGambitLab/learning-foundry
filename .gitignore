@@ -12,3 +12,6 @@ learner_workspaces/
 archives/
 course_gen.db
 tmp/
+course_gen_codex.egg-info/
+logs/
+uv.lock

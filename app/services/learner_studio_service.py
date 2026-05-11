@@ -17,6 +17,7 @@ from app.domain.grading import LiveAssignmentGradeReport, LiveGradeTaskAgentRequ
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
+from app.services.artifact_materializer import SHARED_COURSE_MANIFEST_RELATIVE_PATH
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_INSTALL_SCRIPT_PATH,
@@ -302,13 +303,17 @@ class LearnerStudioService:
             )
 
     def _runtime_manifest(self, workspace_path: Path) -> dict[str, object]:
-        manifest_path = workspace_path / HIDDEN_MANIFEST_PATH
-        if not manifest_path.exists():
-            return {}
-        try:
-            return json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        # Per-deliverable manifest (legacy non-shared layout); for shared-codebase
+        # courses this file does not live at the starter root anymore, so fall
+        # back to the shared course manifest at `.coursegen/course.json`.
+        for relative in (HIDDEN_MANIFEST_PATH, SHARED_COURSE_MANIFEST_RELATIVE_PATH):
+            manifest_path = workspace_path / relative
+            if manifest_path.exists():
+                try:
+                    return json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return {}
+        return {}
 
     @contextmanager
     def _ephemeral_runtime_workspace(self, workspace_path: Path):
