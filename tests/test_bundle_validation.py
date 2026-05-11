@@ -478,6 +478,73 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
         assert any(issue.code == "deprecated_secondary_brief_present" for issue in result.errors)
 
 
+def test_seeded_workspace_validator_accepts_source_code_refs_from_project_root() -> None:
+    """The seeded learner workspace's review-area README sits at
+    ``.coursegen/review_areas/<id>/README.md`` and references both
+    sibling artifacts and source-code files that live at the workspace
+    project root (e.g. ``app/main.py``).
+
+    Old behavior: validator passed reference_root=readme.parent only, so
+    every source-code reference falsely flagged ``starter_readme_missing_local_reference``
+    as soon as a learner workspace got seeded for a published course.
+
+    Fix: multi-root resolution — README references resolve under the
+    README's own directory OR the workspace project root.
+    """
+    design_spec = _inventory_design()
+    spec, _origin_template = build_task_agent_scaffold(
+        title="Inventory Reservation Service",
+        summary="Build a concurrency-safe inventory reservation backend.",
+        design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
+    )
+    deliverable = spec.deliverables[0]
+    brief = deliverable.learner_brief or build_task_agent_deliverable_brief(spec, deliverable)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        workspace_root = Path(temp_dir)
+        review_area_dir = workspace_root.joinpath(".coursegen/review_areas/exercise-1")
+        review_area_dir.mkdir(parents=True)
+        workspace_root.joinpath("README.md").write_text("# Inventory Reservation Service\n", encoding="utf-8")
+        # Materialize the source-code files the README references at the
+        # workspace project root (NOT alongside the review-area README).
+        assert deliverable.learner_starter_surface is not None
+        for editable in deliverable.learner_starter_surface.primary_editable_paths:
+            target = workspace_root.joinpath(editable)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# learner-owned\n", encoding="utf-8")
+        # Sibling artifact next to the review-area README (the visible check
+        # script is named in the README's "Support files" section). The
+        # multi-root validator should find it under readme.parent.
+        review_area_dir.joinpath("run_visible_checks.py").write_text(
+            "# visible check script\n", encoding="utf-8",
+        )
+        review_area_dir.joinpath("README.md").write_text(
+            render_learner_starter_readme(
+                title=deliverable.title,
+                summary=deliverable.objective,
+                learning_outcomes=list(deliverable.learning_outcomes),
+                brief=brief,
+            ),
+            encoding="utf-8",
+        )
+
+        result = validate_seeded_learner_workspace(
+            spec, workspace_root, deliverable_ids=["exercise-1"],
+        )
+        # The validator may still emit other findings, but it MUST NOT
+        # falsely flag source-code references that exist at the workspace
+        # project root.
+        local_ref_errors = [
+            issue for issue in result.errors
+            if issue.code == "starter_readme_missing_local_reference"
+        ]
+        assert not local_ref_errors, (
+            "Seeded-workspace validator falsely flagged source-code references "
+            f"that exist at the project root: {[i.message for i in local_ref_errors]}"
+        )
+
+
 def test_bundle_validation_resolves_readme_refs_against_readme_dir_not_starter_root() -> None:
     """Bug 1, on the validator side.
 
