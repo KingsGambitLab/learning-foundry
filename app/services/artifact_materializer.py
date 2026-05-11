@@ -47,6 +47,11 @@ from app.services.task_agent_starter_templates import (
 VISIBLE_CHECK_SCRIPT_RELATIVE_PATH = "run_visible_checks.py"
 HIDDEN_GRADER_SCRIPT_RELATIVE_PATH = "run_hidden_checks.py"
 DELIVERABLE_MANIFEST_RELATIVE_PATH = "deliverable.json"
+# Shared course-level manifest at the shared starter root. Carries the
+# course-wide fields (runtime_plan, runtime_dependencies, course_structure,
+# public_endpoints, dependency_contract) once, instead of duplicating them
+# inside every per-deliverable manifest.
+SHARED_COURSE_MANIFEST_RELATIVE_PATH = ".coursegen/course.json"
 
 
 def shared_starter_workspace_path(public_dir: Path) -> Path:
@@ -62,6 +67,27 @@ def deliverable_visible_checks_dir(public_dir: Path, deliverable_id: str) -> Pat
 def deliverable_grader_dir(private_dir: Path, deliverable_id: str) -> Path:
     """For shared_codebase courses: per-deliverable hidden grader + manifest."""
     return private_dir / "grader" / deliverable_id
+
+
+def build_shared_course_manifest_payload(
+    spec: TaskAgentServiceSpec,
+    *,
+    dependency_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Course-level fields that previously got copied into every per-deliverable
+    manifest. Living once at public/starter/.coursegen/course.json keeps the
+    shared starter authoritative for the whole course."""
+    payload: dict[str, Any] = {
+        "title": spec.title,
+        "summary": spec.summary,
+        "course_structure": spec.course_structure.model_dump(mode="json"),
+        "runtime_plan": spec.project_contract.runtime_plan.model_dump(mode="json"),
+        "runtime_dependencies": spec.runtime_dependencies.model_dump(mode="json"),
+        "public_endpoints": [endpoint.model_dump(mode="json") for endpoint in spec.public_endpoints],
+    }
+    if dependency_contract is not None:
+        payload["dependency_contract"] = dependency_contract
+    return payload
 
 def default_generated_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "generated"
@@ -334,6 +360,7 @@ class ArtifactMaterializer:
             and not relative_path.startswith(".coursegen/grader/")
         }
 
+        shared_manifest_payload: dict[str, Any] | None = None
         if workspace_shared_dir is not None and workspace_shared_dir.exists():
             # Mirror the authored shared workspace into the bundle's public/starter/.
             workspace_grader_root = (
@@ -341,7 +368,6 @@ class ArtifactMaterializer:
                 if run.artifacts.workspace_snapshot is not None
                 else None
             )
-            shared_manifest_payload: dict[str, Any] | None = None
             if workspace_grader_root is not None:
                 first_manifest_path = (
                     workspace_grader_root / first_deliverable.id / DELIVERABLE_MANIFEST_RELATIVE_PATH
@@ -402,6 +428,27 @@ class ArtifactMaterializer:
                 files=files,
                 bundle_root=bundle_root,
             )
+
+        # Shared course-level manifest at public/starter/.coursegen/course.json.
+        # Sourced from the authored per-deliverable manifest's dependency_contract
+        # (if present) so the shared course manifest stays coherent with what the
+        # bundle authoring loop produced.
+        course_dependency_contract: dict[str, Any] | None = None
+        if isinstance(shared_manifest_payload, dict):
+            course_dependency_contract = shared_manifest_payload.get("dependency_contract")
+        self._write_json(
+            shared_starter_dir / SHARED_COURSE_MANIFEST_RELATIVE_PATH,
+            build_shared_course_manifest_payload(
+                spec,
+                dependency_contract=course_dependency_contract,
+            ),
+            ArtifactVisibility.public,
+            files,
+            bundle_root,
+            role="shared_course_manifest",
+            audience="operator",
+            semantic_source="starter_compiler",
+        )
 
         # Per-deliverable: public/checks/<id>/ and private/grader/<id>/.
         for deliverable in spec.deliverables:
