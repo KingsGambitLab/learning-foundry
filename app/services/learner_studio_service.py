@@ -903,11 +903,21 @@ class LearnerStudioService:
     def _wait_for_http(self, url: str, *, container_name: str | None = None) -> None:
         deadline = time.time() + self.start_timeout_s
         last_error: Exception | None = None
+        # Track the last 5xx response so timeouts surface what the app
+        # *actually* returned (e.g. "501 Not Implemented" on /health for
+        # a partial-starter Python+Uvicorn app) instead of a generic
+        # "Last error: None". The Uvicorn startup banner pollutes
+        # stderr-tail summarizers when the real diagnostic is HTTP.
+        last_http_response: tuple[int, str] | None = None
         while time.time() < deadline:
             try:
                 response = httpx.get(url, timeout=2.0, follow_redirects=False)
                 if response.status_code < 500:
                     return
+                body = (response.text or "").strip()
+                if len(body) > 200:
+                    body = body[:200] + "…"
+                last_http_response = (response.status_code, body)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
             if container_name and not self._container_running(container_name):
@@ -922,10 +932,14 @@ class LearnerStudioService:
                         f"Container '{container_name}' stopped before '{url}' became healthy. "
                         f"Last error: {last_error}"
                     )
+                http_part = self._format_last_http_response(last_http_response)
+                if http_part:
+                    details = f"{details} {http_part}"
                 if logs:
                     details = f"{details}\n\nContainer logs:\n{logs}"
                 raise LearnerStudioError(details)
             time.sleep(1.0)
+        http_part = self._format_last_http_response(last_http_response)
         if container_name:
             logs = self._container_logs(container_name)
             stage = self._runtime_stage_from_logs(logs)
@@ -933,11 +947,33 @@ class LearnerStudioService:
                 details = f"Timed out waiting for '{url}' during '{stage}'. Last error: {last_error}"
             else:
                 details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
+            if http_part:
+                details = f"{details} {http_part}"
             if logs:
                 details = f"{details}\n\nContainer logs:\n{logs}"
             raise LearnerStudioError(details)
         details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
+        if http_part:
+            details = f"{details} {http_part}"
         raise LearnerStudioError(details)
+
+    @staticmethod
+    def _format_last_http_response(
+        last_http_response: tuple[int, str] | None,
+    ) -> str:
+        """Format the last observed 5xx response for the timeout error.
+
+        The marker prefix ``Last HTTP response:`` is load-bearing — the
+        sandbox runner's stage summarizer scans for that exact phrase to
+        promote the HTTP signal into the boot-stage headline. Don't
+        rename it without updating ``_summarize_stage_failure``.
+        """
+        if last_http_response is None:
+            return ""
+        status, body = last_http_response
+        if body:
+            return f"Last HTTP response: {status} {body}"
+        return f"Last HTTP response: {status}"
 
     def _allocate_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

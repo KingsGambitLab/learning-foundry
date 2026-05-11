@@ -2145,6 +2145,17 @@ class DockerSandboxRunner:
                 f"{deliverable_id} failed during {stage_label}: "
                 f"{method} {path} → {tail}"
             )
+        # Boot-stage HTTP healthcheck failures: when `_wait_for_http`
+        # timed out with the app returning 5xx on every poll, the
+        # harness emits a `Last HTTP response: <status> <body>` line
+        # inside the error_text. That line is the canonical diagnostic
+        # — far more useful than the last 3 stderr lines (which for
+        # Python+Uvicorn is the success banner). Surface it as the
+        # headline teaser regardless of what stderr looks like.
+        if failed_stage in (SandboxFailureStage.boot, SandboxFailureStage.runtime):
+            http_line = self._extract_last_http_response_line(error_text)
+            if http_line:
+                return f"{deliverable_id} failed during {stage_label}: {http_line}"
         source = (logs or error_text or "").strip()
         if not source:
             return f"{deliverable_id} failed during {stage_label}."
@@ -2158,6 +2169,30 @@ class DockerSandboxRunner:
         tail_lines = [line for line in source.splitlines() if line.strip()][-3:]
         teaser = " | ".join(tail_lines)
         return f"{deliverable_id} failed during {stage_label}: {teaser}"
+
+    @staticmethod
+    def _extract_last_http_response_line(error_text: str | None) -> str | None:
+        """Pull the `Last HTTP response: <status> <body>` segment out of
+        the wait-for-http timeout message.
+
+        The marker is emitted by
+        :func:`LearnerStudioService._format_last_http_response`. We
+        return the substring from "Last HTTP response:" to the end of
+        the line / paragraph so the headline carries the status and
+        body excerpt verbatim.
+        """
+        if not error_text:
+            return None
+        marker = "Last HTTP response:"
+        idx = error_text.find(marker)
+        if idx == -1:
+            return None
+        tail = error_text[idx:]
+        # Trim at the first newline (so logs appended later don't bleed in).
+        newline = tail.find("\n")
+        if newline != -1:
+            tail = tail[:newline]
+        return tail.strip()
 
     def _summarize_failed_deliverables(
         self,
