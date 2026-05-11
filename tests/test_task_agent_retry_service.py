@@ -129,7 +129,13 @@ class _RecordingRepoAuthoringService:
         updated_files: list[str] = []
         target_ids = deliverable_ids or [deliverable.id for deliverable in spec.deliverables]
         for deliverable_id in target_ids:
-            target = Path(workspace.public_dir) / "starter" / deliverable_id / "repair_scope_marker.txt"
+            target = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable_id
+                / "repair_scope_marker.txt"
+            )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f"repaired {deliverable_id}\n", encoding="utf-8")
             updated_files.append(str(target.relative_to(workspace.root_dir)))
@@ -824,10 +830,10 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertFalse(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_1" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_workspace_repair_rebuilds_failed_progressive_stage_and_descendants(self) -> None:
@@ -904,13 +910,13 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertFalse(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_1" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_2" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_2" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_workspace_repair_rebuilds_all_progressive_stages_for_install_failures(self) -> None:
@@ -975,7 +981,7 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_retry_service_stops_when_same_workspace_blocker_repeats_after_repair(self) -> None:
@@ -1199,8 +1205,14 @@ class TaskAgentRetryServiceTests(TestCase):
 
             workspace = run.artifacts.workspace_snapshot
             assert workspace is not None
-            starter_root = Path(workspace.public_dir) / "starter" / "deliverable_1"
-            manifest_path = starter_root / ".coursegen" / "deliverable.json"
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / "deliverable_1"
+                / "deliverable.json"
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["dependency_contract"] = {
                 "manifest_paths": ["Cargo.toml"],

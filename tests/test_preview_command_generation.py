@@ -67,9 +67,9 @@ def test_materialized_starter_readme_uses_runtime_run_script() -> None:
         materialized = workflow_service.materialize_run(run.id, MaterializeBundleRequest(overwrite=True))
         starter_readme = workflow_service.read_bundle_file(
             run.id,
-            f"public/starter/{run.artifacts.task_agent_spec.deliverables[0].id}/README.md",
+            f"public/checks/{run.artifacts.task_agent_spec.deliverables[0].id}/README.md",
         ).content
         assert f"sh {RUNTIME_RUN_SCRIPT_PATH}" in starter_readme
         assert "uvicorn app:app" not in starter_readme
-        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / ".coursegen/preview_app.py"
+        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / ".coursegen/preview_app.py"
         assert not launcher_path.exists()

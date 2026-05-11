@@ -2309,7 +2309,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         workspace = run.artifacts.workspace_snapshot
         self.assertIsNotNone(workspace)
-        readme_path = Path(workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
+        readme_path = Path(workspace.public_dir) / "checks" / "deliverable_1" / "README.md"
         original = readme_path.read_text(encoding="utf-8")
         readme_path.write_text("STALE README\n", encoding="utf-8")
 
@@ -2363,7 +2363,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         repaired_workspace = repaired_run.artifacts.workspace_snapshot
         self.assertIsNotNone(repaired_workspace)
         repaired_readme = (
-            Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
+            Path(repaired_workspace.public_dir) / "checks" / "deliverable_1" / "README.md"
         ).read_text(encoding="utf-8")
         self.assertEqual(repaired_readme, original)
 

@@ -181,7 +181,7 @@ def test_bundle_validation_flags_secondary_brief_reference_in_starter_readme() -
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             starter_readme_path.read_text(encoding="utf-8") + "\nSee `deliverable_content.md` for more detail.\n",
             encoding="utf-8",
@@ -212,7 +212,7 @@ def test_bundle_validation_flags_unpublished_endpoint_reference_in_starter_readm
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             starter_readme_path.read_text(encoding="utf-8")
             + "\nKeep `POST /and-resolutions` stable while you work.\n",
@@ -244,7 +244,7 @@ def test_bundle_validation_flags_generic_starter_readme_without_domain_entities(
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             "# Starter\n\n"
             "Serve the current state safely under load.\n\n"
@@ -281,8 +281,14 @@ def test_bundle_validation_flags_runtime_protocol_bundle_marked_authored_when_pl
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_root = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id
-        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+        starter_root = Path(bundle.root_dir) / "public" / "starter"
+        manifest_path = (
+            Path(bundle.root_dir)
+            / "private"
+            / "grader"
+            / run.artifacts.task_agent_spec.deliverables[0].id
+            / "deliverable.json"
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["runtime_protocol_bundle"] = {
             "source": "openai_live",

@@ -395,8 +395,15 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["learner_starter_surface"] = {
                 **(manifest.get("learner_starter_surface") or {}),
                 "primary_editable_paths": ["src/main.rs"],
@@ -467,8 +474,15 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
             failure_context = FailureContext(
                 source_node_kind=WorkflowNodeKind.authoring_runtime,
@@ -559,8 +573,15 @@ class AuthoringPayloadTests(unittest.TestCase):
             deliverable = spec.deliverables[0]
             workspace = run.artifacts.workspace_snapshot
             assert workspace is not None
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
             failure_context = FailureContext(
                 source_node_kind=WorkflowNodeKind.authoring_runtime,
@@ -693,16 +714,23 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             public_root = Path(workspace.public_dir)
+            workspace_root = Path(workspace.root_dir)
             for deliverable_id in ["deliverable_1", "deliverable_2"]:
-                manifest_path = public_root / "starter" / deliverable_id / HIDDEN_MANIFEST_PATH
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable_id
+                    / "deliverable.json"
+                )
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["learner_starter_surface"] = {
                     **(manifest.get("learner_starter_surface") or {}),
                     "primary_editable_paths": ["src/shared_stage.txt"],
                 }
                 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-            (public_root / "starter" / "deliverable_1" / "src").mkdir(parents=True, exist_ok=True)
-            (public_root / "starter" / "deliverable_1" / "src" / "shared_stage.txt").write_text(
+            (public_root / "starter" / "src").mkdir(parents=True, exist_ok=True)
+            (public_root / "starter" / "src" / "shared_stage.txt").write_text(
                 "stage-one\n",
                 encoding="utf-8",
             )
@@ -780,7 +808,7 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert parse_calls[0]["text_format"].__name__ == "_GeneratedSharedRepoBundle"
             payload = json.loads(parse_calls[0]["input"][1]["content"])
             assert payload["repair_scope_deliverable_ids"] == ["deliverable_2"]
-            assert payload["shared_repo_root"] == "deliverable_1"
+            assert payload["shared_repo_root"] == "starter"
             assert payload["current_files"]["src/shared_stage.txt"] == "stage-one\n"
             assert "Dockerfile" in payload["shared_runtime_protocol_files"]
             assert {deliverable["deliverable_id"] for deliverable in payload["deliverables"]} == {
@@ -789,11 +817,12 @@ class AuthoringPayloadTests(unittest.TestCase):
                 "deliverable_3",
                 "deliverable_4",
             }
-            deliverable_1_root = public_root / "starter" / "deliverable_1"
-            deliverable_2_root = public_root / "starter" / "deliverable_2"
-            assert (deliverable_1_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
-            assert (deliverable_2_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
-            assert (deliverable_2_root / "pom.xml").read_text(encoding="utf-8") == "<project/>\n"
+            shared_starter_root = public_root / "starter"
+            assert (shared_starter_root / "src" / "shared_stage.txt").read_text(encoding="utf-8") == "stage-two\n"
+            assert (shared_starter_root / "pom.xml").read_text(encoding="utf-8") == "<project/>\n"
+            # Per-deliverable starter folders no longer exist.
+            assert not (public_root / "starter" / "deliverable_1").exists()
+            assert not (public_root / "starter" / "deliverable_2").exists()
 
     def test_repo_authoring_payload_excludes_logs_and_build_artifacts_from_authored_surface(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -803,8 +832,14 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["starter_repo_bundle"] = {
                 "source": "openai_live",
@@ -847,8 +882,14 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert workspace is not None
             spec.project_contract.runtime_plan.package_manager = "cargo"
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["learner_starter_surface"] = {
                 **(manifest.get("learner_starter_surface") or {}),
@@ -877,12 +918,12 @@ class AuthoringPayloadTests(unittest.TestCase):
             )
 
             bundle = ArtifactMaterializer(base_dir=f"{temp_dir}/generated").materialize_run(run, overwrite=True)
-            deliverable_dir = Path(bundle.public_dir) / "starter" / deliverable.id
+            shared_dir = Path(bundle.public_dir) / "starter"
 
-            assert (deliverable_dir / "src" / "main.rs").exists()
-            assert (deliverable_dir / "Cargo.toml").exists()
-            assert (deliverable_dir / "Cargo.lock").exists()
-            assert not (deliverable_dir / "target").exists()
+            assert (shared_dir / "src" / "main.rs").exists()
+            assert (shared_dir / "Cargo.toml").exists()
+            assert (shared_dir / "Cargo.lock").exists()
+            assert not (shared_dir / "target").exists()
 
     def test_repo_replace_preserves_binary_wrapper_support_files_while_cleaning_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -892,8 +933,14 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["starter_repo_bundle"] = {
                 "source": "openai_live",
@@ -936,8 +983,15 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["learner_starter_surface"] = {
                 **(manifest.get("learner_starter_surface") or {}),
                 "primary_editable_paths": ["src/main.rs"],
@@ -1001,8 +1055,15 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert spec is not None
             assert workspace is not None
             deliverable = spec.deliverables[0]
-            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["learner_starter_surface"] = {
                 **(manifest.get("learner_starter_surface") or {}),
                 "primary_editable_paths": ["src/main.rs"],
