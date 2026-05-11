@@ -29,6 +29,30 @@ class LearnerStudioError(RuntimeError):
     """Raised when the learner workspace studio or grading runner fails."""
 
 
+class RuntimeImageBuildError(LearnerStudioError):
+    """Raised when `docker build` for the workspace runtime image fails.
+
+    Carries the build invocation so the sandbox harness can surface a
+    precise failure context (command, exit code, full build stderr) to the
+    repair model instead of a generic stringified error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str],
+        returncode: int,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.command = list(command)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def default_learner_studio_image() -> str:
     return "course-gen-learner-studio:latest"
 
@@ -495,8 +519,16 @@ class LearnerStudioService:
             timeout=self.build_timeout_s,
         )
         if result.returncode != 0:
-            raise LearnerStudioError(
-                (result.stderr or result.stdout).strip() or "Could not build learner runtime image."
+            message = (
+                (result.stderr or result.stdout).strip()
+                or "Could not build learner runtime image."
+            )
+            raise RuntimeImageBuildError(
+                message,
+                command=command,
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
             )
         return image_tag
 

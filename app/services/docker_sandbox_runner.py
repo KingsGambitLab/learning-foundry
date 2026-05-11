@@ -24,7 +24,7 @@ from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.coursegen_logging import log_coursegen_event
 from app.services.dependency_contract_materializer import DependencyContractMaterializer
 from app.services.generated_test_harness import GeneratedTestScriptRunner
-from app.services.learner_studio_service import LearnerStudioService
+from app.services.learner_studio_service import LearnerStudioService, RuntimeImageBuildError
 
 
 class DockerSandboxRunner:
@@ -635,6 +635,42 @@ class DockerSandboxRunner:
                     sandbox_status="passed" if contract_passed else "failed",
                     error=check_error,
                 )
+            except RuntimeImageBuildError as build_exc:
+                all_builds_succeeded = False
+                all_runs_succeeded = False
+                build_stderr_tail = self._tail_lines(build_exc.stderr, max_lines=80)
+                build_stdout_tail = self._tail_lines(build_exc.stdout, max_lines=40)
+                combined_log = "\n".join(part for part in (build_stderr_tail, build_stdout_tail) if part)
+                build_stderr_parts.append(f"[{deliverable.id}] {build_stderr_tail}".strip())
+                if build_stdout_tail:
+                    build_stdout_parts.append(f"[{deliverable.id}] {build_stdout_tail}".strip())
+                log_coursegen_event(
+                    "sandbox_deliverable_completed",
+                    workflow_run_id=workflow_run_id,
+                    deliverable_id=deliverable.id,
+                    sandbox_status="failed",
+                    error=str(build_exc),
+                )
+                deliverable_reports.append(
+                    DeliverableSandboxReport(
+                        deliverable_id=deliverable.id,
+                        compile_succeeded=False,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.image_build,
+                        stage_command=list(build_exc.command),
+                        stage_exit_code=build_exc.returncode,
+                        stdout=build_stdout_tail,
+                        stderr=combined_log,
+                        error=self._summarize_stage_failure(
+                            deliverable_id=deliverable.id,
+                            failed_stage=SandboxFailureStage.image_build,
+                            error_text=str(build_exc),
+                            logs=combined_log,
+                            default="Could not build the starter runtime image.",
+                        ),
+                    )
+                )
+                fail_fast_triggered = fail_fast
             except Exception as exc:  # noqa: BLE001
                 if not runtime_image_ready:
                     all_builds_succeeded = False
@@ -819,6 +855,7 @@ class DockerSandboxRunner:
     def _compile_succeeded_for_stage(self, failed_stage: SandboxFailureStage | None) -> bool:
         return failed_stage not in {
             SandboxFailureStage.dependency_materialization,
+            SandboxFailureStage.image_build,
             SandboxFailureStage.install,
             SandboxFailureStage.verify,
             SandboxFailureStage.container_launch,
@@ -855,6 +892,8 @@ class DockerSandboxRunner:
     ) -> str:
         if failed_stage == SandboxFailureStage.boot:
             detail = self._first_useful_line(logs, error_text)
+        elif failed_stage == SandboxFailureStage.image_build:
+            detail = self._last_useful_line(logs, error_text)
         else:
             detail = self._first_useful_line(error_text, logs)
         if failed_stage is None:
@@ -909,6 +948,39 @@ class DockerSandboxRunner:
                     continue
                 return candidate
         return None
+
+    def _last_useful_line(self, *texts: str | None) -> str | None:
+        ignored_prefixes = (self.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX,)
+        ignored_substrings = (
+            "timed out waiting for 'http://",
+            "stopped before 'http://",
+            "last error:",
+            "container logs:",
+        )
+        for text in texts:
+            cleaned = (text or "").strip()
+            if not cleaned:
+                continue
+            for line in reversed(cleaned.splitlines()):
+                candidate = line.strip()
+                if not candidate:
+                    continue
+                if any(candidate.startswith(prefix) for prefix in ignored_prefixes):
+                    continue
+                if any(fragment in candidate.lower() for fragment in ignored_substrings):
+                    continue
+                if candidate.startswith("---") or candidate.startswith(">>>") or candidate.startswith("^^^"):
+                    continue
+                return candidate
+        return None
+
+    def _tail_lines(self, text: str | None, *, max_lines: int) -> str:
+        if not text:
+            return ""
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        return "\n".join(lines[-max_lines:])
 
     def _json_request(self, method: str, url: str, payload: dict | None = None) -> dict:
         data = None

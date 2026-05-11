@@ -19,6 +19,7 @@ class SandboxExecutionStatus(str, Enum):
 class SandboxFailureStage(str, Enum):
     missing_workspace = "missing_workspace"
     dependency_materialization = "dependency_materialization"
+    image_build = "image_build"
     install = "install"
     verify = "verify"
     boot = "boot"

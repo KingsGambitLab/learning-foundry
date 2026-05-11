@@ -59,6 +59,119 @@ def _make_run(temp_dir: Path):
 
 
 class DockerSandboxRunnerTests(unittest.TestCase):
+    def test_image_build_failure_summary_uses_log_tail(self) -> None:
+        runner = DockerSandboxRunner()
+
+        build_log = "\n".join(
+            [
+                "#0 building with \"desktop-linux\" instance using docker driver",
+                "",
+                "#1 [internal] load build definition from Dockerfile",
+                "#1 transferring dockerfile: 409B done",
+                "#1 DONE 0.0s",
+                "",
+                "#2 [internal] load metadata for docker.io/library/maven:3.9.9-eclipse-temurin-21",
+                "#2 DONE 0.5s",
+                "",
+                "#7 [4/6] COPY mvnw ./mvnw",
+                "#7 ERROR: failed to calculate checksum of ref: \"/mvnw\": not found",
+                "------",
+                "Dockerfile:9",
+                "------",
+                "ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref: \"/mvnw\": not found",
+            ]
+        )
+
+        summary = runner._summarize_stage_failure(
+            deliverable_id="deliverable_1",
+            failed_stage=SandboxFailureStage.image_build,
+            error_text="Docker build for deliverable_1 failed (exit 1).",
+            logs=build_log,
+            default="image build failed",
+        )
+
+        self.assertIn("ERROR: failed to solve:", summary)
+        self.assertIn("deliverable_1 failed during image build", summary)
+
+    def test_image_build_failure_classifies_with_command_and_exit_code(self) -> None:
+        from app.services.learner_studio_service import RuntimeImageBuildError
+
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            assert spec is not None
+            assert workspace is not None
+
+            build_command = [
+                "docker",
+                "build",
+                "-t",
+                "course-gen-runtime:abc123",
+                ".",
+            ]
+            build_stderr = "\n".join(
+                [
+                    "#0 building with \"desktop-linux\" instance using docker driver",
+                    "#7 [4/6] COPY mvnw ./mvnw",
+                    "ERROR: failed to compute cache key: \"/mvnw\": not found",
+                    "ERROR: failed to solve: failed to compute cache key",
+                ]
+            )
+
+            runner = DockerSandboxRunner()
+            runner.runtime_harness = Mock()
+            runner.runtime_harness._allocate_port.side_effect = [
+                18001,
+                18002,
+                18003,
+                18004,
+            ]
+            runner.runtime_harness._runtime_manifest.return_value = {}
+            runner.runtime_harness._ephemeral_runtime_workspace.side_effect = lambda starter_root: nullcontext(starter_root)
+            runner.runtime_harness._workspace_runtime_image_name.side_effect = RuntimeImageBuildError(
+                "Docker build failed",
+                command=build_command,
+                returncode=1,
+                stdout="",
+                stderr=build_stderr,
+            )
+            runner.runtime_harness._remove_runtime_support.return_value = None
+            runner.runtime_harness._container_logs.return_value = ""
+            runner.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX = "[coursegen-runtime-stage] "
+            runner.dependency_contract_materializer.materialize = Mock(
+                return_value=SimpleNamespace(
+                    attempted=False,
+                    succeeded=True,
+                    stdout="",
+                    stderr="",
+                    image_name=None,
+                    synced_paths=[],
+                    command=[],
+                    return_code=0,
+                    error=None,
+                )
+            )
+
+            result = runner._execute_starter_harness(
+                workspace_root=Path(workspace.public_dir),
+                spec=spec,
+                workflow_run_id=run.id,
+                now=datetime.now(UTC),
+                started=time.perf_counter(),
+            )
+
+            self.assertGreaterEqual(len(result.deliverable_reports), 1)
+            report = result.deliverable_reports[0]
+            self.assertEqual(report.failed_stage, SandboxFailureStage.image_build)
+            self.assertEqual(report.stage_command, build_command)
+            self.assertEqual(report.stage_exit_code, 1)
+            self.assertFalse(report.compile_succeeded)
+            self.assertFalse(report.runtime_succeeded)
+            self.assertIn("ERROR: failed to solve:", report.error or "")
+            self.assertIn("ERROR: failed to solve:", report.stderr)
+
     def test_boot_failure_summary_prefers_useful_container_log_line(self) -> None:
         runner = DockerSandboxRunner()
 
