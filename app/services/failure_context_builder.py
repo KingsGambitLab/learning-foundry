@@ -10,6 +10,7 @@ from app.domain.workflow import (
     FailureContextDeliverableReport,
     FailureContextSandboxSummary,
     FailureContextValidationIssue,
+    FailureContextLastAttemptedRuntime,
     FailureContextVerifiedRuntime,
     FailureContextVerifiedRuntimeFile,
     ReviewerFinding,
@@ -60,6 +61,7 @@ def build_failure_context(
     phase = _phase(latest_node, validation_issues, sandbox)
     failure_signature = _failure_signature(latest_node, validation_issues, sandbox)
     previously_verified_runtime = _previously_verified_runtime(run, latest_node)
+    last_attempted_runtime = _last_attempted_runtime(run, latest_node)
     return FailureContext(
         source_node_kind=latest_node.kind,
         source_node_attempt=latest_node.attempt,
@@ -72,6 +74,7 @@ def build_failure_context(
         sandbox=sandbox,
         dependency_contracts=dependency_contracts,
         previously_verified_runtime=previously_verified_runtime,
+        last_attempted_runtime=last_attempted_runtime,
     )
 
 
@@ -434,6 +437,115 @@ def _previously_verified_runtime(
         current_failed_deliverables=current_failed_deliverables,
         verified_files=verified_files,
         dependency_contracts=dependency_contracts,
+    )
+
+
+_STAGE_ORDER = ("image_build", "install", "verify", "boot", "contract", "checks")
+
+
+def _stage_outcomes_for_report(report) -> dict[str, str]:
+    """Infer per-stage outcomes from a DeliverableSandboxReport.
+
+    Stages before `failed_stage` are inferred as `passed`; the failed stage is
+    `failed`; later stages are `not_run`. When the report has no `failed_stage`
+    but `compile_succeeded` / `runtime_succeeded` / `public_checks_passed` are
+    set, we fill those in directly.
+    """
+    failed_stage_value = report.failed_stage.value if report.failed_stage else None
+    outcomes: dict[str, str] = {}
+
+    if failed_stage_value is not None:
+        for stage in _STAGE_ORDER:
+            if stage == failed_stage_value:
+                outcomes[stage] = "failed"
+                break
+            outcomes[stage] = "passed"
+        # remaining stages didn't run
+        seen = set(outcomes)
+        for stage in _STAGE_ORDER:
+            if stage not in seen:
+                outcomes[stage] = "not_run"
+        return outcomes
+
+    # No structured failed_stage — fall back to boolean signals.
+    if report.compile_succeeded:
+        outcomes["image_build"] = "passed"
+        outcomes["install"] = "passed"
+    if report.runtime_succeeded:
+        outcomes["verify"] = "passed"
+        outcomes["boot"] = "passed"
+    if report.public_checks_passed is True:
+        outcomes["contract"] = "passed"
+        outcomes["checks"] = "passed"
+    elif report.public_checks_passed is False:
+        outcomes["contract"] = "failed"
+    return outcomes
+
+
+def _last_attempted_runtime(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+) -> FailureContextLastAttemptedRuntime | None:
+    history = run.artifacts.node_executions
+    latest_index = next(
+        (
+            index
+            for index, node in reversed(list(enumerate(history)))
+            if node.node_id == latest_node.node_id
+            and node.kind == latest_node.kind
+            and node.attempt == latest_node.attempt
+            and node.created_at == latest_node.created_at
+        ),
+        len(history),
+    )
+    runtime_node = next(
+        (
+            node
+            for node in reversed(history[:latest_index])
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}
+            and node.sandbox_result is not None
+            and node.sandbox_result.deliverable_reports
+        ),
+        None,
+    )
+    if runtime_node is None or runtime_node.sandbox_result is None:
+        return None
+
+    reports = list(runtime_node.sandbox_result.deliverable_reports)
+    if not reports:
+        return None
+    source_report = reports[0]
+    source_deliverable_id = source_report.deliverable_id
+
+    stage_outcomes = _stage_outcomes_for_report(source_report)
+
+    public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    verified_files = _verified_runtime_files(
+        public_root=public_root,
+        source_deliverable_id=source_deliverable_id,
+    )
+
+    # Whether each file should be preserved depends on which stages of the
+    # harness it contributed to. If `boot` passed, the entire runtime bundle
+    # (Dockerfile + install/verify/run.sh) is verified by the harness; if
+    # `install` passed, dependency-contract files are verified.
+    runtime_bundle_verified = stage_outcomes.get("boot") == "passed"
+    deps_verified = stage_outcomes.get("install") == "passed"
+    for file in verified_files:
+        if file.role == "runtime_protocol":
+            file.preserve_verbatim = runtime_bundle_verified
+        elif file.role == "dependency_contract":
+            file.preserve_verbatim = deps_verified
+        else:
+            file.preserve_verbatim = False
+
+    return FailureContextLastAttemptedRuntime(
+        source_node_kind=runtime_node.kind,
+        source_node_attempt=runtime_node.attempt,
+        attempted_at=runtime_node.created_at,
+        source_deliverable_id=source_deliverable_id,
+        stage_outcomes=stage_outcomes,
+        verified_files=verified_files,
     )
 
 

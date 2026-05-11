@@ -544,6 +544,90 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert verified_runtime["verified_files"][0]["path"] == "Dockerfile"
         assert verified_runtime["verified_files"][0]["content"] == "FROM rust:1.82-bookworm\n"
 
+    def test_repo_authoring_prompt_includes_last_attempted_runtime(self) -> None:
+        """When repair runs after a partial-success attempt (e.g. booted, only
+        contract failed), the prompt payload must carry `last_attempted_runtime`
+        with stage outcomes and the runtime protocol files so the model can
+        preserve what already worked.
+        """
+        from datetime import UTC, datetime
+        from app.domain.workflow import FailureContextLastAttemptedRuntime
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            assert spec is not None
+            deliverable = spec.deliverables[0]
+            workspace = run.artifacts.workspace_snapshot
+            assert workspace is not None
+            starter_root = Path(workspace.public_dir) / "starter" / deliverable.id
+            manifest = json.loads((starter_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+
+            failure_context = FailureContext(
+                source_node_kind=WorkflowNodeKind.authoring_runtime,
+                source_node_attempt=2,
+                source_summary="Public checks failed on attempt 1; image_build failed on attempt 2.",
+                last_attempted_runtime=FailureContextLastAttemptedRuntime(
+                    source_node_kind=WorkflowNodeKind.authoring_runtime,
+                    source_node_attempt=1,
+                    attempted_at=datetime.now(UTC),
+                    source_deliverable_id=deliverable.id,
+                    stage_outcomes={
+                        "image_build": "passed",
+                        "install": "passed",
+                        "verify": "passed",
+                        "boot": "passed",
+                        "contract": "failed",
+                    },
+                    verified_files=[
+                        FailureContextVerifiedRuntimeFile(
+                            path="Dockerfile",
+                            sha256="abc123",
+                            role="runtime_protocol",
+                            content="FROM eclipse-temurin:21\n",
+                            preserve_verbatim=True,
+                        ),
+                    ],
+                ),
+            )
+
+            service = OpenAIStarterRepoAuthoringService(enabled=False)
+            payload = service._prompt_payload(
+                run,
+                deliverable_id=deliverable.id,
+                starter_root=starter_root,
+                manifest=manifest,
+                failure_context=failure_context,
+            )
+
+        last_attempted = payload["failure_context"]["last_attempted_runtime"]
+        self.assertIsNotNone(last_attempted)
+        self.assertEqual(last_attempted["stage_outcomes"]["boot"], "passed")
+        self.assertEqual(last_attempted["stage_outcomes"]["contract"], "failed")
+        self.assertEqual(last_attempted["verified_files"][0]["path"], "Dockerfile")
+        self.assertEqual(last_attempted["verified_files"][0]["content"], "FROM eclipse-temurin:21\n")
+        self.assertTrue(last_attempted["verified_files"][0]["preserve_verbatim"])
+
+    def test_repo_authoring_system_prompt_directs_model_to_preserve_passing_stage_files(self) -> None:
+        """The system prompt for repo authoring must include explicit guidance
+        about `last_attempted_runtime.stage_outcomes`. Without it, the model
+        has no instruction to preserve files implicated only in stages that
+        already passed.
+        """
+        import inspect
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        self.assertIn(
+            "last_attempted_runtime",
+            source,
+            "Repo authoring system prompt must reference last_attempted_runtime so the model knows which files are pinned by previously-passing stages.",
+        )
+        self.assertIn(
+            "stage_outcomes",
+            source,
+            "Repo authoring system prompt must reference stage_outcomes so the model can scope edits to the actually-failing stage.",
+        )
+
     def test_repo_authoring_shared_codebase_uses_single_shared_repo_bundle_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run = _materialized_run(temp_dir)
