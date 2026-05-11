@@ -794,8 +794,16 @@ class LearnerStudioService:
         )
 
     def _container_logs(self, container_name: str) -> str | None:
+        """Return interleaved stdout+stderr from the container, last 500 lines.
+
+        Stage detection (``_runtime_stage_from_logs``) reads the stage marker
+        echoed by the install/verify/boot scripts, which lands on stdout — so
+        this method must keep merging both streams. The wider 500-line window
+        ensures long install/build streams aren't truncated before the
+        diagnostic line.
+        """
         result = subprocess.run(
-            [self.docker_binary, "logs", "--tail", "80", container_name],
+            [self.docker_binary, "logs", "--tail", "500", container_name],
             check=False,
             capture_output=True,
             text=True,
@@ -803,6 +811,26 @@ class LearnerStudioService:
         )
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         return logs or None
+
+    def _container_stderr(self, container_name: str) -> str | None:
+        """Return ONLY the container's stderr stream (errors + warnings).
+
+        ``docker logs`` writes the container's stdout to the docker CLI's
+        stdout and the container's stderr to the docker CLI's stderr, so we
+        just grab the subprocess's stderr verbatim. Last 500 lines.
+
+        Per-deliverable ``report.stderr`` should be stderr-only so the LLM
+        reads errors, not interleaved HTTP-200 noise.
+        """
+        result = subprocess.run(
+            [self.docker_binary, "logs", "--tail", "500", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        stderr_text = (result.stderr or "").strip()
+        return stderr_text or None
 
     def _wait_for_http(self, url: str, *, container_name: str | None = None) -> None:
         deadline = time.time() + self.start_timeout_s

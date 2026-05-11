@@ -1629,18 +1629,31 @@ class DockerSandboxRunner:
         logs: str | None,
         default: str,
     ) -> str:
-        if failed_stage == SandboxFailureStage.boot:
-            detail = self._first_useful_line(logs, error_text)
-        elif failed_stage == SandboxFailureStage.image_build:
-            detail = self._last_useful_line(logs, error_text)
-        else:
-            detail = self._first_useful_line(error_text, logs)
-        if failed_stage is None:
-            return detail or default
-        stage_label = failed_stage.value.replace("_", " ")
-        if detail:
-            return f"{deliverable_id} failed during {stage_label}: {detail}"
-        return f"{deliverable_id} failed during {stage_label}."
+        """Stage-agnostic failure summary: deliverable id + stage + tail of stderr.
+
+        We trust the LLM to read the ``stderr_excerpt`` the harness ships in
+        the failure context. The headline error is just a pointer: which
+        deliverable failed at which stage, plus a ~3-line tail teaser. The
+        full stderr is the canonical diagnostic.
+
+        Replaces the previous per-stage heuristics (``_first_useful_line`` /
+        ``_last_useful_line``) which had to be patched for every new
+        ecosystem footer (buildkit, maven, Go toolchain, etc.).
+        """
+        stage_label = (
+            failed_stage.value.replace("_", " ")
+            if failed_stage is not None
+            else "runtime"
+        )
+        # Prefer the container's stderr/logs (more focused, since the harness
+        # now feeds stderr-only here) over an opaque exception string. Fall
+        # back to whatever caller passed if logs are empty.
+        source = (logs or error_text or "").strip()
+        if not source:
+            return f"{deliverable_id} failed during {stage_label}."
+        tail_lines = [line for line in source.splitlines() if line.strip()][-3:]
+        teaser = " | ".join(tail_lines)
+        return f"{deliverable_id} failed during {stage_label}: {teaser}"
 
     def _summarize_failed_deliverables(
         self,

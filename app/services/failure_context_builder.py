@@ -214,7 +214,16 @@ def _deliverable_id_from_location(location: str | None) -> str | None:
     return None
 
 
-def _excerpt(text: str, *, max_chars: int = 1200) -> str | None:
+def _excerpt(text: str, *, max_chars: int = 8000) -> str | None:
+    """Tail-clipped excerpt of a (possibly huge) log stream.
+
+    Real ecosystem failures spill multi-KB of stderr — Go's ``go mod tidy``
+    can dump a 5KB dependency tree before the version-mismatch error, Maven
+    prints the full effective POM, Docker buildkit's ``------`` block runs
+    a few KB. We default to an 8KB tail (~200 lines x 40 chars) so the
+    canonical diagnostic at the end of the log survives the prompt budget.
+    Tail strategy is correct here: errors are at the END of the stream.
+    """
     cleaned = (text or "").strip()
     if not cleaned:
         return None
