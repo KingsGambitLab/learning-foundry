@@ -8,6 +8,7 @@ from hashlib import sha256
 from pydantic import BaseModel
 
 from app.domain.ai import merge_ai_usage
+from app.domain.sandbox import SandboxExecutionStatus
 from app.domain.workflow import (
     FailureContext,
     FailureContextValidationIssue,
@@ -30,6 +31,7 @@ class TaskAgentRetryAction(str, Enum):
     blocked_platform = "blocked_platform"
     no_material_change = "no_material_change"
     unresolved_blocker = "unresolved_blocker"
+    runtime_regressed = "runtime_regressed"
 
 
 class TaskAgentRetryResult(BaseModel):
@@ -88,6 +90,21 @@ class TaskAgentRetryService:
             )
 
         if _should_retry_workspace(failure_context, latest_node):
+            runtime_regression = _runtime_regressed_after_reviewer_repair(run, latest_node)
+            if runtime_regression is not None:
+                return run, TaskAgentRetryResult(
+                    action=TaskAgentRetryAction.runtime_regressed,
+                    applied=False,
+                    should_continue=False,
+                    owner_hint=failure_context.owner_hint,
+                    failure_signature=failure_context.failure_signature,
+                    before_spec_hash=before_spec_hash,
+                    after_spec_hash=before_spec_hash,
+                    summary=(
+                        "Retry stopped because a reviewer-side repair regressed a starter runtime that had already passed."
+                    ),
+                    detail=runtime_regression,
+                )
             if _workspace_blocker_repeated(run, latest_node, failure_context):
                 return run, TaskAgentRetryResult(
                     action=TaskAgentRetryAction.unresolved_blocker,
@@ -223,7 +240,7 @@ def _should_retry_workspace(
         return False
     if latest_node.kind.value in {"authoring_runtime", "reviewer_runtime"}:
         return True
-    if failure_context.sandbox is not None:
+    if failure_context.sandbox is not None and bool(failure_context.sandbox.failed_deliverables):
         return True
     authored_codes = {
         "starter_repo_bundle_not_authored",
@@ -237,6 +254,78 @@ def _should_retry_workspace(
     if any(finding.code in authored_codes for finding in failure_context.findings):
         return True
     return False
+
+
+def _runtime_regressed_after_reviewer_repair(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+) -> str | None:
+    if latest_node.kind not in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}:
+        return None
+    if latest_node.sandbox_result is None:
+        return None
+
+    current_failed = {
+        report.deliverable_id
+        for report in latest_node.sandbox_result.deliverable_reports
+        if not report.compile_succeeded or not report.runtime_succeeded or bool(report.error)
+    }
+    if not current_failed:
+        return None
+
+    history = run.artifacts.node_executions
+    latest_index = next(
+        (
+            index
+            for index, node in reversed(list(enumerate(history)))
+            if node.node_id == latest_node.node_id
+            and node.kind == latest_node.kind
+            and node.attempt == latest_node.attempt
+            and node.created_at == latest_node.created_at
+        ),
+        None,
+    )
+    if latest_index is None:
+        return None
+
+    prior_runtime = next(
+        (
+            node
+            for node in reversed(history[:latest_index])
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}
+            and node.status == WorkflowNodeStatus.passed
+            and node.sandbox_result is not None
+            and node.sandbox_result.status == SandboxExecutionStatus.passed
+        ),
+        None,
+    )
+    if prior_runtime is None or prior_runtime.sandbox_result is None:
+        return None
+
+    prior_index = history.index(prior_runtime)
+    reviewer_repairs = [
+        node
+        for node in history[prior_index + 1 : latest_index]
+        if node.kind == WorkflowNodeKind.reviewer_repair and node.status == WorkflowNodeStatus.passed
+    ]
+    if not reviewer_repairs:
+        return None
+
+    previously_passing = {
+        report.deliverable_id
+        for report in prior_runtime.sandbox_result.deliverable_reports
+        if report.compile_succeeded and report.runtime_succeeded
+    }
+    regressed = sorted(previously_passing & current_failed)
+    if not regressed:
+        return None
+
+    return (
+        "Runtime regressed after reviewer repair for deliverables "
+        + ", ".join(regressed)
+        + f". The last passing runtime was {prior_runtime.kind.value} attempt {prior_runtime.attempt}; "
+        "preserve the previously verified runtime bundle and address only the new reviewer findings."
+    )
 
 
 def _workspace_blocker_repeated(

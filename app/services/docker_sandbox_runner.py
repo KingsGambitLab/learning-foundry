@@ -839,7 +839,10 @@ class DockerSandboxRunner:
         logs: str | None,
         default: str,
     ) -> str:
-        detail = self._first_useful_line(error_text, logs)
+        if failed_stage == SandboxFailureStage.boot:
+            detail = self._first_useful_line(logs, error_text)
+        else:
+            detail = self._first_useful_line(error_text, logs)
         if failed_stage is None:
             return detail or default
         stage_label = failed_stage.value.replace("_", " ")
@@ -872,6 +875,12 @@ class DockerSandboxRunner:
 
     def _first_useful_line(self, *texts: str | None) -> str | None:
         ignored_prefixes = (self.runtime_harness._RUNTIME_STAGE_MARKER_PREFIX,)
+        ignored_substrings = (
+            "timed out waiting for 'http://",
+            "stopped before 'http://",
+            "last error:",
+            "container logs:",
+        )
         for text in texts:
             cleaned = (text or "").strip()
             if not cleaned:
@@ -881,6 +890,8 @@ class DockerSandboxRunner:
                 if not candidate:
                     continue
                 if any(candidate.startswith(prefix) for prefix in ignored_prefixes):
+                    continue
+                if any(fragment in candidate.lower() for fragment in ignored_substrings):
                     continue
                 return candidate
         return None

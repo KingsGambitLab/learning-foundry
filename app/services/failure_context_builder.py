@@ -3,19 +3,25 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
+from pathlib import Path
 
 from app.domain.workflow import (
     FailureContext,
     FailureContextDeliverableReport,
     FailureContextSandboxSummary,
     FailureContextValidationIssue,
+    FailureContextVerifiedRuntime,
+    FailureContextVerifiedRuntimeFile,
     ReviewerFinding,
     WorkflowFailureOwnerHint,
     WorkflowNodeExecution,
     WorkflowNodeKind,
     WorkflowRun,
 )
-from app.services.runtime_contract_surface import dependency_contract_facts_for_deliverables
+from app.services.runtime_contract_surface import (
+    STARTER_RUNTIME_PROTOCOL_PATHS,
+    dependency_contract_facts_for_deliverables,
+)
 
 _REVIEWER_KINDS = {
     WorkflowNodeKind.reviewer_runtime,
@@ -50,6 +56,7 @@ def build_failure_context(
     owner_hint = _owner_hint(latest_node, validation_issues, sandbox)
     phase = _phase(latest_node, validation_issues, sandbox)
     failure_signature = _failure_signature(latest_node, validation_issues, sandbox)
+    previously_verified_runtime = _previously_verified_runtime(run, latest_node)
     return FailureContext(
         source_node_kind=latest_node.kind,
         source_node_attempt=latest_node.attempt,
@@ -61,6 +68,7 @@ def build_failure_context(
         validation_issues=validation_issues,
         sandbox=sandbox,
         dependency_contracts=dependency_contracts,
+        previously_verified_runtime=previously_verified_runtime,
     )
 
 
@@ -353,3 +361,89 @@ def _structured_failed_stage(
         if report.failed_stage:
             return report.failed_stage
     return None
+
+
+def _previously_verified_runtime(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+) -> FailureContextVerifiedRuntime | None:
+    history = run.artifacts.node_executions
+    latest_index = next(
+        (
+            index
+            for index, node in reversed(list(enumerate(history)))
+            if node.node_id == latest_node.node_id
+            and node.kind == latest_node.kind
+            and node.attempt == latest_node.attempt
+            and node.created_at == latest_node.created_at
+        ),
+        len(history),
+    )
+    runtime_node = next(
+        (
+            node
+            for node in reversed(history[:latest_index])
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}
+            and node.status.value == "passed"
+            and node.sandbox_result is not None
+            and node.sandbox_result.status.value == "passed"
+        ),
+        None,
+    )
+    if runtime_node is None or runtime_node.sandbox_result is None:
+        return None
+
+    passed_deliverables = [
+        report.deliverable_id
+        for report in runtime_node.sandbox_result.deliverable_reports
+        if report.compile_succeeded and report.runtime_succeeded
+    ]
+    if not passed_deliverables:
+        return None
+
+    public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    runtime_plan = (
+        run.artifacts.task_agent_spec.project_contract.runtime_plan
+        if run.artifacts.task_agent_spec is not None
+        else None
+    )
+    dependency_contracts = dependency_contract_facts_for_deliverables(
+        public_root=public_root,
+        runtime_plan=runtime_plan,
+        deliverable_ids=passed_deliverables,
+    )
+    runtime_protocol_files = _verified_runtime_protocol_files(
+        public_root=public_root,
+        source_deliverable_id=passed_deliverables[0],
+    )
+    return FailureContextVerifiedRuntime(
+        source_node_kind=runtime_node.kind,
+        source_node_attempt=runtime_node.attempt,
+        verified_at=runtime_node.created_at,
+        source_deliverable_id=passed_deliverables[0],
+        passed_deliverables=passed_deliverables,
+        runtime_protocol_files=runtime_protocol_files,
+        dependency_contracts=dependency_contracts,
+    )
+
+
+def _verified_runtime_protocol_files(
+    *,
+    public_root: str | None,
+    source_deliverable_id: str,
+) -> list[FailureContextVerifiedRuntimeFile]:
+    if not public_root:
+        return []
+    starter_root = Path(public_root) / "starter" / source_deliverable_id
+    files: list[FailureContextVerifiedRuntimeFile] = []
+    for relative_path in STARTER_RUNTIME_PROTOCOL_PATHS:
+        target = starter_root / relative_path
+        if not target.exists() or not target.is_file():
+            continue
+        files.append(
+            FailureContextVerifiedRuntimeFile(
+                path=relative_path,
+                sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+            )
+        )
+    return files

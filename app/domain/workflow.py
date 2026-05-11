@@ -131,6 +131,21 @@ class FailureContextDependencyContract(BaseModel):
     runtime_bundle_complete: bool = False
 
 
+class FailureContextVerifiedRuntimeFile(BaseModel):
+    path: str
+    sha256: str
+
+
+class FailureContextVerifiedRuntime(BaseModel):
+    source_node_kind: WorkflowNodeKind
+    source_node_attempt: int
+    verified_at: datetime
+    source_deliverable_id: str | None = None
+    passed_deliverables: list[str] = Field(default_factory=list)
+    runtime_protocol_files: list[FailureContextVerifiedRuntimeFile] = Field(default_factory=list)
+    dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
+
+
 class FailureContextSandboxSummary(BaseModel):
     error: str | None = None
     build_stdout_excerpt: str | None = None
@@ -152,6 +167,7 @@ class FailureContext(BaseModel):
     validation_issues: list[FailureContextValidationIssue] = Field(default_factory=list)
     sandbox: FailureContextSandboxSummary | None = None
     dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
+    previously_verified_runtime: FailureContextVerifiedRuntime | None = None
 
 
 class WorkflowNodeExecution(BaseModel):

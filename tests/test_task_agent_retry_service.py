@@ -359,6 +359,39 @@ def _authored_failure_sandbox_result(run_id: str) -> SandboxExecutionResult:
     )
 
 
+def _passing_runtime_sandbox_result(run_id: str) -> SandboxExecutionResult:
+    return SandboxExecutionResult(
+        status=SandboxExecutionStatus.passed,
+        available=True,
+        build_succeeded=True,
+        run_succeeded=True,
+        generated_at=datetime.now(UTC),
+        workspace_root=f"/tmp/{run_id}",
+        error=None,
+        deliverable_reports=[
+            DeliverableSandboxReport(
+                deliverable_id=deliverable_id,
+                compile_succeeded=True,
+                runtime_succeeded=True,
+            )
+            for deliverable_id in ("deliverable_1", "deliverable_2", "deliverable_3", "deliverable_4")
+        ],
+    )
+
+
+def _passing_runtime_node(*, kind: WorkflowNodeKind, attempt: int = 1) -> WorkflowNodeExecution:
+    return WorkflowNodeExecution(
+        node_id=f"{kind.value}_{attempt}",
+        kind=kind,
+        status=WorkflowNodeStatus.passed,
+        attempt=attempt,
+        summary="Generated assignment compiled and booted inside the Docker sandbox.",
+        created_at=datetime.now(UTC),
+        sandbox_result=_passing_runtime_sandbox_result("run_test"),
+        findings=[],
+    )
+
+
 class TaskAgentRetryServiceTests(TestCase):
     def test_retry_service_stops_on_platform_runtime_failure(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -458,6 +491,34 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertTrue(updated_run.artifacts.task_agent_spec.deliverables[0].title.endswith("Revised"))
             self.assertIsNotNone(updated_run.artifacts.workspace_snapshot)
 
+    def test_retry_service_does_not_force_workspace_repair_for_reviewer_code_with_only_passing_sandbox_context(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            reviser = _RevisingAuthoringService()
+            workspace_authoring = _RepairingWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            retry_service = TaskAgentRetryService(
+                authoring_service=reviser,
+                workspace_authoring_service=workspace_authoring,
+            )
+
+            prior_reviewer_runtime = _passing_runtime_node(kind=WorkflowNodeKind.reviewer_runtime, attempt=1)
+            latest = _approval_claim_failure_node()
+            latest.attempt = 1
+            run.artifacts.node_executions = [prior_reviewer_runtime, latest]
+
+            updated_run, result = retry_service.retry(run, latest)
+
+            self.assertTrue(result.applied)
+            self.assertTrue(result.should_continue)
+            self.assertEqual(result.action, TaskAgentRetryAction.revised)
+            self.assertEqual(workspace_authoring.repair_calls, 0)
+            self.assertIsNotNone(reviser.last_failure_context)
+            self.assertFalse(result.skip_workspace_authoring)
+            self.assertIs(updated_run, run)
+
     def test_failure_context_prefers_structured_sandbox_stage_over_string_guessing(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
@@ -472,6 +533,34 @@ class TaskAgentRetryServiceTests(TestCase):
                 ["sh", ".coursegen/runtime/verify.sh"],
             )
             self.assertEqual(failure_context.sandbox.deliverable_reports[0].stage_exit_code, 1)
+
+    def test_failure_context_includes_previously_verified_runtime_facts(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+            prior_runtime = _passing_runtime_node(kind=WorkflowNodeKind.authoring_runtime, attempt=1)
+            latest = _authored_failure_node()
+            latest.node_id = "authoring_runtime_2"
+            latest.attempt = 2
+            latest.created_at = datetime.now(UTC)
+            run.artifacts.node_executions = [prior_runtime, latest]
+
+            failure_context = build_failure_context(run, latest)
+
+            self.assertIsNotNone(failure_context.previously_verified_runtime)
+            verified = failure_context.previously_verified_runtime
+            assert verified is not None
+            self.assertEqual(verified.source_node_kind, WorkflowNodeKind.authoring_runtime)
+            self.assertEqual(verified.source_node_attempt, 1)
+            self.assertEqual(
+                verified.passed_deliverables,
+                ["deliverable_1", "deliverable_2", "deliverable_3", "deliverable_4"],
+            )
+            self.assertIn("Dockerfile", [item.path for item in verified.runtime_protocol_files])
 
     def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -737,6 +826,42 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(result.action, TaskAgentRetryAction.unresolved_blocker)
             self.assertEqual(workspace_authoring.repair_calls, 0)
             self.assertIn("same workspace blocker survived", result.summary.lower())
+
+    def test_retry_service_stops_when_reviewer_repair_regresses_runtime(self) -> None:
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = _RepairingWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            retry_service = TaskAgentRetryService(
+                authoring_service=_RevisingAuthoringService(),
+                workspace_authoring_service=workspace_authoring,
+            )
+
+            prior_runtime = _passing_runtime_node(kind=WorkflowNodeKind.authoring_runtime, attempt=3)
+            reviewer_repair = WorkflowNodeExecution(
+                node_id="reviewer_repair_1",
+                kind=WorkflowNodeKind.reviewer_repair,
+                status=WorkflowNodeStatus.passed,
+                attempt=1,
+                summary="Reviewer repair updated the shared repo.",
+                created_at=datetime.now(UTC),
+            )
+            regressed_runtime = _authored_failure_node()
+            regressed_runtime.node_id = "authoring_runtime_4"
+            regressed_runtime.attempt = 4
+            regressed_runtime.created_at = datetime.now(UTC)
+            run.artifacts.node_executions = [prior_runtime, reviewer_repair, regressed_runtime]
+
+            updated_run, result = retry_service.retry(run, regressed_runtime)
+
+            self.assertIs(updated_run, run)
+            self.assertFalse(result.applied)
+            self.assertFalse(result.should_continue)
+            self.assertEqual(result.action, TaskAgentRetryAction.runtime_regressed)
+            self.assertEqual(workspace_authoring.repair_calls, 0)
+            self.assertIn("regressed a starter runtime", result.summary.lower())
 
     def test_retry_service_blocks_platform_owned_starter_compiler_failure(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
