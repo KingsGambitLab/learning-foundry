@@ -84,7 +84,7 @@ class DataSourceSpec(BaseModel):
 
 class RuntimeDependencySpec(BaseModel):
     execution_surface: ExecutionSurface
-    starter_type: StarterType = StarterType.partial_implementation
+    starter_type: StarterType = StarterType.partial
     implementation_language: str | None = None
     language_version: str | None = None
     application_framework: str | None = None
@@ -274,7 +274,6 @@ class DeliverableSpec(BaseModel):
     id: str
     title: str
     objective: str
-    starter_type: StarterType
     overlay_ids: list[str] = Field(default_factory=list)
     learning_outcomes: list[str] = Field(default_factory=list)
     learner_starter_surface: LearnerStarterSurfaceSpec | None = None

@@ -867,7 +867,7 @@ class LangGraphAssignmentGraph:
             baseline = self.baseline_verifier.verify_deliverable(
                 workspace_root=deliverable_dir,
                 spec=spec,
-                starter_type=deliverable.starter_type,
+                starter_type=spec.runtime_dependencies.starter_type,
             )
             blockers.update(
                 (issue.code, issue.relative_path or f"starter/{deliverable.id}")
@@ -1396,7 +1396,7 @@ class LangGraphAssignmentGraph:
                 baseline = self.baseline_verifier.verify_deliverable(
                     workspace_root=deliverable_dir,
                     spec=spec,
-                    starter_type=deliverable.starter_type,
+                    starter_type=spec.runtime_dependencies.starter_type,
                 )
                 for issue in baseline.errors:
                     learner_checks_valid = False

@@ -378,7 +378,7 @@ class ArtifactMaterializer:
                     "",
                     deliverable.objective,
                     "",
-                    f"- Starter type: `{deliverable.starter_type.value}`",
+                    f"- Starter type: `{spec.runtime_dependencies.starter_type.value}`",
                     f"- Active visible checks: {', '.join(f'`{item}`' for item in gate.active_public_check_ids) or 'none'}",
                     "",
                 ]

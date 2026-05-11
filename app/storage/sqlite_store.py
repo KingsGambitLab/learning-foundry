@@ -892,10 +892,46 @@ class SQLiteWorkflowStore:
                 }
         return payload
 
+    @staticmethod
+    def _coerce_legacy_starter_type(value: object) -> str | None:
+        """Map legacy four-value starter_type strings onto the new two-value enum.
+
+        Pre-refactor rows may carry `bare_stub`, `partial_implementation`,
+        `working_buggy`, or `working_suboptimal`. Defensive read-side coerce so
+        we never feed those into the new Pydantic enum.
+        """
+        if not isinstance(value, str):
+            return None
+        legacy = value.strip().lower()
+        if legacy == "bare_stub":
+            return "empty"
+        if legacy in {"partial_implementation", "working_buggy", "working_suboptimal"}:
+            return "partial"
+        if legacy in {"empty", "partial"}:
+            return legacy
+        return None
+
     def _normalize_task_agent_spec_payload(self, payload: dict) -> dict:
         package_type = payload.get("package_type", "progressive_codebase_course")
         course_structure = payload.get("course_structure")
         runtime_dependencies = payload.get("runtime_dependencies")
+        if isinstance(runtime_dependencies, dict):
+            legacy_starter = self._coerce_legacy_starter_type(
+                runtime_dependencies.get("starter_type")
+            )
+            if legacy_starter is not None:
+                runtime_dependencies = {
+                    **runtime_dependencies,
+                    "starter_type": legacy_starter,
+                }
+        deliverables_payload = payload.get("deliverables")
+        if isinstance(deliverables_payload, list):
+            sanitized_deliverables = []
+            for entry in deliverables_payload:
+                if isinstance(entry, dict) and "starter_type" in entry:
+                    entry = {key: value for key, value in entry.items() if key != "starter_type"}
+                sanitized_deliverables.append(entry)
+            payload = {**payload, "deliverables": sanitized_deliverables}
         capabilities = payload.get("capabilities")
         assessment_strategy = payload.get("assessment_strategy")
         project_contract = payload.get("project_contract")
@@ -1004,7 +1040,7 @@ class SQLiteWorkflowStore:
             "runtime_dependencies": (
                 {
                     "execution_surface": "http_service",
-                    "starter_type": StarterType.partial_implementation.value,
+                    "starter_type": StarterType.partial.value,
                     "implementation_language": resolved_language,
                     "language_version": resolved_language_version,
                     "application_framework": resolved_framework,
@@ -1024,7 +1060,7 @@ class SQLiteWorkflowStore:
                 if runtime_dependencies is None
                 else {
                     **runtime_dependencies,
-                    "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial_implementation.value,
+                    "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial.value,
                     "implementation_language": runtime_dependencies.get("implementation_language") or resolved_language,
                     "language_version": runtime_dependencies.get("language_version") or resolved_language_version,
                     "application_framework": runtime_dependencies.get("application_framework") or resolved_framework,

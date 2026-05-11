@@ -32,7 +32,7 @@ def build_task_agent_grader_plan(spec: TaskAgentServiceSpec, deliverable_id: str
         deliverable_id=deliverable.id,
         deliverable_title=deliverable.title,
         deliverable_objective=deliverable.objective,
-        starter_type=deliverable.starter_type.value,
+        starter_type=spec.runtime_dependencies.starter_type.value,
         overlay_ids=deliverable.overlay_ids,
         cumulative_deliverables=gate.cumulative_deliverables,
         active_behavior_ids=[check.id for check in deliverable.public_checks],

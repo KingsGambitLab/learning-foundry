@@ -1396,13 +1396,9 @@ class CourseGenerationService:
         )
 
     def _starter_type_for_goal(self, lowered_goal: str) -> StarterType:
-        if any(keyword in lowered_goal for keyword in ["buggy", "fix", "debug", "legacy", "broken"]):
-            return StarterType.working_buggy
-        if any(keyword in lowered_goal for keyword in ["refactor", "improve", "optimize", "suboptimal"]):
-            return StarterType.working_suboptimal
         if any(keyword in lowered_goal for keyword in ["from scratch", "blank", "implement everything"]):
-            return StarterType.bare_stub
-        return StarterType.partial_implementation
+            return StarterType.empty
+        return StarterType.partial
 
     def _infer_default_data_sources(self, lowered_goal: str) -> list[DataSourceSpec]:
         if any(
@@ -1494,7 +1490,7 @@ class CourseGenerationService:
             else "We will create the course as separate deliverable projects.",
             (
                 "Learners start from a starter app with key pieces already wired."
-                if creator_choices.starter_type != StarterType.bare_stub
+                if creator_choices.starter_type != StarterType.empty
                 else "Learners start closer to a blank starter and implement most of the system themselves."
             ),
         ]
@@ -1562,9 +1558,7 @@ class CourseGenerationService:
                 + ", ".join(f"`{item}`" for item in creator_choices.tech_stack[:3])
                 + "."
             )
-        if creator_choices.starter_type.name.startswith("working"):
-            notes.append("Learners should inherit a starter that already runs, then improve it.")
-        elif creator_choices.starter_type == creator_choices.starter_type.partial_implementation:
+        if creator_choices.starter_type == StarterType.partial:
             notes.append("Learners should inherit a partial starter so they can focus on the core change.")
         else:
             notes.append("Learners should implement most of this deliverable themselves from a bare starter.")

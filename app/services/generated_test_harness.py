@@ -353,7 +353,7 @@ class GeneratedTestBaselineVerifier:
 
         starter_visible = by_key.get(("starter_repo", "visible"))
         starter_hidden = by_key.get(("starter_repo", "hidden"))
-        if starter_type in {StarterType.bare_stub, StarterType.partial_implementation}:
+        if starter_type == StarterType.empty or starter_type == StarterType.partial:
             if starter_visible is not None and starter_visible.passed:
                 errors.append(
                     BaselineValidationIssue(
@@ -370,17 +370,6 @@ class GeneratedTestBaselineVerifier:
                         level="error",
                         code="starter_hidden_tests_passed_partial_repo",
                         message="The hidden suite passed against a partial starter that should still fail deeper checks.",
-                        baseline="starter_repo",
-                        suite_type="hidden",
-                    )
-                )
-        elif starter_type in {StarterType.working_buggy, StarterType.working_suboptimal}:
-            if starter_hidden is not None and starter_hidden.passed:
-                errors.append(
-                    BaselineValidationIssue(
-                        level="error",
-                        code="starter_hidden_tests_passed_buggy_repo",
-                        message="The hidden suite passed against a starter that is supposed to be incorrect or incomplete in meaningful ways.",
                         baseline="starter_repo",
                         suite_type="hidden",
                     )
