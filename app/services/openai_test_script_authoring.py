@@ -264,7 +264,11 @@ class OpenAITestScriptAuthoringService:
                         "Therefore both the visible AND hidden suites MUST fail against the untouched shared starter. A test that passes against the untouched shared starter is broken: it is not exercising any deliverable behavior and must be rewritten or removed. "
                         "Use only the published endpoints and the actual learner files in the prompt, plus any dependency-contract or runtime protocol files provided separately. "
                         "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
-                        "Do not import the learner application directly."
+                        "Do not import the learner application directly. "
+                        "The authored scripts will be shipped under `public/checks/<deliverable_id>/run_visible_checks.py` and `private/grader/<deliverable_id>/run_hidden_checks.py`. "
+                        "Both scripts MUST be fully self-contained. Do NOT read any file from disk at runtime — no manifest, no fixtures, no config JSON, no `.coursegen/deliverable.json`, no `Path(__file__).parents[N] / ...` indirection. The visible script in particular ships to learners and CANNOT reach the per-deliverable manifest under `private/`; reading it at runtime guarantees a `FileNotFoundError` crash. "
+                        "Inline every input as a Python literal in the script itself: request bodies, request paths, expected status codes, expected response fields, ids, sample payloads, fixture strings. Take the values from the `manifest.public_checks` and `public_endpoints` already provided in this prompt payload. "
+                        "The ONLY runtime inputs the scripts may consume are the environment variables `BASE_URL` (the live app URL) and `REPORT_PATH` (the optional JSON report destination). Nothing else from disk or env."
                     ),
                 },
                 {"role": "user", "content": json.dumps(payload, indent=2)},

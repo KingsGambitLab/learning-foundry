@@ -1291,5 +1291,64 @@ class AuthoringPayloadTests(unittest.TestCase):
         assert runtime_protocol_bundle["authored_paths"] == [RUNTIME_INSTALL_SCRIPT_PATH]
 
 
+class TestScriptAuthoringSelfContainedPromptTests(unittest.TestCase):
+    """Pass 12.
+
+    The visible test script the LLM authors lives in `public/checks/<id>/` and
+    ships to learners. The per-deliverable manifest lives in `private/grader/<id>/`
+    after Pass 2. A visible script that reads the manifest at runtime crashes
+    with FileNotFoundError (manifest not at any reachable public-side path) and
+    even if the path were correct, learners would never have `private/` in
+    their workspace. The fix is structural: the script must be self-contained.
+
+    These assertions pin the prompt directive so a future edit can't quietly
+    re-introduce the legacy "read manifest at runtime" pattern.
+    """
+
+    def test_test_script_authoring_prompt_forbids_runtime_file_reads(self) -> None:
+        import inspect
+        from app.services.openai_test_script_authoring import (
+            OpenAITestScriptAuthoringService,
+        )
+
+        source = inspect.getsource(OpenAITestScriptAuthoringService)
+        lowered = source.lower()
+        self.assertIn("self-contained", lowered,
+                      "Prompt must declare scripts MUST be self-contained.")
+        self.assertIn("do not read any file from disk at runtime", lowered,
+                      "Prompt must explicitly forbid runtime file reads.")
+        # The legacy path the model kept reaching for must be called out by name
+        # so the model doesn't re-emit it on the next attempt.
+        self.assertIn(".coursegen/deliverable.json", lowered,
+                      "Prompt should name the legacy `.coursegen/deliverable.json` "
+                      "path explicitly as forbidden.")
+
+    def test_test_script_authoring_prompt_directs_inlining_test_data(self) -> None:
+        import inspect
+        from app.services.openai_test_script_authoring import (
+            OpenAITestScriptAuthoringService,
+        )
+
+        source = inspect.getsource(OpenAITestScriptAuthoringService)
+        lowered = source.lower()
+        # The prompt must direct the model to inline literals.
+        self.assertIn("inline", lowered)
+        # The prompt should name the canonical sources the model takes literals
+        # from (manifest.public_checks + public_endpoints) so it has somewhere
+        # concrete to look at authoring time.
+        self.assertIn("public_checks", source)
+
+    def test_test_script_authoring_prompt_limits_runtime_inputs_to_env_vars(self) -> None:
+        import inspect
+        from app.services.openai_test_script_authoring import (
+            OpenAITestScriptAuthoringService,
+        )
+
+        source = inspect.getsource(OpenAITestScriptAuthoringService)
+        # The only runtime inputs allowed are BASE_URL and REPORT_PATH.
+        self.assertIn("BASE_URL", source)
+        self.assertIn("REPORT_PATH", source)
+
+
 if __name__ == "__main__":
     unittest.main()
