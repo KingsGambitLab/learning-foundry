@@ -189,6 +189,10 @@ def _sandbox_summary(
                 stage_exit_code=report.stage_exit_code,
                 error=report.error,
                 stderr_excerpt=_excerpt(report.stderr),
+                stdout_excerpt=_excerpt(report.stdout_tail or report.stdout),
+                exit_state=report.exit_state,
+                sidecar_diagnostics=_apply_sidecar_excerpts(report.sidecar_diagnostics),
+                http_response=_apply_http_response_excerpt(report.http_response),
             )
             for report in failed_reports[:8]
         ],
@@ -212,6 +216,45 @@ def _deliverable_id_from_location(location: str | None) -> str | None:
             if candidate.startswith("deliverable"):
                 return candidate
     return None
+
+
+def _apply_sidecar_excerpts(
+    sidecar_diagnostics: dict[str, dict] | None,
+) -> dict[str, dict] | None:
+    """Tail-clip the text fields inside each sidecar's diagnostics.
+
+    Postgres can dump kilobytes of buffer-pool stats before the actual
+    FATAL line; redis can spew Lua traces. We apply the same 8KB tail
+    cap as :func:`_excerpt` to ``stderr_tail`` / ``stdout_tail`` so the
+    canonical diagnostic at the end of the stream survives the prompt
+    budget. ``exit_state`` passes through untouched.
+    """
+    if not sidecar_diagnostics:
+        return None
+    trimmed: dict[str, dict] = {}
+    for service_id, payload in sidecar_diagnostics.items():
+        if not isinstance(payload, dict):
+            continue
+        trimmed[service_id] = {
+            "stderr_tail": _excerpt(payload.get("stderr_tail") or ""),
+            "stdout_tail": _excerpt(payload.get("stdout_tail") or ""),
+            "exit_state": payload.get("exit_state"),
+        }
+    return trimmed or None
+
+
+def _apply_http_response_excerpt(http_response: dict | None) -> dict | None:
+    """Tail-clip the response body in a captured contract-probe HTTP
+    exchange so very large error bodies (stack traces, framework error
+    pages) don't blow the prompt budget.
+    """
+    if not http_response:
+        return None
+    trimmed = dict(http_response)
+    body = trimmed.get("response_body_text")
+    if isinstance(body, str):
+        trimmed["response_body_text"] = _excerpt(body)
+    return trimmed
 
 
 def _excerpt(text: str, *, max_chars: int = 8000) -> str | None:

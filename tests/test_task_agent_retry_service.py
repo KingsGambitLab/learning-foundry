@@ -531,6 +531,124 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertFalse(result.skip_workspace_authoring)
             self.assertIs(updated_run, run)
 
+    def test_failure_context_propagates_sidecar_diagnostics(self) -> None:
+        """``DeliverableSandboxReport`` carries Pass-8 diagnostic fields
+        (stdout_tail, exit_state, sidecar_diagnostics, http_response).
+        ``FailureContextDeliverableReport`` must surface those in the
+        repair packet (capped to 8KB per text field) so the LLM sees
+        sidecar postgres/redis errors, OOM-kills, framework boot logs,
+        and contract-probe HTTP response bodies — without losing them
+        to the per-stage stderr summary.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            sandbox_result = SandboxExecutionResult(
+                status=SandboxExecutionStatus.failed,
+                available=True,
+                build_succeeded=True,
+                run_succeeded=False,
+                generated_at=datetime.now(UTC),
+                workspace_root=str(temp_dir / "workspaces"),
+                deliverable_reports=[
+                    DeliverableSandboxReport(
+                        deliverable_id="deliverable_1",
+                        compile_succeeded=True,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.boot,
+                        stage_command=["sh", ".coursegen/runtime/run.sh"],
+                        stage_exit_code=137,
+                        stderr="HikariPool boot failed",
+                        stdout="Started ledger app",
+                        error="deliverable_1 failed during boot: HikariPool boot failed",
+                        stdout_tail="Spring Boot started\nAttempting db connection",
+                        exit_state={
+                            "exit_code": 137,
+                            "oom_killed": True,
+                            "status": "exited",
+                            "error": None,
+                        },
+                        sidecar_diagnostics={
+                            "postgres": {
+                                "stderr_tail": "FATAL: out of memory",
+                                "stdout_tail": None,
+                                "exit_state": {
+                                    "exit_code": 137,
+                                    "oom_killed": True,
+                                    "status": "exited",
+                                    "error": None,
+                                },
+                            },
+                            "redis": {
+                                "stderr_tail": None,
+                                "stdout_tail": "Ready to accept connections",
+                                "exit_state": {
+                                    "exit_code": 0,
+                                    "oom_killed": False,
+                                    "status": "running",
+                                    "error": None,
+                                },
+                            },
+                        },
+                        http_response={
+                            "request_method": "POST",
+                            "request_path": "/ledger/debit",
+                            "request_body": {"account_id": "a1", "amount": 100},
+                            "response_status": 500,
+                            "response_headers": {"content-type": "application/json"},
+                            "response_body_text": (
+                                '{"error": "NoSuchAccount", '
+                                '"detail": "account a1 not seeded"}'
+                            ),
+                        },
+                    )
+                ],
+                error="Boot failed",
+            )
+            latest = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Sandbox boot failed.",
+                created_at=datetime.now(UTC),
+                sandbox_result=sandbox_result,
+                findings=[
+                    ReviewerFinding(
+                        category="runtime",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Sandbox boot failed",
+                        detail="boot failed",
+                    )
+                ],
+            )
+
+            failure_context = build_failure_context(run, latest)
+
+            self.assertIsNotNone(failure_context.sandbox)
+            report = failure_context.sandbox.deliverable_reports[0]
+            # New propagated fields:
+            self.assertIsNotNone(report.stdout_excerpt)
+            self.assertIn("Spring Boot started", report.stdout_excerpt)
+            self.assertIsNotNone(report.exit_state)
+            self.assertTrue(report.exit_state["oom_killed"])
+            self.assertEqual(report.exit_state["exit_code"], 137)
+            self.assertIsNotNone(report.sidecar_diagnostics)
+            self.assertIn("postgres", report.sidecar_diagnostics)
+            self.assertIn(
+                "out of memory",
+                report.sidecar_diagnostics["postgres"]["stderr_tail"],
+            )
+            self.assertTrue(
+                report.sidecar_diagnostics["postgres"]["exit_state"]["oom_killed"]
+            )
+            self.assertIsNotNone(report.http_response)
+            self.assertEqual(report.http_response["response_status"], 500)
+            self.assertIn(
+                "NoSuchAccount",
+                report.http_response["response_body_text"],
+            )
+
     def test_failure_context_prefers_structured_sandbox_stage_over_string_guessing(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)

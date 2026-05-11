@@ -107,6 +107,15 @@ class FailureContextDeliverableReport(BaseModel):
     stage_exit_code: int | None = None
     error: str | None = None
     stderr_excerpt: str | None = None
+    # Pass-8 diagnostic surface. ``stdout_excerpt`` mirrors
+    # ``stderr_excerpt`` for framework boot logs that the app writes to
+    # stdout (Spring Boot, gunicorn, structured loggers). The other three
+    # carry structured signals — container exit reasons, per-sidecar logs,
+    # and the verbatim HTTP exchange for contract failures.
+    stdout_excerpt: str | None = None
+    exit_state: dict | None = None
+    sidecar_diagnostics: dict[str, dict] | None = None
+    http_response: dict | None = None
 
 
 class FailureContextDependencyContract(BaseModel):
