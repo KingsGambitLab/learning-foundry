@@ -498,10 +498,13 @@ def _last_attempted_runtime(
         ),
         len(history),
     )
+    # Include the latest_node itself in the search window: when repair runs
+    # after a failed authoring_runtime, latest_node IS the most recent attempt
+    # whose stage outcomes we want to carry forward.
     runtime_node = next(
         (
             node
-            for node in reversed(history[:latest_index])
+            for node in reversed(history[: latest_index + 1])
             if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}
             and node.sandbox_result is not None
             and node.sandbox_result.deliverable_reports

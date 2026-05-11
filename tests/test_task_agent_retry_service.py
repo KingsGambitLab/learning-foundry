@@ -541,10 +541,10 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(failure_context.sandbox.deliverable_reports[0].stage_exit_code, 1)
 
     def test_failure_context_carries_last_attempted_runtime_even_when_sandbox_failed(self) -> None:
-        """Even when no prior sandbox passed, the repair model needs an anchor
-        of the most recent attempt's stage outcomes + runtime protocol files so
-        it can avoid rewriting files that have already worked through earlier
-        stages of the harness.
+        """When repair runs after a failed authoring_runtime, the failure
+        context must carry that just-failed attempt's stage outcomes and
+        runtime protocol file contents so the model can preserve files
+        implicated only in stages that already succeeded.
         """
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
@@ -554,7 +554,10 @@ class TaskAgentRetryServiceTests(TestCase):
             )
             run = workspace_authoring.ensure_workspace(run)
 
-            # Attempt 1: built and booted, but the public_check (contract stage) failed.
+            # The just-failed authoring_runtime: image_build + install + verify
+            # + boot all succeeded; only the public_check (contract stage)
+            # failed. That partial success is what the next repair pass must
+            # see so it knows not to rewrite the runtime bundle.
             contract_failure_sandbox = SandboxExecutionResult(
                 status=SandboxExecutionStatus.failed,
                 available=True,
@@ -575,7 +578,7 @@ class TaskAgentRetryServiceTests(TestCase):
                     )
                 ],
             )
-            prior_runtime = WorkflowNodeExecution(
+            failed_runtime = WorkflowNodeExecution(
                 node_id="authoring_runtime_1",
                 kind=WorkflowNodeKind.authoring_runtime,
                 status=WorkflowNodeStatus.failed,
@@ -584,31 +587,23 @@ class TaskAgentRetryServiceTests(TestCase):
                 created_at=datetime.now(UTC),
                 sandbox_result=contract_failure_sandbox,
             )
+            run.artifacts.node_executions = [failed_runtime]
 
-            # Attempt 2: dropped to a Docker build error (regression class we
-            # want to prevent by carrying attempt 1's runtime protocol files
-            # forward).
-            latest = _authored_failure_node()
-            latest.node_id = "authoring_runtime_2"
-            latest.attempt = 2
-            latest.created_at = datetime.now(UTC)
-            run.artifacts.node_executions = [prior_runtime, latest]
-
-            failure_context = build_failure_context(run, latest)
+            failure_context = build_failure_context(run, failed_runtime)
 
             self.assertIsNotNone(failure_context.last_attempted_runtime)
             last = failure_context.last_attempted_runtime
             assert last is not None
 
-            # Stage outcomes reflect the partial success of attempt 1.
+            # Stage outcomes reflect the partial success of the just-failed attempt.
             self.assertEqual(last.stage_outcomes.get("image_build"), "passed")
             self.assertEqual(last.stage_outcomes.get("install"), "passed")
             self.assertEqual(last.stage_outcomes.get("verify"), "passed")
             self.assertEqual(last.stage_outcomes.get("boot"), "passed")
             self.assertEqual(last.stage_outcomes.get("contract"), "failed")
 
-            # The runtime protocol files from attempt 1 are carried forward
-            # verbatim so the model can preserve them.
+            # Because boot passed, the runtime protocol files are pinned for
+            # the next repair pass.
             verified_paths = {item.path: item for item in last.verified_files}
             self.assertIn("Dockerfile", verified_paths)
             self.assertIsNotNone(verified_paths["Dockerfile"].content)
