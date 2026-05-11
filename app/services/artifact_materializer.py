@@ -29,6 +29,7 @@ from app.services.task_agent_contract_surface import (
     primary_submit_endpoint_for_spec,
 )
 from app.services.task_agent_starter_templates import (
+    HIDDEN_GRADER_SCRIPT_PATH,
     HIDDEN_MANIFEST_PATH,
     RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
     RUNTIME_INSTALL_SCRIPT_PATH,
@@ -41,6 +42,26 @@ from app.services.task_agent_starter_templates import (
     task_agent_runtime_bootstrap_commands,
     task_agent_runtime_environment_lines,
 )
+
+# Per-deliverable artifacts that live OUTSIDE the shared starter tree.
+VISIBLE_CHECK_SCRIPT_RELATIVE_PATH = "run_visible_checks.py"
+HIDDEN_GRADER_SCRIPT_RELATIVE_PATH = "run_hidden_checks.py"
+DELIVERABLE_MANIFEST_RELATIVE_PATH = "deliverable.json"
+
+
+def shared_starter_workspace_path(public_dir: Path) -> Path:
+    """For shared_codebase courses: the single shared starter root."""
+    return public_dir / "starter"
+
+
+def deliverable_visible_checks_dir(public_dir: Path, deliverable_id: str) -> Path:
+    """For shared_codebase courses: per-deliverable learner-facing brief + visible script."""
+    return public_dir / "checks" / deliverable_id
+
+
+def deliverable_grader_dir(private_dir: Path, deliverable_id: str) -> Path:
+    """For shared_codebase courses: per-deliverable hidden grader + manifest."""
+    return private_dir / "grader" / deliverable_id
 
 def default_generated_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "generated"
@@ -256,6 +277,270 @@ class ArtifactMaterializer:
             semantic_source="spec_rendered",
         )
 
+        if spec.course_structure.shared_codebase:
+            self._materialize_shared_codebase(
+                run=run,
+                spec=spec,
+                public_dir=public_dir,
+                private_dir=private_dir,
+                bundle_root=bundle_root,
+                files=files,
+            )
+        else:
+            self._materialize_per_deliverable_starters(
+                run=run,
+                spec=spec,
+                public_dir=public_dir,
+                bundle_root=bundle_root,
+                files=files,
+            )
+
+    def _materialize_shared_codebase(
+        self,
+        *,
+        run: WorkflowRun,
+        spec: TaskAgentServiceSpec,
+        public_dir: Path,
+        private_dir: Path,
+        bundle_root: Path,
+        files: list[BundleFile],
+    ) -> None:
+        """Write the new shared-codebase workspace layout:
+
+            public/starter/             # ONE shared root
+            public/checks/<id>/         # per-deliverable README + visible script
+            private/grader/<id>/        # per-deliverable manifest + hidden grader
+        """
+        shared_starter_dir = shared_starter_workspace_path(public_dir)
+
+        # Decide source of shared starter content: workspace snapshot (already authored)
+        # or fresh default templates.
+        workspace_shared_dir = (
+            Path(run.artifacts.workspace_snapshot.public_dir) / "starter"
+            if run.artifacts.workspace_snapshot is not None
+            and Path(run.artifacts.workspace_snapshot.root_dir).resolve() != bundle_root.resolve()
+            else None
+        )
+
+        first_deliverable = spec.deliverables[0]
+        default_starter_files = build_task_agent_starter_files(spec, first_deliverable.id)
+        # Drop per-deliverable artifacts from the shared starter scaffolding.
+        default_shared_files = {
+            relative_path: content
+            for relative_path, content in default_starter_files.items()
+            if relative_path
+            not in {HIDDEN_MANIFEST_PATH, HIDDEN_GRADER_SCRIPT_PATH, "checks/run_visible_checks.py"}
+            and not relative_path.startswith("checks/")
+            and not relative_path.startswith(".coursegen/grader/")
+        }
+
+        if workspace_shared_dir is not None and workspace_shared_dir.exists():
+            # Mirror the authored shared workspace into the bundle's public/starter/.
+            workspace_grader_root = (
+                Path(run.artifacts.workspace_snapshot.root_dir) / "private" / "grader"
+                if run.artifacts.workspace_snapshot is not None
+                else None
+            )
+            shared_manifest_payload: dict[str, Any] | None = None
+            if workspace_grader_root is not None:
+                first_manifest_path = (
+                    workspace_grader_root / first_deliverable.id / DELIVERABLE_MANIFEST_RELATIVE_PATH
+                )
+                if first_manifest_path.exists():
+                    try:
+                        shared_manifest_payload = json.loads(first_manifest_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        shared_manifest_payload = None
+            for relative_path in self._shared_workspace_paths(
+                workspace_shared_dir=workspace_shared_dir,
+                spec=spec,
+                manifest=shared_manifest_payload,
+            ):
+                source_path = workspace_shared_dir / relative_path
+                if not source_path.exists() or not source_path.is_file():
+                    continue
+                role, audience, semantic_source = self._starter_file_metadata(
+                    relative_path,
+                    manifest_payload=shared_manifest_payload,
+                )
+                try:
+                    content = source_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                self._write_text(
+                    shared_starter_dir / relative_path,
+                    content,
+                    ArtifactVisibility.public,
+                    files,
+                    bundle_root,
+                    role=role,
+                    audience=audience,
+                    deliverable_id=None,
+                    semantic_source=semantic_source,
+                )
+        else:
+            for relative_path, content in default_shared_files.items():
+                role, audience, semantic_source = self._starter_file_metadata(
+                    relative_path,
+                    manifest_payload=None,
+                )
+                self._write_text(
+                    shared_starter_dir / relative_path,
+                    content,
+                    ArtifactVisibility.public,
+                    files,
+                    bundle_root,
+                    role=role,
+                    audience=audience,
+                    deliverable_id=None,
+                    semantic_source=semantic_source,
+                )
+            self._write_visible_fixture_files(
+                spec=spec,
+                deliverable_dir=shared_starter_dir,
+                deliverable_id=None,
+                files=files,
+                bundle_root=bundle_root,
+            )
+
+        # Per-deliverable: public/checks/<id>/ and private/grader/<id>/.
+        for deliverable in spec.deliverables:
+            checks_dir = deliverable_visible_checks_dir(public_dir, deliverable.id)
+            grader_dir = deliverable_grader_dir(private_dir, deliverable.id)
+
+            # public/checks/<id>/README.md
+            self._write_text(
+                checks_dir / "README.md",
+                self._starter_readme(spec, deliverable.id),
+                ArtifactVisibility.public,
+                files,
+                bundle_root,
+                role="starter_readme",
+                audience="learner",
+                deliverable_id=deliverable.id,
+                semantic_source="spec_rendered",
+            )
+
+            workspace_root_for_run = (
+                Path(run.artifacts.workspace_snapshot.root_dir)
+                if run.artifacts.workspace_snapshot is not None
+                else None
+            )
+
+            # Source for visible/hidden scripts + manifest: prefer the authored workspace
+            # (under public/checks/<id>/ and private/grader/<id>/), else default templates.
+            authored_visible = None
+            authored_hidden = None
+            authored_manifest_text = None
+            if (
+                workspace_root_for_run is not None
+                and workspace_root_for_run.resolve() != bundle_root.resolve()
+            ):
+                ws_visible = (
+                    Path(run.artifacts.workspace_snapshot.public_dir)
+                    / "checks"
+                    / deliverable.id
+                    / VISIBLE_CHECK_SCRIPT_RELATIVE_PATH
+                )
+                ws_hidden = (
+                    workspace_root_for_run
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / HIDDEN_GRADER_SCRIPT_RELATIVE_PATH
+                )
+                ws_manifest = (
+                    workspace_root_for_run
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / DELIVERABLE_MANIFEST_RELATIVE_PATH
+                )
+                if ws_visible.exists():
+                    try:
+                        authored_visible = ws_visible.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        authored_visible = None
+                if ws_hidden.exists():
+                    try:
+                        authored_hidden = ws_hidden.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        authored_hidden = None
+                if ws_manifest.exists():
+                    try:
+                        authored_manifest_text = ws_manifest.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        authored_manifest_text = None
+
+            visible_content = (
+                authored_visible
+                if authored_visible is not None
+                else default_starter_files.get("checks/run_visible_checks.py", "")
+            )
+            hidden_content = (
+                authored_hidden
+                if authored_hidden is not None
+                else default_starter_files.get(HIDDEN_GRADER_SCRIPT_PATH, "")
+            )
+            if deliverable.id == first_deliverable.id or authored_manifest_text is None:
+                # Default templates produce the same manifest content per deliverable.
+                manifest_for_this_deliverable = build_task_agent_starter_files(spec, deliverable.id)
+                manifest_text = (
+                    authored_manifest_text
+                    if authored_manifest_text is not None
+                    else manifest_for_this_deliverable[HIDDEN_MANIFEST_PATH]
+                )
+            else:
+                manifest_text = authored_manifest_text
+
+            # public/checks/<id>/run_visible_checks.py
+            self._write_text(
+                checks_dir / VISIBLE_CHECK_SCRIPT_RELATIVE_PATH,
+                visible_content,
+                ArtifactVisibility.public,
+                files,
+                bundle_root,
+                role="visible_check_runner",
+                audience="learner",
+                deliverable_id=deliverable.id,
+                semantic_source="starter_compiler",
+            )
+
+            # private/grader/<id>/deliverable.json
+            self._write_text(
+                grader_dir / DELIVERABLE_MANIFEST_RELATIVE_PATH,
+                manifest_text,
+                ArtifactVisibility.private,
+                files,
+                bundle_root,
+                role="starter_manifest",
+                audience="operator",
+                deliverable_id=deliverable.id,
+                semantic_source="starter_compiler",
+            )
+            # private/grader/<id>/run_hidden_checks.py
+            self._write_text(
+                grader_dir / HIDDEN_GRADER_SCRIPT_RELATIVE_PATH,
+                hidden_content,
+                ArtifactVisibility.private,
+                files,
+                bundle_root,
+                role="runtime_hidden_check_script",
+                audience="operator",
+                deliverable_id=deliverable.id,
+                semantic_source="starter_compiler",
+            )
+
+    def _materialize_per_deliverable_starters(
+        self,
+        *,
+        run: WorkflowRun,
+        spec: TaskAgentServiceSpec,
+        public_dir: Path,
+        bundle_root: Path,
+        files: list[BundleFile],
+    ) -> None:
+        """Legacy materialization path for non-shared-codebase courses."""
         for deliverable in spec.deliverables:
             deliverable_dir = public_dir / "starter" / deliverable.id
             self._write_text(
@@ -390,7 +675,7 @@ class ArtifactMaterializer:
         *,
         spec: TaskAgentServiceSpec,
         deliverable_dir: Path,
-        deliverable_id: str,
+        deliverable_id: str | None,
         files: list[BundleFile],
         bundle_root: Path,
     ) -> None:
@@ -611,6 +896,47 @@ class ArtifactMaterializer:
                 "",
             ]
         )
+
+    def _shared_workspace_paths(
+        self,
+        *,
+        workspace_shared_dir: Path,
+        spec: TaskAgentServiceSpec,
+        manifest: dict[str, Any] | None,
+    ) -> list[str]:
+        """Files to mirror from the workspace's shared starter root into the bundle.
+
+        Excludes per-deliverable artifacts (manifest, hidden grader, visible script,
+        their containing folders) — those live outside the shared starter now.
+        """
+        first_deliverable = spec.deliverables[0] if spec.deliverables else None
+        editable_paths = (
+            learner_editable_paths_for_deliverable(spec, first_deliverable)
+            if first_deliverable is not None and manifest is None
+            else None
+        )
+        paths = starter_materialization_paths(
+            manifest=manifest,
+            editable_paths=editable_paths,
+            visible_fixture_paths=(
+                list(spec.runtime_dependencies.visible_fixture_files)
+                if manifest is None
+                else None
+            ),
+        )
+        # Strip per-deliverable artifacts; they live in public/checks/<id> and private/grader/<id>.
+        return [
+            relative_path
+            for relative_path in paths
+            if relative_path
+            not in {
+                HIDDEN_MANIFEST_PATH,
+                HIDDEN_GRADER_SCRIPT_PATH,
+                "checks/run_visible_checks.py",
+            }
+            and not relative_path.startswith("checks/")
+            and not relative_path.startswith(".coursegen/grader/")
+        ]
 
     def _workspace_starter_paths(
         self,

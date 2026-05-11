@@ -197,5 +197,138 @@ class SharedCodebaseWorkspaceLayoutTests(unittest.TestCase):
                 )
 
 
+class ProgressiveBundleSharedRootTests(unittest.TestCase):
+    """The shared-codebase progressive authoring bundle must write
+    `normalized_repo_files` ONCE to the shared starter root, not duplicated
+    across N per-deliverable folders.
+    """
+
+    def test_progressive_bundle_writes_repo_files_to_shared_root_only(self) -> None:
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+        from app.services.task_agent_starter_templates import (
+            RUNTIME_INSTALL_SCRIPT_PATH,
+            RUNTIME_RUN_SCRIPT_PATH,
+            RUNTIME_VERIFY_SCRIPT_PATH,
+        )
+
+        class _FakeUsage:
+            input_tokens = 1
+            output_tokens = 1
+            total_tokens = 2
+            input_tokens_details = type("D", (), {"cached_tokens": 0})()
+            output_tokens_details = type("D", (), {"reasoning_tokens": 0})()
+
+        class _FakeResponse:
+            def __init__(self, parsed):
+                self.output_parsed = parsed
+                self.usage = _FakeUsage()
+
+        class _FakeAPI:
+            def __init__(self, parsed):
+                self._parsed = parsed
+                self.calls = []
+
+            def parse(self, **kwargs):
+                self.calls.append(kwargs)
+                return _FakeResponse(self._parsed)
+
+        class _FakeClient:
+            def __init__(self, parsed):
+                self.responses = _FakeAPI(parsed)
+
+        bundle = type(
+            "SharedRepoBundle",
+            (),
+            {
+                "runtime_protocol_files": [
+                    type(
+                        "RepoFile",
+                        (),
+                        {"path": "Dockerfile", "content": "FROM debian:bookworm-slim\n"},
+                    )(),
+                    type(
+                        "RepoFile",
+                        (),
+                        {
+                            "path": RUNTIME_INSTALL_SCRIPT_PATH,
+                            "content": "#!/usr/bin/env sh\nset -eu\n",
+                        },
+                    )(),
+                    type(
+                        "RepoFile",
+                        (),
+                        {
+                            "path": RUNTIME_VERIFY_SCRIPT_PATH,
+                            "content": "#!/usr/bin/env sh\nset -eu\n",
+                        },
+                    )(),
+                    type(
+                        "RepoFile",
+                        (),
+                        {
+                            "path": RUNTIME_RUN_SCRIPT_PATH,
+                            "content": "#!/usr/bin/env sh\nset -eu\n",
+                        },
+                    )(),
+                ],
+                "files": [
+                    type("RepoFile", (), {"path": "app.py", "content": "print('hello')\n"})(),
+                ],
+                "dependency_contract": {
+                    "manifest_paths": [],
+                    "lockfile_paths": [],
+                    "toolchain_paths": [],
+                    "build_support_paths": [],
+                    "reproducibility_mode": None,
+                },
+                "notes": [],
+            },
+        )()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _materialized_run(temp_dir)
+            spec = run.artifacts.task_agent_spec
+            workspace = run.artifacts.workspace_snapshot
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(workspace)
+
+            fake_client = _FakeClient(bundle)
+            service = OpenAIStarterRepoAuthoringService(
+                enabled=True,
+                client_factory=lambda **_: fake_client,
+            )
+            run, result = service.author_workspace_repo(run)
+            self.assertTrue(result.available)
+
+            shared_starter = Path(workspace.public_dir) / "starter"
+            self.assertEqual(
+                (shared_starter / "app.py").read_text(encoding="utf-8"),
+                "print('hello')\n",
+                "Progressive bundle must write authored repo files ONCE to public/starter/",
+            )
+            # Sanity: each per-deliverable manifest still has updated metadata
+            workspace_root = Path(workspace.root_dir)
+            for deliverable in spec.deliverables:
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+                self.assertTrue(
+                    manifest_path.exists(),
+                    f"Per-deliverable manifest missing at {manifest_path}",
+                )
+                # No per-deliverable starter copy was created.
+                per_deliverable_app = (
+                    Path(workspace.public_dir) / "starter" / deliverable.id / "app.py"
+                )
+                self.assertFalse(
+                    per_deliverable_app.exists(),
+                    f"Repo files must not be copied per-deliverable: {per_deliverable_app}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -291,9 +291,28 @@ class OpenAIStarterRepoAuthoringService:
             raise ValueError("Task-agent spec is required for progressive repo authoring.")
         if not spec.deliverables:
             raise ValueError("At least one deliverable is required for progressive repo authoring.")
-        shared_root_id = spec.deliverables[0].id
-        shared_root = public_root / "starter" / shared_root_id
-        shared_manifest = json.loads((shared_root / HIDDEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+        # Shared starter is now a single root at public/starter/. The hidden
+        # manifest lives under private/grader/<first_deliverable_id>/deliverable.json.
+        shared_root = public_root / "starter"
+        first_deliverable_id = spec.deliverables[0].id
+        workspace = run.artifacts.workspace_snapshot
+        if workspace is not None:
+            shared_manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / first_deliverable_id
+                / "deliverable.json"
+            )
+        else:
+            shared_manifest_path = (
+                public_root.parent
+                / "private"
+                / "grader"
+                / first_deliverable_id
+                / "deliverable.json"
+            )
+        shared_manifest = json.loads(shared_manifest_path.read_text(encoding="utf-8"))
         prompt_files = build_starter_authoring_payload(
             starter_root=shared_root,
             manifest=shared_manifest,
@@ -517,32 +536,62 @@ class OpenAIStarterRepoAuthoringService:
         updated_files: list[str] = []
         notes = list(bundle.notes)
 
-        for deliverable in spec.deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
-            if not starter_root.exists() or not manifest_path.exists():
-                continue
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
-            files_to_apply = {
-                **normalized_repo_files,
-                **normalized_runtime_files,
-            }
+        if not spec.deliverables:
+            return updated_files, notes
+
+        # Write the authored files ONCE to the shared starter root.
+        shared_starter_root = public_root / "starter"
+        first_deliverable = spec.deliverables[0]
+        default_starter_files = build_task_agent_starter_files(spec, first_deliverable.id)
+        first_manifest_path = (
+            workspace_root
+            / "private"
+            / "grader"
+            / first_deliverable.id
+            / "deliverable.json"
+        )
+        first_manifest: dict[str, Any] = {}
+        if first_manifest_path.exists():
+            try:
+                first_manifest = json.loads(first_manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                first_manifest = {}
+
+        files_to_apply = {
+            **normalized_repo_files,
+            **normalized_runtime_files,
+        }
+        if files_to_apply or shared_starter_root.exists():
             updated_files.extend(
                 self._replace_repo_files(
-                    starter_root=starter_root,
-                    manifest=manifest,
+                    starter_root=shared_starter_root,
+                    manifest=first_manifest,
                     files=files_to_apply,
                     workspace_root=workspace_root,
                     visible_fixture_files=visible_fixture_files,
                 )
             )
+
+        # Update every per-deliverable manifest with the new dependency contract
+        # and bundle-state metadata. Manifests now live at
+        # private/grader/<id>/deliverable.json.
+        for deliverable in spec.deliverables:
+            manifest_path = (
+                workspace_root
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            if not manifest_path.exists():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             normalized_contract = self._normalize_dependency_contract(
                 bundle.dependency_contract,
                 current_manifest=manifest,
             )
             starter_repo_bundle, _ = self._bundle_state(
-                starter_root=starter_root,
+                starter_root=shared_starter_root,
                 manifest=manifest,
                 default_starter_files=default_starter_files,
                 visible_fixture_files=visible_fixture_files,
@@ -553,9 +602,6 @@ class OpenAIStarterRepoAuthoringService:
             }
             manifest["dependency_contract"] = normalized_contract
             if normalized_runtime_files:
-                for relative_path, content in normalized_runtime_files.items():
-                    target = starter_root / relative_path
-                    updated_files.extend(self._write_if_changed(target, content, workspace_root))
                 manifest["runtime_protocol_bundle"] = {
                     "generated_for_deliverable": deliverable.id,
                     **self._runtime_bundle_state(

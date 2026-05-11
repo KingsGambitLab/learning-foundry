@@ -12,6 +12,8 @@ from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
 from app.services.task_agent_starter_templates import (
+    HIDDEN_GRADER_SCRIPT_PATH,
+    HIDDEN_MANIFEST_PATH,
     build_task_agent_starter_files,
 )
 
@@ -246,6 +248,63 @@ class TaskAgentWorkspaceAuthoringService:
 
         updated_files: list[str] = []
         allowed_deliverables = set(deliverable_ids or [deliverable.id for deliverable in spec.deliverables])
+
+        if spec.course_structure.shared_codebase:
+            shared_starter_dir = Path(workspace.public_dir) / "starter"
+            # Shared starter content from first deliverable's template.
+            first_deliverable = spec.deliverables[0]
+            shared_files = build_task_agent_starter_files(spec, first_deliverable.id)
+            per_deliverable_only = {
+                HIDDEN_MANIFEST_PATH,
+                HIDDEN_GRADER_SCRIPT_PATH,
+                "checks/run_visible_checks.py",
+            }
+            for relative_path, content in shared_files.items():
+                if relative_path in per_deliverable_only:
+                    continue
+                if relative_path.startswith("checks/") or relative_path.startswith(".coursegen/grader/"):
+                    continue
+                updated_files.extend(
+                    self._write_if_needed(
+                        shared_starter_dir / relative_path,
+                        content,
+                        workspace.root_dir,
+                        force=force,
+                    )
+                )
+            # Per-deliverable artifacts in public/checks/<id>/ and private/grader/<id>/.
+            for deliverable in spec.deliverables:
+                if deliverable.id not in allowed_deliverables:
+                    continue
+                deliverable_files = build_task_agent_starter_files(spec, deliverable.id)
+                checks_dir = Path(workspace.public_dir) / "checks" / deliverable.id
+                grader_dir = Path(workspace.root_dir) / "private" / "grader" / deliverable.id
+                updated_files.extend(
+                    self._write_if_needed(
+                        checks_dir / "run_visible_checks.py",
+                        deliverable_files["checks/run_visible_checks.py"],
+                        workspace.root_dir,
+                        force=force,
+                    )
+                )
+                updated_files.extend(
+                    self._write_if_needed(
+                        grader_dir / "deliverable.json",
+                        deliverable_files[HIDDEN_MANIFEST_PATH],
+                        workspace.root_dir,
+                        force=force,
+                    )
+                )
+                updated_files.extend(
+                    self._write_if_needed(
+                        grader_dir / "run_hidden_checks.py",
+                        deliverable_files[HIDDEN_GRADER_SCRIPT_PATH],
+                        workspace.root_dir,
+                        force=force,
+                    )
+                )
+            return updated_files
+
         for deliverable in spec.deliverables:
             if deliverable.id not in allowed_deliverables:
                 continue
@@ -286,10 +345,38 @@ class TaskAgentWorkspaceAuthoringService:
         workspace = run.artifacts.workspace_snapshot
         if workspace is None:
             return {}
+        spec = run.artifacts.task_agent_spec
         public_dir = Path(workspace.public_dir)
-        starter_root = public_dir / "starter"
+        workspace_root = Path(workspace.root_dir)
         allowed = set(deliverable_ids or [])
         fingerprints: dict[str, str] = {}
+
+        if spec is not None and spec.course_structure.shared_codebase:
+            shared_starter = public_dir / "starter"
+            if shared_starter.exists():
+                for file_path in sorted(
+                    path for path in shared_starter.rglob("*") if path.is_file()
+                ):
+                    fingerprints[str(file_path.relative_to(workspace_root))] = sha256(
+                        file_path.read_bytes()
+                    ).hexdigest()
+            checks_root = public_dir / "checks"
+            grader_root = workspace_root / "private" / "grader"
+            for parent in (checks_root, grader_root):
+                if not parent.exists():
+                    continue
+                for deliverable_dir in sorted(p for p in parent.iterdir() if p.is_dir()):
+                    if allowed and deliverable_dir.name not in allowed:
+                        continue
+                    for file_path in sorted(
+                        path for path in deliverable_dir.rglob("*") if path.is_file()
+                    ):
+                        fingerprints[str(file_path.relative_to(workspace_root))] = sha256(
+                            file_path.read_bytes()
+                        ).hexdigest()
+            return fingerprints
+
+        starter_root = public_dir / "starter"
         if not starter_root.exists():
             return fingerprints
         for deliverable_root in sorted(path for path in starter_root.iterdir() if path.is_dir()):

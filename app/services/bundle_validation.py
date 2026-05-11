@@ -82,6 +82,45 @@ def _expected_public_artifacts(spec: TaskAgentServiceSpec) -> dict[str, tuple[st
         "public/README.md": ("course_readme", "learner", None),
         "public/content/course_outline.md": ("course_outline", "learner", None),
     }
+    if spec.course_structure.shared_codebase:
+        # New layout: one shared starter root + per-deliverable check artifacts.
+        shared_starter_root = "public/starter"
+        expected[f"{shared_starter_root}/{RUNTIME_INSTALL_SCRIPT_PATH}"] = (
+            "runtime_install_script",
+            "operator",
+            None,
+        )
+        expected[f"{shared_starter_root}/{RUNTIME_VERIFY_SCRIPT_PATH}"] = (
+            "runtime_verify_script",
+            "operator",
+            None,
+        )
+        expected[f"{shared_starter_root}/{RUNTIME_RUN_SCRIPT_PATH}"] = (
+            "runtime_run_script",
+            "operator",
+            None,
+        )
+        expected[f"{shared_starter_root}/{RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"] = (
+            "runtime_visible_check_script",
+            "operator",
+            None,
+        )
+        expected[f"{shared_starter_root}/{RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"] = (
+            "runtime_hidden_check_script",
+            "operator",
+            None,
+        )
+        expected[f"{shared_starter_root}/.vscode/tasks.json"] = ("vscode_tasks", "learner", None)
+        for deliverable in spec.deliverables:
+            checks_root = f"public/checks/{deliverable.id}"
+            expected[f"{checks_root}/README.md"] = ("starter_readme", "learner", deliverable.id)
+            expected[f"{checks_root}/run_visible_checks.py"] = (
+                "visible_check_runner",
+                "learner",
+                deliverable.id,
+            )
+        return expected
+
     for deliverable in spec.deliverables:
         deliverable_root = f"public/starter/{deliverable.id}"
         expected[f"{deliverable_root}/README.md"] = ("starter_readme", "learner", deliverable.id)
@@ -403,9 +442,28 @@ def validate_materialized_bundle(
                 ),
             )
 
+    shared_codebase = spec.course_structure.shared_codebase
     for deliverable in spec.deliverables:
-        starter_root = Path(bundle.root_dir) / "public" / "starter" / deliverable.id
-        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+        if shared_codebase:
+            starter_root = Path(bundle.root_dir) / "public" / "starter"
+            manifest_path = (
+                Path(bundle.root_dir)
+                / "private"
+                / "grader"
+                / deliverable.id
+                / "deliverable.json"
+            )
+            readme_path = (
+                Path(bundle.root_dir)
+                / "public"
+                / "checks"
+                / deliverable.id
+                / "README.md"
+            )
+        else:
+            starter_root = Path(bundle.root_dir) / "public" / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            readme_path = starter_root / "README.md"
         manifest_payload: dict[str, object] = {}
         if manifest_path.exists():
             try:
@@ -433,13 +491,14 @@ def validate_materialized_bundle(
             if isinstance(starter_repo_bundle, dict)
             else ""
         ).strip().lower()
+        starter_repo_authored_paths_raw = (
+            starter_repo_bundle.get("authored_paths")
+            if isinstance(starter_repo_bundle, dict)
+            else []
+        ) or []
         starter_repo_authored_paths = sorted(
             str(path).strip()
-            for path in (
-                starter_repo_bundle.get("authored_paths")
-                if isinstance(starter_repo_bundle, dict)
-                else []
-            )
+            for path in starter_repo_authored_paths_raw
             if str(path).strip()
         )
         runtime_protocol_source = str(
@@ -447,17 +506,17 @@ def validate_materialized_bundle(
             if isinstance(runtime_protocol_bundle, dict)
             else ""
         ).strip().lower()
+        runtime_protocol_authored_paths_raw = (
+            runtime_protocol_bundle.get("authored_paths")
+            if isinstance(runtime_protocol_bundle, dict)
+            else []
+        ) or []
         runtime_protocol_authored_paths = sorted(
             str(path).strip()
-            for path in (
-                runtime_protocol_bundle.get("authored_paths")
-                if isinstance(runtime_protocol_bundle, dict)
-                else []
-            )
+            for path in runtime_protocol_authored_paths_raw
             if str(path).strip()
         )
         default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
-        readme_path = starter_root / "README.md"
         if readme_path.exists():
             _validate_starter_readme(
                 errors,

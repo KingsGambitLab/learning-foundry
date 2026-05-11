@@ -342,8 +342,13 @@ class DockerSandboxRunner:
             deliverable_count=len(spec.deliverables),
         )
 
+        shared_codebase = bool(spec.course_structure.shared_codebase)
+        shared_starter_root = workspace_root / "starter"
         for deliverable in spec.deliverables:
-            starter_root = workspace_root / "starter" / deliverable.id
+            if shared_codebase:
+                starter_root = shared_starter_root
+            else:
+                starter_root = workspace_root / "starter" / deliverable.id
             log_coursegen_event(
                 "sandbox_deliverable_started",
                 workflow_run_id=workflow_run_id,

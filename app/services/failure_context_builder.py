@@ -56,6 +56,11 @@ def build_failure_context(
         if run.artifacts.task_agent_spec is not None
         else None,
         deliverable_ids=list(sandbox.failed_deliverables if sandbox is not None else []),
+        workspace_root=(run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None),
+        shared_codebase=bool(
+            run.artifacts.task_agent_spec is not None
+            and run.artifacts.task_agent_spec.course_structure.shared_codebase
+        ),
     )
     owner_hint = _owner_hint(latest_node, validation_issues, sandbox)
     phase = _phase(latest_node, validation_issues, sandbox)
@@ -459,19 +464,30 @@ def _previously_verified_runtime(
     ]
 
     public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    workspace_root = (
+        run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None
+    )
     runtime_plan = (
         run.artifacts.task_agent_spec.project_contract.runtime_plan
         if run.artifacts.task_agent_spec is not None
         else None
     )
+    shared_codebase = bool(
+        run.artifacts.task_agent_spec is not None
+        and run.artifacts.task_agent_spec.course_structure.shared_codebase
+    )
     dependency_contracts = dependency_contract_facts_for_deliverables(
         public_root=public_root,
         runtime_plan=runtime_plan,
         deliverable_ids=passed_deliverables,
+        workspace_root=workspace_root,
+        shared_codebase=shared_codebase,
     )
     verified_files = _verified_runtime_files(
         public_root=public_root,
         source_deliverable_id=passed_deliverables[0],
+        shared_codebase=shared_codebase,
+        workspace_root=workspace_root,
     )
     return FailureContextVerifiedRuntime(
         source_node_kind=runtime_node.kind,
@@ -568,9 +584,18 @@ def _last_attempted_runtime(
     stage_outcomes = _stage_outcomes_for_report(source_report)
 
     public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    workspace_root = (
+        run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None
+    )
+    shared_codebase = bool(
+        run.artifacts.task_agent_spec is not None
+        and run.artifacts.task_agent_spec.course_structure.shared_codebase
+    )
     verified_files = _verified_runtime_files(
         public_root=public_root,
         source_deliverable_id=source_deliverable_id,
+        shared_codebase=shared_codebase,
+        workspace_root=workspace_root,
     )
 
     # Whether each file should be preserved depends on which stages of the
@@ -601,11 +626,31 @@ def _verified_runtime_files(
     *,
     public_root: str | None,
     source_deliverable_id: str,
+    shared_codebase: bool = False,
+    workspace_root: str | None = None,
 ) -> list[FailureContextVerifiedRuntimeFile]:
     if not public_root:
         return []
-    starter_root = Path(public_root) / "starter" / source_deliverable_id
-    manifest = load_starter_manifest(starter_root)
+    if shared_codebase:
+        starter_root = Path(public_root) / "starter"
+        if workspace_root:
+            manifest_path = (
+                Path(workspace_root) / "private" / "grader" / source_deliverable_id / "deliverable.json"
+            )
+        else:
+            manifest_path = (
+                Path(public_root).parent / "private" / "grader" / source_deliverable_id / "deliverable.json"
+            )
+        manifest: dict | None = None
+        if manifest_path.exists():
+            try:
+                import json as _json
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                manifest = None
+    else:
+        starter_root = Path(public_root) / "starter" / source_deliverable_id
+        manifest = load_starter_manifest(starter_root)
     if manifest is None:
         return []
 
