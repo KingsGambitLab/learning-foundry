@@ -87,7 +87,7 @@
         goal: "",
         outcomes: [],
         choices: {
-          starter_type: "partial_implementation",
+          starter_type: "partial",
           implementation_language: null,
           language_version: null,
           application_framework: null,
@@ -431,10 +431,8 @@
 
       function friendlyStarterType(starterType) {
         const labels = {
-          bare_stub: "Bare starter",
-          partial_implementation: "Partial implementation",
-          working_buggy: "Working but buggy",
-          working_suboptimal: "Working but suboptimal",
+          empty: "Empty starter",
+          partial: "Partial implementation",
         };
         return labels[starterType] || titleCase(starterType);
       }
@@ -1267,7 +1265,7 @@
         const dbSelect = document.getElementById("creator-database");
         const cacheSelect = document.getElementById("creator-cache");
         return {
-          starter_type: starter?.value || "partial_implementation",
+          starter_type: starter?.value || "partial",
           implementation_language: creatorLanguageField?.value?.trim() || null,
           language_version: creatorLanguageVersionField?.value?.trim() || null,
           application_framework: creatorFrameworkField?.value?.trim() || null,
@@ -1287,7 +1285,7 @@
       function applyCreatorChoicesToInputs(choices) {
         if (!choices) return;
         creatorState.choices = {
-          starter_type: choices.starter_type || "partial_implementation",
+          starter_type: choices.starter_type || "partial",
           implementation_language: choices.implementation_language || null,
           language_version: choices.language_version || null,
           application_framework: choices.application_framework || null,
@@ -1827,7 +1825,7 @@
         creatorState.goal = "";
         creatorState.outcomes = [];
         creatorState.choices = {
-          starter_type: "partial_implementation",
+          starter_type: "partial",
           implementation_language: null,
           language_version: null,
           application_framework: null,
