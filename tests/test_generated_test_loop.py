@@ -302,14 +302,11 @@ class MaxAuthoringAttemptsPolicyTests(unittest.TestCase):
         up to five authoring attempts even if the constructor was given
         the default 3.
         """
-        from app.domain.workflow import WorkflowRun
-
         graph = LangGraphAssignmentGraph(
             DockerSandboxRunner(),
             max_authoring_attempts=3,
         )
         spec = self._make_spec(shared_codebase=True)
-        run = WorkflowRun.__fake_for_test__ if False else None  # placeholder; not used
 
         # The helper exposed on the graph must reflect the spec, not the
         # constructor default, when the spec says shared_codebase.

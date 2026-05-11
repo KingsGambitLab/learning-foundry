@@ -669,17 +669,13 @@ class DockerSandboxRunner:
                             health_status_code=200,
                             stdout=combined_output,
                             stderr=logs,
-                            error=(
-                                self._summarize_stage_failure(
-                                    deliverable_id=deliverable.id,
-                                    failed_stage=failed_stage,
-                                    error_text=contract_error or check_error,
-                                    logs=logs,
-                                    default=contract_error or check_error or "",
-                                    http_response=contract_http_response,
-                                )
-                                if failed_stage is not None
-                                else (contract_error or check_error)
+                            error=self._post_boot_failure_error(
+                                deliverable_id=deliverable.id,
+                                failed_stage=failed_stage,
+                                contract_error=contract_error,
+                                check_error=check_error,
+                                logs=logs,
+                                contract_http_response=contract_http_response,
                             ),
                             stdout_tail=(
                                 contract_failure_diagnostics[0]
@@ -1585,17 +1581,13 @@ class DockerSandboxRunner:
             health_status_code=200,
             stdout=combined_output,
             stderr="",
-            error=(
-                self._summarize_stage_failure(
-                    deliverable_id=deliverable.id,
-                    failed_stage=failed_stage,
-                    error_text=contract_error or check_error,
-                    logs=None,
-                    default=contract_error or check_error or "",
-                    http_response=contract_http_response,
-                )
-                if failed_stage is not None
-                else (contract_error or check_error)
+            error=self._post_boot_failure_error(
+                deliverable_id=deliverable.id,
+                failed_stage=failed_stage,
+                contract_error=contract_error,
+                check_error=check_error,
+                logs=None,
+                contract_http_response=contract_http_response,
             ),
             http_response=contract_http_response,
         )
@@ -1982,6 +1974,35 @@ class DockerSandboxRunner:
         if before:
             return before[-1].strip()
         return None
+
+    def _post_boot_failure_error(
+        self,
+        *,
+        deliverable_id: str,
+        failed_stage: SandboxFailureStage | None,
+        contract_error: str | None,
+        check_error: str | None,
+        logs: str | None,
+        contract_http_response: dict | None,
+    ) -> str | None:
+        """Render the headline ``error`` field for a post-boot deliverable
+        report (contract or visible-checks stage).
+
+        On success ``failed_stage`` is ``None`` and the field is the raw
+        legacy fallback. On failure we route through
+        :meth:`_summarize_stage_failure` so contract failures pick up the
+        rich HTTP-exchange headline (Pass 9 Job A).
+        """
+        if failed_stage is None:
+            return contract_error or check_error
+        return self._summarize_stage_failure(
+            deliverable_id=deliverable_id,
+            failed_stage=failed_stage,
+            error_text=contract_error or check_error,
+            logs=logs,
+            default=contract_error or check_error or "",
+            http_response=contract_http_response,
+        )
 
     def _summarize_stage_failure(
         self,
