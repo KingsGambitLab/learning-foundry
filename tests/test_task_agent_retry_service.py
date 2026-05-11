@@ -540,6 +540,114 @@ class TaskAgentRetryServiceTests(TestCase):
             )
             self.assertEqual(failure_context.sandbox.deliverable_reports[0].stage_exit_code, 1)
 
+    def test_reviewer_tests_failure_context_phase_is_tests_not_runtime(self) -> None:
+        """A reviewer_tests failure (from the baseline matrix verifier) must be
+        classified as phase=`tests`, not the catch-all `runtime`. Misclassifying
+        sends the repair model to fix runtime code when the issue is in the
+        visible/hidden test scripts.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            # Prior authoring_runtime that fully passed sandbox; reviewer_tests
+            # later flagged that the visible/hidden test scripts the model
+            # authored are too lenient (baseline matrix discrimination failure).
+            passing_runtime = _passing_runtime_node(
+                kind=WorkflowNodeKind.reviewer_runtime, attempt=1
+            )
+            reviewer_tests_failure = WorkflowNodeExecution(
+                node_id="reviewer_tests_1",
+                kind=WorkflowNodeKind.reviewer_tests,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer test node failed the baseline matrix.",
+                created_at=datetime.now(UTC),
+                sandbox_result=None,
+                findings=[
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_visible_tests_passed_partial_repo",
+                        detail="The visible suite passed against a partial starter that should still require learner work.",
+                        code="starter_visible_tests_passed_partial_repo",
+                        location="starter/deliverable_2",
+                    ),
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_hidden_tests_passed_buggy_repo",
+                        detail="The hidden suite passed against a starter that is supposed to be incorrect.",
+                        code="starter_hidden_tests_passed_buggy_repo",
+                        location="starter/deliverable_4",
+                    ),
+                ],
+            )
+            run.artifacts.node_executions = [passing_runtime, reviewer_tests_failure]
+
+            failure_context = build_failure_context(run, reviewer_tests_failure)
+
+            self.assertEqual(failure_context.phase, "tests")
+
+    def test_reviewer_tests_failure_context_failed_deliverables_match_finding_locations(self) -> None:
+        """When the reviewer_tests findings flag specific deliverables via
+        `location=starter/deliverable_X`, the failure context's
+        failed_deliverables list must reflect those locations only. Today the
+        list inherits the sandbox aggregate (often all four deliverables),
+        which misleads downstream callers about the actual repair scope.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            passing_runtime = _passing_runtime_node(
+                kind=WorkflowNodeKind.reviewer_runtime, attempt=1
+            )
+            reviewer_tests_failure = WorkflowNodeExecution(
+                node_id="reviewer_tests_1",
+                kind=WorkflowNodeKind.reviewer_tests,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer test node failed for d2 and d4 only.",
+                created_at=datetime.now(UTC),
+                sandbox_result=None,
+                findings=[
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_visible_tests_passed_partial_repo",
+                        detail="too lenient on partial repo",
+                        code="starter_visible_tests_passed_partial_repo",
+                        location="starter/deliverable_2",
+                    ),
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_hidden_tests_passed_buggy_repo",
+                        detail="too lenient on buggy repo",
+                        code="starter_hidden_tests_passed_buggy_repo",
+                        location="starter/deliverable_4",
+                    ),
+                ],
+            )
+            run.artifacts.node_executions = [passing_runtime, reviewer_tests_failure]
+
+            failure_context = build_failure_context(run, reviewer_tests_failure)
+
+            self.assertIsNotNone(failure_context.sandbox)
+            self.assertEqual(
+                set(failure_context.sandbox.failed_deliverables),
+                {"deliverable_2", "deliverable_4"},
+            )
+
     def test_failure_context_carries_last_attempted_runtime_even_when_sandbox_failed(self) -> None:
         """When repair runs after a failed authoring_runtime, the failure
         context must carry that just-failed attempt's stage outcomes and

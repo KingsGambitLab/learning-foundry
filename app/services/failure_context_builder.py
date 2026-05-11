@@ -146,18 +146,34 @@ def _sandbox_summary(
     if sandbox_result is None:
         return None
 
+    # Real failures: anything that didn't compile, didn't run, or carries an
+    # explicit error. Plain stderr content alone is not failure — boot logs
+    # always have stderr output even on a passing sandbox.
     failed_reports = [
         report
         for report in sandbox_result.deliverable_reports
-        if not report.compile_succeeded or not report.runtime_succeeded or report.error or report.stderr
+        if not report.compile_succeeded or not report.runtime_succeeded or report.error
     ]
+    failed_deliverable_ids = [report.deliverable_id for report in failed_reports]
+
+    # When reviewer-side findings flag specific deliverables via
+    # `location=starter/deliverable_X`, treat those as the authoritative
+    # failed set for this attempt — the sandbox itself may have passed earlier
+    # but the reviewer disagreed about a specific deliverable's quality.
+    for finding in latest_node.findings:
+        if finding.severity.value != "error":
+            continue
+        deliverable_id = _deliverable_id_from_location(finding.location)
+        if deliverable_id and deliverable_id not in failed_deliverable_ids:
+            failed_deliverable_ids.append(deliverable_id)
+
     return FailureContextSandboxSummary(
         error=sandbox_result.error,
         build_stdout_excerpt=_excerpt(sandbox_result.build_stdout),
         build_stderr_excerpt=_excerpt(sandbox_result.build_stderr),
         run_stdout_excerpt=_excerpt(sandbox_result.run_stdout),
         run_stderr_excerpt=_excerpt(sandbox_result.run_stderr),
-        failed_deliverables=[report.deliverable_id for report in failed_reports],
+        failed_deliverables=failed_deliverable_ids,
         deliverable_reports=[
             FailureContextDeliverableReport(
                 deliverable_id=report.deliverable_id,
@@ -172,6 +188,25 @@ def _sandbox_summary(
             for report in failed_reports[:8]
         ],
     )
+
+
+def _deliverable_id_from_location(location: str | None) -> str | None:
+    """Extract a deliverable id from a reviewer finding location.
+
+    Reviewer findings point at concrete files using locations like
+    `starter/deliverable_2`, `starter/deliverable_2/.coursegen/...`, or
+    `public/starter/deliverable_4/README.md`. Return the deliverable id when
+    present, else None.
+    """
+    if not location:
+        return None
+    parts = [part for part in location.replace("\\", "/").split("/") if part]
+    for index, part in enumerate(parts):
+        if part == "starter" and index + 1 < len(parts):
+            candidate = parts[index + 1]
+            if candidate.startswith("deliverable"):
+                return candidate
+    return None
 
 
 def _excerpt(text: str, *, max_chars: int = 1200) -> str | None:
@@ -290,6 +325,16 @@ def _phase(
 ) -> str | None:
     if validation_issues:
         return "validation"
+    # Reviewer-side failures classify by the reviewer node, not by stage-mining
+    # the carried-over passing sandbox. reviewer_tests in particular surfaces
+    # baseline-matrix discrimination issues, which are a test-authoring concern
+    # — not the runtime layer.
+    if latest_node.kind == WorkflowNodeKind.reviewer_tests:
+        return "tests"
+    if latest_node.kind == WorkflowNodeKind.reviewer_code:
+        return "code_review"
+    if latest_node.kind == WorkflowNodeKind.reviewer_pedagogy:
+        return "pedagogy_review"
     if sandbox is None:
         return None
     structured_stage = _structured_failed_stage(sandbox)
