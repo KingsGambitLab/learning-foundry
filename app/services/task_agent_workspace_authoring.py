@@ -155,7 +155,17 @@ class TaskAgentWorkspaceAuthoringService:
         full_repair = not failed_deliverables
         if full_repair:
             before_fingerprint = self._workspace_fingerprint(run, deliverable_ids=sorted(failed_deliverables))
-            run = self.sync_workspace(run)
+            # DO NOT call self.sync_workspace(run) here — sync_workspace
+            # chains to prepare_run_workspace(overwrite=True) which does
+            # shutil.rmtree(bundle_root) and re-materializes from default
+            # templates. That wipe destroys authored per-deliverable
+            # manifests (every deliverable's starter_repo_bundle is reset
+            # to `starter_default`). If author_workspace_repo below then
+            # fails (OpenAI down, partial bundle, race), the manifests
+            # stay starter_default and the next reviewer_tests fires
+            # `starter_repo_bundle_not_authored` indefinitely.
+            # author_workspace_repo overwrites the relevant files in place,
+            # so the prior wipe was strictly destructive.
             run, repo_result = self.repo_authoring_service.author_workspace_repo(
                 run,
                 failure_context=failure_context,
