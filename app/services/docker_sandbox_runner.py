@@ -54,20 +54,22 @@ class DockerSandboxRunner:
         self.cache_namespace = cache_namespace
         self.workspace_manager = workspace_manager
         # start_timeout_s gates how long `_wait_for_http` polls /health
-        # before giving up. Slow installs (Rails bundle install, npm/yarn
-        # with native modules, Maven first-run deps) need 3-5 min. The
-        # prior 90s cap caused Rails sandboxes to fail mid-install with
-        # confusing "failed during install: <last bundler progress
-        # line>" messages despite the container being healthy and
-        # progressing. The timeout-aware summarizer plus a 300s cap lets
-        # heavy stacks complete first-run installs.
+        # before giving up. Rails `bundle install` on aarch64 with
+        # native extensions (nokogiri, sqlite3, puma, bootsnap, psych)
+        # consistently takes 5-7 min on a cold cache. The prior 90s/300s
+        # caps caused timeouts at "Installing rdoc 7.2.0" — near the END
+        # of a successful install. The timeout-aware summarizer makes
+        # genuine timeouts identifiable; the 600s cap lets the heaviest
+        # stack we currently support (Rails) complete first-run installs
+        # with margin. Faster stacks (Go ~1min, Python ~2min) finish
+        # well before the cap.
         self.runtime_harness = LearnerStudioService(
             docker_binary=docker_binary,
             build_timeout_s=build_timeout_s,
-            start_timeout_s=min(run_timeout_s, 300),
+            start_timeout_s=min(run_timeout_s, 600),
             host="127.0.0.1",
         )
-        self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 300))
+        self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 600))
         self.dependency_contract_materializer = dependency_contract_materializer or DependencyContractMaterializer(
             docker_binary=docker_binary,
             command_timeout_s=min(build_timeout_s, 600),
