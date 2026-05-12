@@ -657,6 +657,15 @@ class OpenAIStarterRepoAuthoringService:
             default_starter_files=default_starter_files,
             visible_fixture_files=visible_fixture_files,
         )
+        log_coursegen_event(
+            "apply_progressive_bundle_state_computed",
+            workflow_run_id=run.id,
+            shared_starter_source=shared_starter_repo_bundle.get("source"),
+            shared_starter_authored_path_count=len(shared_starter_repo_bundle.get("authored_paths") or []),
+            shared_runtime_source=shared_runtime_bundle.get("source"),
+            shared_runtime_authored_path_count=len(shared_runtime_bundle.get("authored_paths") or []),
+            normalized_runtime_files_present=bool(normalized_runtime_files),
+        )
 
         # Update every per-deliverable manifest with the new dependency contract
         # and bundle-state metadata. Manifests live at
@@ -669,9 +678,18 @@ class OpenAIStarterRepoAuthoringService:
                 / deliverable.id
                 / "deliverable.json"
             )
-            if not manifest_path.exists():
+            manifest_exists = manifest_path.exists()
+            if not manifest_exists:
+                log_coursegen_event(
+                    "apply_progressive_bundle_manifest_skipped",
+                    workflow_run_id=run.id,
+                    deliverable_id=deliverable.id,
+                    manifest_path=str(manifest_path),
+                    reason="manifest_path_does_not_exist",
+                )
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pre_source = (manifest.get("starter_repo_bundle") or {}).get("source")
             normalized_contract = self._normalize_dependency_contract(
                 bundle.dependency_contract,
                 current_manifest=manifest,
@@ -686,13 +704,22 @@ class OpenAIStarterRepoAuthoringService:
                     "generated_for_deliverable": deliverable.id,
                     **shared_runtime_bundle,
                 }
-            updated_files.extend(
-                self._write_if_changed(
-                    manifest_path,
-                    json.dumps(manifest, indent=2) + "\n",
-                    workspace_root,
-                )
+            new_text = json.dumps(manifest, indent=2) + "\n"
+            wrote = self._write_if_changed(
+                manifest_path,
+                new_text,
+                workspace_root,
             )
+            log_coursegen_event(
+                "apply_progressive_bundle_manifest_written",
+                workflow_run_id=run.id,
+                deliverable_id=deliverable.id,
+                manifest_path=str(manifest_path),
+                pre_source=pre_source,
+                post_source=manifest["starter_repo_bundle"].get("source"),
+                content_changed=bool(wrote),
+            )
+            updated_files.extend(wrote)
 
         return updated_files, notes
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.domain.task_agent import TaskAgentServiceSpec
+from app.services.coursegen_logging import log_coursegen_event
 from app.domain.workflow import (
     ArtifactVisibility,
     BundleFile,
@@ -105,11 +106,22 @@ class ArtifactMaterializer:
 
     def materialize_run(self, run: WorkflowRun, overwrite: bool = True) -> MaterializedBundle:
         bundle_root = self.base_dir / run.id
-        if bundle_root.exists():
+        existed = bundle_root.exists()
+        wiped = False
+        if existed:
             if not overwrite:
                 manifest = bundle_root / "manifest.json"
                 raise FileExistsError(f"Bundle already exists at '{manifest}'.")
             shutil.rmtree(bundle_root)
+            wiped = True
+        log_coursegen_event(
+            "materialize_run_invoked",
+            workflow_run_id=run.id,
+            bundle_root=str(bundle_root),
+            existed=existed,
+            wiped=wiped,
+            overwrite=overwrite,
+        )
 
         public_dir = bundle_root / "public"
         private_dir = bundle_root / "private"
@@ -539,6 +551,27 @@ class ArtifactMaterializer:
                 )
             else:
                 manifest_text = authored_manifest_text
+            # Log which path produced the manifest. `default_template`
+            # means we lost any prior authored state (starter_repo_bundle
+            # reverts to `starter_default`).
+            try:
+                preview = json.loads(manifest_text)
+                preview_source = (preview.get("starter_repo_bundle") or {}).get("source")
+            except (json.JSONDecodeError, AttributeError):
+                preview_source = None
+            log_coursegen_event(
+                "materializer_manifest_resolved",
+                workflow_run_id=run.id,
+                deliverable_id=deliverable.id,
+                is_first_deliverable=(deliverable.id == first_deliverable.id),
+                authored_manifest_text_present=authored_manifest_text is not None,
+                source_path=(
+                    "authored_workspace"
+                    if authored_manifest_text is not None
+                    else "default_template"
+                ),
+                starter_repo_bundle_source=preview_source,
+            )
 
             # public/checks/<id>/run_visible_checks.py
             self._write_text(

@@ -172,6 +172,21 @@ class OpenAITestScriptAuthoringService:
                 "source": "openai_live",
                 "generated_for_deliverable": deliverable.id,
             }
+            # Snapshot starter_repo_bundle.source pre/post so we can
+            # confirm whether this writer alters it. Today it doesn't —
+            # only reads-and-preserves — but a regression that silently
+            # rewrote it to `starter_default` would be invisible without
+            # this log.
+            pre_starter_source = (manifest.get("starter_repo_bundle") or {}).get("source")
+            post_starter_source = (manifest.get("starter_repo_bundle") or {}).get("source")
+            log_coursegen_event(
+                "test_script_authoring_manifest_write",
+                workflow_run_id=run.id,
+                deliverable_id=deliverable.id,
+                manifest_path=str(manifest_path),
+                pre_starter_repo_bundle_source=pre_starter_source,
+                post_starter_repo_bundle_source=post_starter_source,
+            )
             updated_files.extend(
                 self._write_if_changed(
                     manifest_path,
