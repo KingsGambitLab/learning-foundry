@@ -126,5 +126,61 @@ class StackInferenceHonorsBriefTests(unittest.TestCase):
         self.assertEqual(framework, "fastapi")
 
 
+class StackInferenceEndToEndSpecTests(unittest.TestCase):
+    """End-to-end pin: the produced TaskAgentServiceSpec must record
+    `runtime_dependencies.implementation_language` and
+    `application_framework` matching the brief's declared stack.
+
+    This is the spec-level guarantee that downstream sandbox + repo
+    authoring services can rely on. Without it,
+    `implementation_language=null` flows through the pipeline and
+    silently becomes whatever the LLM defaults to (historically
+    Python+FastAPI).
+    """
+
+    def test_rails_brief_produces_spec_with_ruby_and_rails(self) -> None:
+        from app.services.assignment_design_inference import infer_assignment_design
+
+        inference = infer_assignment_design(
+            title="Production Team Incident Response in Rails 8",
+            problem_statement=(
+                "Build a production-ready team incident response application "
+                "using Rails 8 with PostgreSQL and Solid Queue. Learners "
+                "progress through deliverables that add an Incident model, "
+                "SLA tracking, idempotent webhook ingestion, real-time feed, "
+                "postmortem workflow, and metrics aggregation."
+            ),
+        )
+        self.assertIsNotNone(inference.design_spec)
+        rd = inference.design_spec.runtime_dependencies
+        self.assertEqual(
+            rd.implementation_language,
+            "ruby",
+            f"Rails brief must produce a spec with "
+            f"implementation_language=ruby, got {rd.implementation_language!r}.",
+        )
+        self.assertEqual(
+            rd.application_framework,
+            "rails",
+            f"Rails brief must produce a spec with "
+            f"application_framework=rails, got {rd.application_framework!r}.",
+        )
+
+    def test_spring_brief_produces_spec_with_java_and_spring(self) -> None:
+        from app.services.assignment_design_inference import infer_assignment_design
+
+        inference = infer_assignment_design(
+            title="Spring Boot Inventory Service",
+            problem_statement=(
+                "Build a Spring Boot inventory service in Java with "
+                "PostgreSQL and JPA-backed persistence."
+            ),
+        )
+        self.assertIsNotNone(inference.design_spec)
+        rd = inference.design_spec.runtime_dependencies
+        self.assertEqual(rd.implementation_language, "java")
+        self.assertIn(rd.application_framework, {"spring boot", "spring"})
+
+
 if __name__ == "__main__":
     unittest.main()
