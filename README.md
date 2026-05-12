@@ -400,95 +400,193 @@ That split is intentional:
 
 ## LangGraph assignment flow
 
-This is the current LangGraph node flow defined in [`app/services/langgraph_assignment_graph.py`](app/services/langgraph_assignment_graph.py).
+The author/review loop is defined in [`app/services/langgraph_assignment_graph.py`](app/services/langgraph_assignment_graph.py). The graph compiles a `StateGraph` for inspection, but in production it runs via a manual `execute()` loop (`langgraph_assignment_graph.py:100-138`) that calls `_invoke_node` then `_next_node` so the workflow store can persist each step before deciding the next one.
+
+### Registered nodes
+
+Eight nodes in total, mirrored by `WorkflowNodeKind` in [`app/domain/workflow.py`](app/domain/workflow.py):
+
+| Node | Responsibility |
+| --- | --- |
+| `authoring_runtime` | Author / sync the workspace, run the sandbox runtime stage, prove the generated assignment boots. |
+| `authoring_tests` | Read the materialized starter workspace, generate visible + hidden test scripts per deliverable, run the baseline-matrix verifier. |
+| `authoring_repair` | Rewrite spec or workspace after an authoring-lane failure; re-enters either `authoring_runtime` or `authoring_tests`. |
+| `reviewer_runtime` | Re-run the sandbox runtime stage to catch narrow runtime regressions before deeper review. |
+| `reviewer_code` | Validate starter authenticity — reject thin wrappers and fake learner-owned files. |
+| `reviewer_pedagogy` | Validate learner clarity of starter surface, docs, and scenarios. |
+| `reviewer_tests` | Validate the hidden/public test relationship, deliverable coverage, and that untouched starters still fail hidden checks. |
+| `reviewer_repair` | Address reviewer-lane findings; re-enters either `authoring_runtime` (structural) or `reviewer_tests` (test-quality only). |
 
 ```mermaid
 flowchart TD
     START --> AR["authoring_runtime"]
     AR -->|"pass"| AT["authoring_tests"]
     AR -->|"fail + attempts left"| AP["authoring_repair"]
-    AR -->|"fail + exhausted"| END
+    AR -->|"exhausted"| END
+
     AT -->|"pass"| RR["reviewer_runtime"]
     AT -->|"fail + attempts left"| AP
-    AT -->|"fail + exhausted"| END
-    AP -->|"retry runtime or tests"| AR
+    AT -->|"exhausted"| END
+
+    AP -->|"runtime regression"| AR
+    AP -->|"test-author regression"| AT
 
     RR -->|"pass"| RC["reviewer_code"]
-    RR -->|"fail + attempts left"| RP["reviewer_repair"]
-    RR -->|"fail + exhausted"| END
+    RR -->|"fail"| RP["reviewer_repair"]
+    RR -->|"exhausted"| END
 
     RC -->|"pass"| RPED["reviewer_pedagogy"]
-    RC -->|"small/local fix"| RP
-    RC -->|"structural fix"| AP
-    RC -->|"fail + exhausted"| END
+    RC -->|"fail"| RP
+    RC -->|"exhausted"| END
 
     RPED -->|"pass"| RT["reviewer_tests"]
-    RPED -->|"small/local fix"| RP
-    RPED -->|"structural fix"| AP
-    RPED -->|"fail + exhausted"| END
+    RPED -->|"fail"| RP
+    RPED -->|"exhausted"| END
 
     RT -->|"pass"| END
-    RT -->|"small/local fix"| RP
-    RT -->|"structural fix"| AP
-    RT -->|"fail + exhausted"| END
+    RT -->|"fail"| RP
+    RT -->|"exhausted"| END
 
-    RP -->|"retry test quality"| RT
-    RP -->|"retry authored surface"| AR
+    RP -->|"structural fix"| AR
+    RP -->|"test-quality fix"| RT
 ```
 
-### What each node does
+### Retry budgets
 
-#### `authoring_runtime`
+Two independent counters live on the graph state (`AssignmentGraphState` at `langgraph_assignment_graph.py:53-61`):
 
-- authors or syncs the workspace
-- runs sandbox verification
-- proves the generated assignment compiles/boots at a workflow level
+- `authoring_attempt` — incremented only by `authoring_runtime`, capped at `max_authoring_attempts = 5`
+- `reviewer_attempt` — incremented only by `reviewer_runtime`, capped at `max_reviewer_attempts = 2`
 
-#### `authoring_tests`
-
-- reads the actual materialized starter workspace
-- generates learner-visible and hidden test scripts for each deliverable
-- runs the baseline matrix verifier before reviewer nodes ever see the suite
-
-#### `authoring_repair`
-
-- applies repair logic after authoring/runtime failure
-- may update workspace and spec
-
-#### `reviewer_runtime`
-
-- validates the runtime/sandbox path
-- keeps narrow runtime regressions in the reviewer lane
-
-#### `reviewer_code`
-
-- validates starter authenticity
-- rejects thin wrappers and fake learner-owned files
-
-#### `reviewer_pedagogy`
-
-- checks learner clarity
-- checks that the starter surface, docs, and scenarios make sense to a learner
-
-#### `reviewer_tests`
-
-- validates the hidden/public test relationship
-- validates deliverable coverage
-- validates learner starter surface coverage
-- makes sure untouched starters still fail hidden checks and deeper bugs are caught
+Repair nodes do **not** consume a fresh attempt of their own — they extend the run within the already-incremented budget for that lane. When `_refresh_review_summary` sees a lane mark its counter `exhausted`, [`WorkflowService._apply_node_stage`](app/services/workflow_service.py) flips the run to `stage=blocked`, `status=blocked`, and clears `pending_gate`. From that point the run requires either creator revision (rejection at the next gate carrying a comment) or explicit re-execution.
 
 ### Repair routing
 
-- **runtime / starter failure** -> `authoring_repair` -> `authoring_runtime`
-- **generated test weakness** -> `authoring_repair` or `reviewer_repair`, then back through `authoring_tests` or `reviewer_tests`
+The actual routing keys come from `_after_authoring_repair` and `_after_reviewer_repair` (`langgraph_assignment_graph.py:335-345`), which read `state["next_retry_node"]` written by the failing reviewer:
 
-That means the loop now has a dedicated test-authoring stage: starter generation, test generation, and reviewer validation are separate responsibilities, and the harness decides whether the generated tests are actually useful.
+- runtime / starter regression → `authoring_repair` → `authoring_runtime`
+- generated-test regression flagged in authoring lane → `authoring_repair` → `authoring_tests`
+- structural code/pedagogy issue caught in review → `reviewer_repair` → `authoring_runtime`
+- test-quality issue caught at `reviewer_tests` only → `reviewer_repair` → `reviewer_tests`
+
+That keeps test-only fixes from spending the more expensive authoring budget.
 
 ### Important nuance
 
-The publish-time learner certification step is **not** one of these LangGraph nodes today. It is a course-layer publish blocker because it needs the final publish snapshot and the exact learner runtime path.
+The publish-time learner certification step is **not** one of these LangGraph nodes. It is a course-layer publish blocker because it needs the final publish snapshot and the exact learner runtime path.
 
-That is one of the most important architecture choices in the repo right now. We do not want to certify "something close to what the learner will see"; we want to certify the exact learner path.
+That is one of the most important architecture choices in the repo: we do not want to certify "something close to what the learner will see"; we want to certify the exact learner path.
+
+## Plumbing: creator brief → published
+
+The full pipeline from `POST /v1/course-runs/generate-async` to `stage=published` on the LMS catalog. Each step lists the entry method, what it does, and the artifact it produces.
+
+### Intake (course layer)
+
+1. **`CourseGenerationService.queue_course_run_generation`** ([`course_generation_service.py:75`](app/services/course_generation_service.py)) — accepts the creator brief and creator-setup, schedules a background job. Returns a placeholder `CourseRun` with `active_operation=generation`.
+2. **`CourseWorkflowService.create_generation_placeholder`** ([`course_workflow_service.py:222`](app/services/course_workflow_service.py)) — persists the draft `CourseRun` at `stage=drafting`.
+3. **`infer_assignment_design`** ([`assignment_design_inference.py:1090`](app/services/assignment_design_inference.py)) — pure function turning brief + creator choices into an `AssignmentDesignSpec`. Owns framework / language / package-manager inference and reconciles creator choices with inferred defaults.
+4. **`CourseGenerationService._finalize_background_generation` → `CourseWorkflowService.apply_generated_plan`** ([`course_workflow_service.py:308`](app/services/course_workflow_service.py)) — applies the generated plan, materializes deliverables, links `shared_workflow_run_id` for progressive-codebase courses.
+
+### Workflow authoring (workflow layer)
+
+5. **`WorkflowService.create_run`** ([`workflow_service.py:273`](app/services/workflow_service.py)) — creates the shared assignment `WorkflowRun` from intake. When `execute_nodes=True`, chains directly into the LangGraph executor.
+6. **`OpenAITaskAgentAuthoringService.generate_scaffold`** ([`openai_task_agent_authoring.py:243`](app/services/openai_task_agent_authoring.py)) — LLM specialization of the generic assignment spec under the creator's stack contract. Produces a validated `TaskAgentServiceSpec`. Uses structured outputs with a hard-kill timeout (see Retries below).
+7. **`ArtifactMaterializer.materialize_run`** ([`artifact_materializer.py`](app/services/artifact_materializer.py)) — turns the authored spec + workspace_snapshot into the immutable `MaterializedBundle` (initial `deliverable.json` is created here, not by `_write_protocol_files`).
+8. **`WorkflowService.execute_langgraph_nodes`** ([`workflow_service.py:585`](app/services/workflow_service.py)) — preps workspace via `AssignmentWorkspaceManager.prepare_run_workspace`, then runs `LangGraphAssignmentGraph.execute(...)` node-by-node, persisting each `WorkflowNodeExecution`.
+
+#### Nodes that touch the workspace
+
+- **`TaskAgentWorkspaceAuthoringService.author_workspace`** ([`task_agent_workspace_authoring.py:111`](app/services/task_agent_workspace_authoring.py)) — invoked by `_authoring_runtime_node`. Writes starter and runtime protocol files. Owns the harness scripts (`run_visible_checks.py`, `run_hidden_checks.py`); leaves per-deliverable `deliverable.json` manifests alone — those are owned by the materializer (initial state) and `_apply_progressive_bundle` (authored state).
+- **`OpenAITestScriptAuthoringService.author_workspace_tests`** ([`openai_test_script_authoring.py:70`](app/services/openai_test_script_authoring.py)) — invoked by `_authoring_tests_node`. Reads the actual materialized starter workspace and writes visible / hidden test scripts per deliverable.
+- **`GeneratedTestBaselineVerifier.verify_course`** ([`generated_test_harness.py:174`](app/services/generated_test_harness.py)) — called from `_reviewer_tests_node`. Produces `BaselineSuiteOutcome` reports distinguishing empty-repo failure (correct) from authored-starter failure (a hint that visible checks are too aggressive).
+- **`DockerSandboxRunner.execute`** ([`docker_sandbox_runner.py:106`](app/services/docker_sandbox_runner.py)) — boots the starter under the authored `Dockerfile` and `.coursegen/runtime/*.sh` scripts, returns a `SandboxExecutionResult` with per-deliverable `DeliverableSandboxReport`. Called by every node that needs a runtime verdict.
+
+### Human review and publish (course layer)
+
+9. **`WorkflowService.apply_gate_decision`** ([`workflow_service.py:759`](app/services/workflow_service.py)) — advances `awaiting_hil_gate_1 → 2 → 3 → published`. Gate 1 has hard preconditions: spec valid, workspace_snapshot present, `authoring_runtime` and `authoring_tests` both `passed`.
+10. **`CourseWorkflowService.queue_publish_run` → `_execute_publish_run`** ([`course_workflow_service.py:811`, `:977`](app/services/course_workflow_service.py)) — runs only after every linked workflow is `published` and the course-layer stage advances to `ready_to_publish`. Calls:
+    - **`PublishSnapshotService.create_snapshot`** ([`publish_snapshot_service.py:35`](app/services/publish_snapshot_service.py)) — freezes the learner package.
+    - **`PublishLearnerCertificationService.certify_snapshot`** ([`publish_learner_certification_service.py:40`](app/services/publish_learner_certification_service.py)) — seeds a learner workspace from the snapshot and runs the exact learner-path certification. Failure here blocks publish.
+11. Course transitions to `CourseRunStage.published`, the `latest_publish_snapshot_id` populates, and `LMSService` exposes it on `GET /v1/lms/catalog`.
+
+### Course stage vs workflow stage
+
+The course-layer stage is computed from the workflow lane, not assigned independently. `CourseWorkflowService._course_stage_from_deliverables` ([`course_workflow_service.py:1572-1582`](app/services/course_workflow_service.py)) reads every linked workflow's status and produces:
+
+- any workflow at `awaiting_human` → course stage `awaiting_course_review`
+- any workflow `blocked` → course stage `blocked`
+- all linked workflows `published` → course stage `ready_to_publish`
+- `_execute_publish_run` completes → course stage `published`
+
+Approving gate 3 only marks the **workflow** published; the course needs the explicit `POST /v1/course-runs/{id}/publish-async` to run snapshot + certification before it becomes catalog-visible.
+
+## Retries, timeouts, and failure handling
+
+The pipeline is deliberately built so a hung model call, a slow Docker build, or a partial repair never leaves an orchestration thread pinned.
+
+### LangGraph retry budgets
+
+Two counters on `AssignmentGraphState`, set by the executor constructor (`langgraph_assignment_graph.py:75-76`):
+
+- `max_authoring_attempts = 5` — drives `authoring_runtime` + any repair iterations targeting the authoring lane
+- `max_reviewer_attempts = 2` — drives `reviewer_runtime` + reviewer-lane repairs
+
+When a lane exhausts its budget, the run flips to `stage=blocked` and waits for either creator revision (rejection-with-comment kicks `_apply_human_feedback_revision` at [`workflow_service.py:827`](app/services/workflow_service.py)) or an explicit re-execute.
+
+### HIL gates (workflow layer)
+
+Three gates enforced by `WorkflowService.apply_gate_decision`:
+
+| Gate | Stage entered | Approval transitions to | Hard precondition |
+| --- | --- | --- | --- |
+| `gate_1_spec_review` | `awaiting_hil_gate_1` | `awaiting_hil_gate_2` | `authoring_runtime` + `authoring_tests` both `passed`, valid spec + workspace_snapshot |
+| `gate_2_progression_review` | `awaiting_hil_gate_2` | `awaiting_hil_gate_3` | gate 1 approved |
+| `gate_3_pre_publish` | `awaiting_hil_gate_3` | workflow `stage=published` | gate 2 approved |
+
+Rejection (with optional comment) → `stage=needs_revision`, `status=awaiting_human`, and if a comment is present, the spec is revised and re-run.
+
+### Sandbox timeouts
+
+[`DockerSandboxRunner.__init__`](app/services/docker_sandbox_runner.py) defaults:
+
+- `build_timeout_s = 600` — caps `docker build` (drift-prone for stacks like Rails / Java where dependency resolution is the long pole)
+- `run_timeout_s = 600` — caps per-deliverable container runtime
+- `start_timeout_s = min(run_timeout_s, 600)` — caps boot polling
+
+When `_wait_for_http` times out, the raised `LearnerStudioError` includes `Last HTTP response: <status> <body excerpt>` so a stack that responds 501 on every health poll surfaces that, not the Uvicorn success banner. `_summarize_stage_failure` (`docker_sandbox_runner.py:2103`) routes that through `_extract_timeout_line` and `_extract_last_http_response_line` so the stage-failure headline shows the actual diagnostic instead of the last three lines of stderr.
+
+### Structured-output hard-kill on LLM calls
+
+LLM-driven spec authoring uses [`parse_structured_openai_response_with_hard_timeout`](app/services/openai_runtime_support.py) (`openai_runtime_support.py:133`), which wraps the OpenAI structured-output call inside a `multiprocessing.Process` so a wedged SDK call can be killed by the parent.
+
+Per-attempt budget on `OpenAITaskAgentAuthoringService`:
+
+- `request_timeout_s = 240.0`
+- `max_request_retries = 2`
+- backoff `min(2 ** attempt, 4)` seconds between attempts
+
+This is the concrete answer to the guardrail "do not parse raw JSON text from LLM output … fail loudly instead of pinning workflow threads."
+
+### Startup reconciliation
+
+On every FastAPI lifespan startup ([`app/main.py:144`](app/main.py), `:161`):
+
+- **`CourseWorkflowService.reconcile_stale_active_operations`** ([`course_workflow_service.py:541`](app/services/course_workflow_service.py)) clears `active_operation` locks owned by background tasks killed in the previous process. Without this, a server restart mid-generation would leave courses stuck `active` forever.
+- **`LearnerStudioService.reconcile_stale_sessions`** ([`learner_studio_service.py:200`](app/services/learner_studio_service.py)) marks editor sessions stopped when their container no longer exists (`docker inspect` check). This is what closes the gap behind the "editor 404 after server restart" failure mode.
+
+### Workspace ownership boundaries
+
+Per-deliverable `deliverable.json` manifest files have three legitimate writers and one node that explicitly does **not** write them:
+
+| Writer | When | Source field it sets |
+| --- | --- | --- |
+| `ArtifactMaterializer` | initial materialization | `starter_default` |
+| `TaskAgentWorkspaceAuthoringService._apply_progressive_bundle` | authoring runtime | `openai_live` |
+| `OpenAITestScriptAuthoringService` | authoring tests | adds `generated_test_scripts` block |
+| `TaskAgentWorkspaceAuthoringService._write_protocol_files` | every authoring iteration | **does not write `deliverable.json`** — only writes the runtime scripts (`run_visible_checks.py`, `run_hidden_checks.py`) |
+
+That last row is the regression guard behind [`tests/test_write_protocol_files_preserves_manifests.py`](tests/test_write_protocol_files_preserves_manifests.py). A previous bug here was the root cause of the Go / Rails / TypeScript reviewer-loop family — `_write_protocol_files` was overwriting authored manifests back to `starter_default`, triggering false `starter_repo_bundle_not_authored` findings on every reviewer pass.
 
 ## Runtime plans
 
