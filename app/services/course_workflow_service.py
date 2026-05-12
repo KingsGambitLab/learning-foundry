@@ -538,6 +538,48 @@ class CourseWorkflowService:
         )
         return course_run
 
+    def reconcile_stale_active_operations(self) -> list[str]:
+        """Clear `active_operation` on every course_run that still has it
+        set. Background tasks don't survive a process restart, so any
+        non-null `active_operation` at server startup is by definition
+        stale: the task that set it is dead.
+
+        Without this reconciliation, a course gets permanently stuck —
+        publish/revise/materialize endpoints return "already busy with
+        `<operation>`" because the lock outlived the task that owned it.
+        Observed today on course_f3235f196aa6 (Go validation) after we
+        restarted the server mid-generation.
+
+        Returns the list of course_run ids whose active_operation was
+        cleared (empty list if none needed reconciliation).
+        """
+        reconciled: list[str] = []
+        summaries = self.store.list_course_runs(limit=10_000)
+        for summary in summaries:
+            course_run = self.store.get_course_run(summary.id)
+            if course_run is None or course_run.active_operation is None:
+                continue
+            prior_operation = course_run.active_operation
+            course_run.active_operation = None
+            course_run.updated_at = datetime.now(UTC)
+            note = (
+                f"Operation `{prior_operation.value}` was interrupted by a "
+                f"server restart; the lock was cleared on startup. "
+                f"You may need to retry the operation."
+            )
+            course_run.notes = list(dict.fromkeys([*course_run.notes, note]))
+            self.store.save_course_run(course_run)
+            self.store.append_course_event(
+                course_run.id,
+                "course_active_operation_reconciled",
+                {
+                    "prior_operation": prior_operation.value,
+                    "message": "active_operation lock was cleared on server startup.",
+                },
+            )
+            reconciled.append(course_run.id)
+        return reconciled
+
     def review_run(self, course_run_id: str) -> CourseReviewReport:
         course_run = self._compute_refreshed_run(self._require_run(course_run_id))
         linked_runs = self._linked_runs(course_run)
