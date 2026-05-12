@@ -38,8 +38,8 @@ class DockerSandboxRunner:
         self,
         *,
         docker_binary: str = "docker",
-        build_timeout_s: int = 180,
-        run_timeout_s: int = 180,
+        build_timeout_s: int = 600,
+        run_timeout_s: int = 600,
         keep_image: bool = False,
         cache_images: bool = True,
         cache_namespace: str = "course-gen-cache",
@@ -53,16 +53,24 @@ class DockerSandboxRunner:
         self.cache_images = cache_images
         self.cache_namespace = cache_namespace
         self.workspace_manager = workspace_manager
+        # start_timeout_s gates how long `_wait_for_http` polls /health
+        # before giving up. Slow installs (Rails bundle install, npm/yarn
+        # with native modules, Maven first-run deps) need 3-5 min. The
+        # prior 90s cap caused Rails sandboxes to fail mid-install with
+        # confusing "failed during install: <last bundler progress
+        # line>" messages despite the container being healthy and
+        # progressing. The timeout-aware summarizer plus a 300s cap lets
+        # heavy stacks complete first-run installs.
         self.runtime_harness = LearnerStudioService(
             docker_binary=docker_binary,
             build_timeout_s=build_timeout_s,
-            start_timeout_s=min(run_timeout_s, 90),
+            start_timeout_s=min(run_timeout_s, 300),
             host="127.0.0.1",
         )
-        self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 90))
+        self.test_script_runner = GeneratedTestScriptRunner(command_timeout_s=min(run_timeout_s, 300))
         self.dependency_contract_materializer = dependency_contract_materializer or DependencyContractMaterializer(
             docker_binary=docker_binary,
-            command_timeout_s=min(build_timeout_s, 180),
+            command_timeout_s=min(build_timeout_s, 600),
         )
 
     def status(self) -> SandboxAvailability:
@@ -2156,6 +2164,18 @@ class DockerSandboxRunner:
             http_line = self._extract_last_http_response_line(error_text)
             if http_line:
                 return f"{deliverable_id} failed during {stage_label}: {http_line}"
+        # Stage-progress timeouts: when `_wait_for_http` deadline fires
+        # while the container is still running (e.g., heavy `bundle
+        # install`, `apt-get`, etc.), the canonical diagnostic is the
+        # timeout itself — NOT the last 3 stderr lines, which are just
+        # the progress message at the moment the harness gave up.
+        # Surface "Timed out waiting for ..." as the headline regardless
+        # of stage. Without this, a reader (or repair LLM) sees gem-
+        # install progress lines and concludes "bundler is broken" when
+        # really "harness gave up too early on a healthy container."
+        timeout_line = self._extract_timeout_line(error_text)
+        if timeout_line:
+            return f"{deliverable_id} failed during {stage_label}: {timeout_line}"
         source = (logs or error_text or "").strip()
         if not source:
             return f"{deliverable_id} failed during {stage_label}."
@@ -2169,6 +2189,31 @@ class DockerSandboxRunner:
         tail_lines = [line for line in source.splitlines() if line.strip()][-3:]
         teaser = " | ".join(tail_lines)
         return f"{deliverable_id} failed during {stage_label}: {teaser}"
+
+    @staticmethod
+    def _extract_timeout_line(error_text: str | None) -> str | None:
+        """Pull the `Timed out waiting for <url> during <stage>` segment
+        out of a wait-for-http timeout exception message.
+
+        Emitted by :func:`LearnerStudioService._wait_for_http` when the
+        deadline fires while the container is still alive. We surface
+        this verbatim so the headline says "harness gave up after Xs"
+        instead of showing the last 3 stderr lines (which for slow
+        installs are misleading progress messages).
+        """
+        if not error_text:
+            return None
+        marker = "Timed out waiting for"
+        idx = error_text.find(marker)
+        if idx == -1:
+            return None
+        tail = error_text[idx:]
+        # Trim at the first newline so any container log dumps appended
+        # to the exception message don't bleed into the headline.
+        newline = tail.find("\n")
+        if newline != -1:
+            tail = tail[:newline]
+        return tail.strip()
 
     @staticmethod
     def _extract_last_http_response_line(error_text: str | None) -> str | None:

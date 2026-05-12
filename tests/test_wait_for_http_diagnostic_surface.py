@@ -141,10 +141,19 @@ class BootStageHttpResponseHeadlineTests(unittest.TestCase):
             f"a Last HTTP response is available; got: {summary!r}",
         )
 
-    def test_boot_failure_summary_falls_back_to_stderr_when_no_http_response(self) -> None:
-        """If no HTTP response was recorded (e.g., connection refused
-        every poll), the boot summary keeps the existing stderr-tail
-        behavior so we don't regress the existing diagnostic path.
+    def test_boot_failure_summary_surfaces_timeout_when_no_http_response(self) -> None:
+        """When `_wait_for_http` timed out without observing an HTTP
+        response (e.g., connection refused every poll), the summary
+        surfaces the timeout headline. The stderr-tail behavior is the
+        last-resort fallback only for failures with no timeout marker
+        in error_text (test_no_timeout_no_http_falls_back_to_stderr_tail
+        covers that path).
+
+        Updated after introducing `_extract_timeout_line`: a "Timed out
+        waiting for" header is more useful than the last stderr line
+        for debugging — it tells the operator/repair-LLM that the
+        harness gave up, not that the app crashed. The full stderr is
+        still preserved on the `stderr_excerpt` field for deep-dive.
         """
         runner = DockerSandboxRunner()
 
@@ -166,10 +175,11 @@ class BootStageHttpResponseHeadlineTests(unittest.TestCase):
         )
 
         self.assertIn("deliverable_1 failed during boot", summary)
-        self.assertTrue(
-            "PSQLException" in summary or "HikariPool" in summary,
-            f"Boot summary must keep stderr-tail behavior when no HTTP "
-            f"response is recorded; got: {summary!r}",
+        self.assertIn(
+            "Timed out waiting",
+            summary,
+            f"Boot summary must surface the timeout marker as the "
+            f"canonical diagnostic; got: {summary!r}",
         )
 
 

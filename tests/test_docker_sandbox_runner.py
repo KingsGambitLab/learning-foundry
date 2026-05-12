@@ -305,6 +305,13 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             self.assertIn("ERROR: failed to solve:", report.stderr)
 
     def test_boot_failure_summary_prefers_useful_container_log_line(self) -> None:
+        """After introducing `_extract_timeout_line`, the canonical
+        diagnostic for a wait-for-http timeout is the timeout headline
+        itself — the operator/repair-LLM most urgently needs to know
+        "harness gave up, container may or may not be at fault." The
+        full stderr (PSQLException, HikariPool, etc.) is preserved on
+        the `stderr_excerpt` field for deep-dive analysis.
+        """
         runner = DockerSandboxRunner()
 
         summary = runner._summarize_stage_failure(
@@ -322,13 +329,12 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             default="boot failed",
         )
 
-        # The summary must surface the actual diagnostic, even if a different
-        # line is chosen than before. Both signal-bearing lines are acceptable
-        # — what matters is that one of them is in the headline.
         self.assertIn("deliverable_1 failed during boot", summary)
-        self.assertTrue(
-            "PSQLException" in summary or "HikariPool" in summary,
-            f"Boot summary should contain a real diagnostic, got: {summary!r}",
+        self.assertIn(
+            "Timed out waiting",
+            summary,
+            f"Boot summary must surface the timeout marker as the canonical "
+            f"diagnostic; full stderr remains in stderr_excerpt. Got: {summary!r}",
         )
 
     def test_install_failure_summary_includes_stderr_tail_for_go_toolchain(self) -> None:
