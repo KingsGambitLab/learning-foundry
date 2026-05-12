@@ -506,6 +506,7 @@ class OpenAIStarterRepoAuthoringService:
                         "and keep the checked-in dependency contract consistent with that install step so transitive dependency resolution stays reproducible under retries and fresh builds. "
                         "Use `install.sh` for dependency setup and dependency-contract materialization. "
                         "Use `verify.sh` only for essential dependency/build/runtime sanity checks needed after install and before boot. "
+                        "PATH CONVENTION: every `files[].path` you return MUST be relative to the shared starter root (the directory described by `shared_repo_root`), NOT prefixed with the repo name. The shared starter root is already named `starter` — prefixing your paths with `starter/` will create a duplicate `starter/starter/` directory and the reviewer will report your editable files as missing. Examples: emit `cmd/server/main.go`, NOT `starter/cmd/server/main.go`; emit `pom.xml`, NOT `starter/pom.xml`; emit `Dockerfile`, NOT `starter/Dockerfile`. If your language's module name happens to be `starter` (common for Go: `module starter`), keep that module name in import statements but DO NOT mirror it in the file layout — files live at the starter root. "
                         "Do not invent internal platform hooks or manifest-driven runtime behavior."
                     ),
                 },
@@ -699,6 +700,7 @@ class OpenAIStarterRepoAuthoringService:
                         "The authored runtime bundle must be self-consistent: every command used by `.coursegen/runtime/*.sh` must be available from the authored Dockerfile and install script without relying on shell profile side effects. "
                         "Use `install.sh` for dependency setup and dependency-contract materialization. "
                         "Use `verify.sh` only for essential dependency/build/runtime sanity checks needed after install and before boot. "
+                        "PATH CONVENTION: every `files[].path` you return MUST be relative to the shared starter root (the directory described by `shared_repo_root`), NOT prefixed with the repo name. The shared starter root is already named `starter` — prefixing your paths with `starter/` will create a duplicate `starter/starter/` directory and the reviewer will report your editable files as missing. Examples: emit `cmd/server/main.go`, NOT `starter/cmd/server/main.go`; emit `pom.xml`, NOT `starter/pom.xml`; emit `Dockerfile`, NOT `starter/Dockerfile`. If your language's module name happens to be `starter` (common for Go: `module starter`), keep that module name in import statements but DO NOT mirror it in the file layout — files live at the starter root. "
                         "Do not use `verify.sh` for formatter, linter, or style-only gates unless the creator contract explicitly requires them and the authored runtime bundle installs those tools. "
                         "Keep the runtime protocol minimal and deterministic so the harness can repair it from sandbox failures. "
                         "Return only relative file paths inside the starter workspace. "
@@ -738,7 +740,19 @@ class OpenAIStarterRepoAuthoringService:
         if not candidate:
             return None
         normalized = posixpath.normpath(candidate)
-        if normalized in {".", ""} or normalized.startswith("../") or normalized.startswith("/"):
+        # Defensive strip: the model is told `shared_repo_root: "starter"`
+        # in the prompt payload. For some stacks (notably Go, where the
+        # natural module name `starter` mirrors the repo root name), the
+        # model prefixes every authored path with `starter/` thinking
+        # they're workspace-relative. The writer expects them
+        # starter-root-relative, so the prefix would yield
+        # `public/starter/starter/cmd/server/main.go` — one directory
+        # too deep, and reviewer_code reports the files as missing.
+        # Strip the literal prefix (only with the trailing slash, to
+        # avoid false-stripping lookalikes like `starters_helper/`).
+        if normalized.startswith("starter/"):
+            normalized = normalized[len("starter/"):]
+        if normalized in {".", "", "starter"} or normalized.startswith("../") or normalized.startswith("/"):
             return None
         if normalized in _RESERVED_PATHS or normalized.startswith(_RESERVED_PREFIXES):
             return None
