@@ -589,8 +589,28 @@ class OpenAIStarterRepoAuthoringService:
                 )
             )
 
+        # Compute bundle-state metadata ONCE for the shared bundle and
+        # write the IDENTICAL payload to every per-deliverable manifest.
+        # The bundle is shared across all deliverables — `_bundle_state`
+        # describes that one shared bundle, so its result cannot
+        # legitimately vary per deliverable. Computing it per-iteration
+        # used to allow subtle per-deliverable manifest differences
+        # (e.g. empty `dependency_contract.manifest_paths`) to produce
+        # divergent results — observed on `course_72e0739fc3ab` where
+        # deliverable_2 recorded `source="starter_default"` while
+        # deliverables 1/3/4/5 recorded `source="openai_live"` for the
+        # exact same shared files, causing reviewer_tests to fail in an
+        # infinite loop on the metadata mismatch.
+        canonical_manifest = first_manifest
+        shared_starter_repo_bundle, shared_runtime_bundle = self._bundle_state(
+            starter_root=shared_starter_root,
+            manifest=canonical_manifest,
+            default_starter_files=default_starter_files,
+            visible_fixture_files=visible_fixture_files,
+        )
+
         # Update every per-deliverable manifest with the new dependency contract
-        # and bundle-state metadata. Manifests now live at
+        # and bundle-state metadata. Manifests live at
         # private/grader/<id>/deliverable.json.
         for deliverable in spec.deliverables:
             manifest_path = (
@@ -607,24 +627,15 @@ class OpenAIStarterRepoAuthoringService:
                 bundle.dependency_contract,
                 current_manifest=manifest,
             )
-            starter_repo_bundle, _ = self._bundle_state(
-                starter_root=shared_starter_root,
-                manifest=manifest,
-                default_starter_files=default_starter_files,
-                visible_fixture_files=visible_fixture_files,
-            )
             manifest["starter_repo_bundle"] = {
                 "generated_for_deliverable": deliverable.id,
-                **starter_repo_bundle,
+                **shared_starter_repo_bundle,
             }
             manifest["dependency_contract"] = normalized_contract
             if normalized_runtime_files:
                 manifest["runtime_protocol_bundle"] = {
                     "generated_for_deliverable": deliverable.id,
-                    **self._runtime_bundle_state(
-                        default_starter_files=default_starter_files,
-                        authored_runtime_files=normalized_runtime_files,
-                    ),
+                    **shared_runtime_bundle,
                 }
             updated_files.extend(
                 self._write_if_changed(
