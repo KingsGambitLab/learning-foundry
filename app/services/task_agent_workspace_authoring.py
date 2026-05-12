@@ -429,6 +429,24 @@ class TaskAgentWorkspaceAuthoringService:
                     )
                 )
             # Per-deliverable artifacts in public/checks/<id>/ and private/grader/<id>/.
+            #
+            # IMPORTANT: deliverable.json is INTENTIONALLY not written here.
+            # The manifest is owned by:
+            #   - ArtifactMaterializer (initial creation, default template)
+            #   - OpenAIStarterRepoAuthoringService._apply_progressive_bundle
+            #     (authored metadata: starter_repo_bundle.source=openai_live,
+            #      runtime_protocol_bundle, dependency_contract)
+            #   - OpenAITestScriptAuthoringService.author_workspace_tests
+            #     (generated_test_scripts.source)
+            #
+            # Writing the default template here destroys the authored
+            # state on every authoring_runtime invocation, causing
+            # reviewer_code/reviewer_tests to fail with
+            # `starter_repo_bundle_not_authored` even when the files on
+            # disk are correctly authored. This was the root cause
+            # behind the Go d2 stale-manifest divergence, the Rails
+            # reviewer_tests loop, and the TypeScript reviewer_code
+            # failure observed today.
             for deliverable in spec.deliverables:
                 if deliverable.id not in allowed_deliverables:
                     continue
@@ -439,14 +457,6 @@ class TaskAgentWorkspaceAuthoringService:
                     self._write_if_needed(
                         checks_dir / "run_visible_checks.py",
                         deliverable_files["checks/run_visible_checks.py"],
-                        workspace.root_dir,
-                        force=force,
-                    )
-                )
-                updated_files.extend(
-                    self._write_if_needed(
-                        grader_dir / "deliverable.json",
-                        deliverable_files[HIDDEN_MANIFEST_PATH],
                         workspace.root_dir,
                         force=force,
                     )
