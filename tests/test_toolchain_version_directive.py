@@ -85,5 +85,71 @@ class ToolchainVersionDirectiveTests(unittest.TestCase):
         )
 
 
+class LockfileIntegrityDirectiveTests(unittest.TestCase):
+    """Language-agnostic lockfile-hash-mismatch directive.
+
+    Every modern ecosystem with a lockfile reports the same failure
+    pattern when the lockfile's content hashes don't match the upstream
+    artifacts:
+
+      - Go:     `checksum mismatch` / `bits may have been replaced`
+      - npm:    `EINTEGRITY: sha512-... integrity checksum failed`
+      - pnpm:   `ERR_PNPM_LOCKFILE_BREAKING_CHANGE` / lockfile integrity
+      - Yarn:   `Hash mismatch detected for ...`
+      - Cargo:  `the lockfile ... is corrupt`
+      - Poetry: `Lock file is not compatible`
+      - pip:    `THESE PACKAGES DO NOT MATCH THE HASHES`
+
+    The canonical fix is identical: regenerate the lockfile from the
+    manifest inside `install.sh` using the language's refresh command.
+    Hashes can NEVER be authored by hand — they come from the registry.
+
+    Observed in `course_d540fbc15802` (Go URL shortener final run):
+    retries 6-12 ALL failed with `bits may have been replaced` errors
+    because the model kept hand-authoring stale `go.sum` entries.
+    """
+
+    def test_repo_authoring_prompt_includes_lockfile_integrity_directive(self) -> None:
+        from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
+
+        source = inspect.getsource(OpenAIStarterRepoAuthoringService)
+        lowered = source.lower()
+
+        self.assertIn(
+            "lockfile integrity",
+            lowered,
+            "Repo authoring prompts must include a language-agnostic "
+            "lockfile-integrity (hash mismatch) directive.",
+        )
+        # The directive must forbid hand-authoring hashes.
+        self.assertTrue(
+            "do not author" in lowered
+            or "cannot be authored" in lowered
+            or "never be authored" in lowered
+            or "must come from" in lowered,
+            "Lockfile directive must forbid hand-authoring lockfile "
+            "content hashes — they must come from the registry.",
+        )
+        # The directive must point at install.sh / a regeneration command.
+        self.assertIn(
+            "regenerate",
+            lowered,
+            "Lockfile directive must direct the model to REGENERATE the "
+            "lockfile (not hand-edit it).",
+        )
+
+    def test_lockfile_integrity_directive_appears_in_both_progressive_and_repair_prompts(self) -> None:
+        from app.services import openai_repo_authoring
+
+        source = inspect.getsource(openai_repo_authoring)
+        occurrences = source.lower().count("lockfile integrity")
+        self.assertGreaterEqual(
+            occurrences,
+            2,
+            f"Lockfile-integrity directive must appear in both prompt sites "
+            f"(progressive + repair); found {occurrences} occurrence(s).",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

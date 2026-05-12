@@ -959,6 +959,21 @@ class LangGraphAssignmentGraph:
             placeholder_deliverables = []
             wrapper_deliverables = []
             shared_codebase = bool(spec.course_structure.shared_codebase)
+            # Partial starters ship with explicit unimplemented stubs BY
+            # DESIGN (the authoring prompt requires `status_code=501` /
+            # `raise NotImplementedError` placeholders so visible/hidden
+            # tests fail until the learner implements them). Flagging
+            # those placeholders as an error is structurally
+            # contradictory and forces reviewer_repair to regenerate the
+            # workspace — at which point previously-verified files
+            # (Dockerfile FROM line, install.sh, lockfiles) get blown
+            # away. Skip the placeholder check entirely for partial
+            # starters; the wrapper check still applies (partial
+            # starters must still ship REAL files with substantive
+            # learner-owned structure, not generated-runtime wrappers).
+            partial_starter = (
+                spec.runtime_dependencies.starter_type.value == "partial"
+            )
             shared_starter_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter"
             for deliverable in spec.deliverables:
                 # Shared-codebase courses keep one shared starter root at
@@ -977,9 +992,14 @@ class LangGraphAssignmentGraph:
                     try:
                         source = deliverable_app.read_text(encoding="utf-8")
                     except OSError:
+                        # Missing-file detection is still useful for
+                        # partial starters — a partial starter must
+                        # at least HAVE the editable file present.
                         deliverable_has_placeholder = True
                         continue
-                    if "Implement /run" in source or "status_code=501" in source:
+                    if not partial_starter and (
+                        "Implement /run" in source or "status_code=501" in source
+                    ):
                         deliverable_has_placeholder = True
                     if "from runtime.task_agent_runtime import" in source or (
                         "app = create_app_from_manifest(" in source
