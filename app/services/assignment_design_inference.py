@@ -185,17 +185,44 @@ TOOL_USE_KEYWORDS = {
 }
 
 FRAMEWORK_LANGUAGE_HINTS: dict[str, str] = {
+    # Python
     "fastapi": "python",
     "flask": "python",
     "django": "python",
+    # TypeScript / Node
     "express": "typescript",
     "hono": "typescript",
     "nestjs": "typescript",
+    # Go
     "gin": "go",
     "fiber": "go",
+    # Rust
     "actix": "rust",
     "actix-web": "rust",
     "axum": "rust",
+    # Ruby — `framework` is the framework NAME ("rails"); the version
+    # is captured separately in `framework_version`, so don't add
+    # version-tagged keys like "rails 8" (they'd shadow "rails" on
+    # length-descending sort).
+    "ruby on rails": "ruby",
+    "rails": "ruby",
+    "sinatra": "ruby",
+    "hanami": "ruby",
+    # Java / Kotlin
+    "spring boot": "java",
+    "spring": "java",
+    "quarkus": "java",
+    "micronaut": "java",
+    "ktor": "kotlin",
+    # Elixir
+    "phoenix": "elixir",
+    # .NET
+    "aspnet": "csharp",
+    "asp.net": "csharp",
+    "asp.net core": "csharp",
+    # PHP
+    "laravel": "php",
+    "symfony": "php",
 }
 
 DEFAULT_FRAMEWORK_BY_LANGUAGE: dict[str, str] = {
@@ -204,6 +231,12 @@ DEFAULT_FRAMEWORK_BY_LANGUAGE: dict[str, str] = {
     "javascript": "express",
     "go": "gin",
     "rust": "actix-web",
+    "ruby": "rails",
+    "java": "spring boot",
+    "kotlin": "ktor",
+    "elixir": "phoenix",
+    "csharp": "aspnet",
+    "php": "laravel",
 }
 
 LANGUAGE_KEYWORDS: dict[str, list[str]] = {
@@ -212,6 +245,12 @@ LANGUAGE_KEYWORDS: dict[str, list[str]] = {
     "javascript": ["javascript", "node", "node.js", "express"],
     "go": ["go", "golang", "gin", "fiber"],
     "rust": ["rust", "actix", "axum"],
+    "ruby": ["ruby", "rails", "ruby on rails", "sinatra", "hanami", "gemfile"],
+    "java": ["java", "spring boot", "spring", "quarkus", "micronaut", "maven", "gradle"],
+    "kotlin": ["kotlin", "ktor"],
+    "elixir": ["elixir", "phoenix", "liveview"],
+    "csharp": ["c#", "csharp", "aspnet", "asp.net", "dotnet", ".net"],
+    "php": ["php", "laravel", "symfony"],
 }
 
 
