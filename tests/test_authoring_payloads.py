@@ -897,7 +897,6 @@ class AuthoringPayloadTests(unittest.TestCase):
             payload = service._progressive_prompt_payload(
                 run=run,
                 public_root=public_root,
-                deliverable_ids=[spec.deliverables[0].id],
                 failure_context=None,
             )
 
@@ -1008,7 +1007,11 @@ class AuthoringPayloadTests(unittest.TestCase):
             assert len(parse_calls) == 1
             assert parse_calls[0]["text_format"].__name__ == "_GeneratedSharedRepoBundle"
             payload = json.loads(parse_calls[0]["input"][1]["content"])
-            assert payload["repair_scope_deliverable_ids"] == ["deliverable_2"]
+            # repair_scope_deliverable_ids has been REMOVED: deliverables
+            # are evaluation criteria, not authoring scopes. The author
+            # always sees the complete spec regardless of which
+            # deliverable_ids the caller passes.
+            assert "repair_scope_deliverable_ids" not in payload
             assert payload["shared_repo_root"] == "starter"
             assert payload["current_files"]["src/shared_stage.txt"] == "stage-one\n"
             assert "Dockerfile" in payload["shared_runtime_protocol_files"]

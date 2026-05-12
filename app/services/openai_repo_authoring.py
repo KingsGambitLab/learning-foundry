@@ -169,11 +169,18 @@ class OpenAIStarterRepoAuthoringService:
             if deliverable.id in requested_ids
         ]
 
-        if spec.course_structure.shared_codebase and ordered_requested_ids:
+        if spec.course_structure.shared_codebase:
+            # Deliverables are learner constructs — evaluation criteria,
+            # not authoring scopes. The shared-codebase author ALWAYS
+            # sees the full spec and produces the complete app; the
+            # caller-supplied `deliverable_ids` (if any) is purely
+            # advisory and discarded here. The prompt carries every
+            # deliverable's primary_editable_paths plus the union, so
+            # the model has the full file inventory regardless of
+            # which deliverables the reviewer flagged.
             payload = self._progressive_prompt_payload(
                 run=run,
                 public_root=public_root,
-                deliverable_ids=ordered_requested_ids,
                 failure_context=failure_context,
             )
             bundle, response_usage = self._generate_progressive_bundle(
@@ -183,14 +190,14 @@ class OpenAIStarterRepoAuthoringService:
                 base_url=config.get("OPENAI_BASE_URL"),
                 payload=payload,
                 workflow_run_id=run.id,
-                deliverable_ids=ordered_requested_ids,
+                deliverable_ids=[deliverable.id for deliverable in spec.deliverables],
             )
             progressive_updates, bundle_notes = self._apply_progressive_bundle(
                 run=run,
                 public_root=public_root,
                 workspace_root=workspace_root,
                 visible_fixture_files=visible_fixture_files,
-                deliverable_ids=ordered_requested_ids,
+                deliverable_ids=[deliverable.id for deliverable in spec.deliverables],
                 bundle=bundle,
             )
             updated_files.extend(progressive_updates)
@@ -283,9 +290,22 @@ class OpenAIStarterRepoAuthoringService:
         *,
         run: WorkflowRun,
         public_root: Path,
-        deliverable_ids: list[str],
         failure_context: FailureContext | None,
     ) -> dict[str, Any]:
+        """Build the shared-codebase authoring prompt payload.
+
+        Deliverables are LEARNER CONSTRUCTS — milestones for course UX
+        and EVALUATION CRITERIA the reviewer uses to assess the app.
+        They are NOT authoring scopes. The model authors ONE shared
+        application that must satisfy every deliverable's criteria
+        simultaneously. There is no `repair_scope_deliverable_ids`,
+        no "fix only these deliverables, preserve the rest." Every
+        authoring call sees:
+          - The full spec (every deliverable's criteria visible)
+          - The full union of required editable paths
+          - The current codebase on disk
+          - A flat findings list from the reviewer (if repairing)
+        """
         spec = run.artifacts.task_agent_spec
         if spec is None:
             raise ValueError("Task-agent spec is required for progressive repo authoring.")
@@ -317,8 +337,26 @@ class OpenAIStarterRepoAuthoringService:
             starter_root=shared_root,
             manifest=shared_manifest,
         )
+
+        # Compute the UNION of every deliverable's primary editable
+        # paths. The shared bundle must contain every path declared by
+        # any deliverable — d1's view alone is insufficient.
+        from app.services.task_agent_contract_surface import (
+            learner_editable_paths_for_deliverable,
+        )
+
+        seen_required: set[str] = set()
+        shared_required_paths: list[str] = []
         deliverable_payloads: list[dict[str, Any]] = []
         for deliverable in spec.deliverables:
+            per_deliverable_paths = learner_editable_paths_for_deliverable(
+                spec, deliverable
+            )
+            for path in per_deliverable_paths:
+                if path in seen_required:
+                    continue
+                seen_required.add(path)
+                shared_required_paths.append(path)
             deliverable_payloads.append(
                 {
                     "deliverable_id": deliverable.id,
@@ -331,6 +369,11 @@ class OpenAIStarterRepoAuthoringService:
                         else None
                     ),
                     "public_checks": [check.model_dump(mode="json") for check in deliverable.public_checks],
+                    # Required learner-editable files for this milestone.
+                    # The reviewer evaluates these per-deliverable; the
+                    # model needs the same view to author files that map
+                    # to each milestone's criteria.
+                    "primary_editable_paths": list(per_deliverable_paths),
                 }
             )
 
@@ -339,13 +382,17 @@ class OpenAIStarterRepoAuthoringService:
             "problem_statement": run.intake.problem_statement,
             "shared_codebase": True,
             "course_starter_type": spec.runtime_dependencies.starter_type.value,
-            "repair_scope_deliverable_ids": deliverable_ids,
             "shared_repo_root": shared_root.name,
             "manifest": shared_manifest,
             "current_files": prompt_files["learner_files"],
             "dependency_contract_files": prompt_files["dependency_contract_files"],
             "shared_runtime_protocol_files": prompt_files["runtime_protocol_files"],
             "public_endpoints": prompt_files["public_endpoints"],
+            # The COMPLETE set of learner-editable files the shared
+            # bundle must contain. Authoring output MUST cover every
+            # path here — partial coverage leaves downstream
+            # deliverables with missing files.
+            "shared_required_paths": shared_required_paths,
             "deliverables": deliverable_payloads,
             "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
         }
@@ -466,6 +513,8 @@ class OpenAIStarterRepoAuthoringService:
                         "`files` must contain the complete learner-owned repo and dependency-contract snapshot for the shared course repo, "
                         "but must not repeat the shared runtime protocol files. "
                         "`dependency_contract` must describe the dependency/build contract for that shared repo. "
+                        "DELIVERABLES ARE LEARNER MILESTONES, NOT AUTHORING SCOPES. The `deliverables[]` field lists every milestone — each with its own `primary_editable_paths`, `learner_brief`, `public_checks`, and `learning_outcomes`. Your job is to author ONE complete app that satisfies the criteria of EVERY deliverable simultaneously. Do NOT treat deliverables as separate repo states or partial scopes. "
+                        "SHARED REQUIRED PATHS: the `shared_required_paths` field is the UNION of every deliverable's `primary_editable_paths` — the complete list of learner-editable files this shared bundle must contain. Your `files[]` output MUST include every path in `shared_required_paths`. Authoring a subset that only covers `deliverables[0]`'s paths is the most common failure mode: downstream reviewers will report `starter_primary_editable_missing` for every uncovered path and the run will fail. "
                         "Treat deliverables only as milestone briefs/tests/gates over the same app, not as separate repo states. "
                         "The course-level `course_starter_type` field in the payload is either `empty` or `partial`. Default to `partial` unless the payload explicitly says `empty`. "
                         "For a `partial` starter: implement the full scaffold — project skeleton, framework wiring, dependency manifests, data schema, repository layer, type definitions, configuration, and any boilerplate the framework needs to boot. "
