@@ -197,6 +197,46 @@ class LearnerStudioService:
             container_prefix=session.container_name,
         )
 
+    def reconcile_stale_sessions(self, store) -> list[str]:
+        """Mark every session whose backing container is gone as
+        `stopped`. Run on server startup — background editor containers
+        don't survive a uvicorn restart, but the SQLite row claiming
+        `status=running` does, which makes the web UI keep showing the
+        editor URL and serving a 404 when the learner clicks it.
+
+        Acts on sessions in `running` or `starting`. For each such row,
+        invokes `docker inspect <container_name>`; if the container is
+        not running, the session is flipped to `stopped` with a
+        breadcrumb note explaining the restart.
+
+        Returns the list of session ids that were reconciled.
+        """
+        from app.domain.learner import LearnerWorkspaceSessionStatus
+
+        reconciled: list[str] = []
+        active_statuses = {
+            LearnerWorkspaceSessionStatus.running,
+            LearnerWorkspaceSessionStatus.starting,
+        }
+        for session in store.list_all_learner_workspace_sessions():
+            if session.status not in active_statuses:
+                continue
+            container_name = session.container_name
+            if container_name and self._container_running(container_name):
+                # Container survived the restart somehow; leave it alone.
+                continue
+            session.status = LearnerWorkspaceSessionStatus.stopped
+            session.updated_at = self._now()
+            note = (
+                "Editor session was interrupted by a server restart; the "
+                "backing container is no longer running. Re-launch the "
+                "editor to continue."
+            )
+            session.notes = list(dict.fromkeys([*session.notes, note]))
+            store.save_learner_workspace_session(session)
+            reconciled.append(session.id)
+        return reconciled
+
     def _can_reuse_session(
         self,
         *,

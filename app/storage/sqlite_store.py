@@ -651,6 +651,23 @@ class SQLiteWorkflowStore:
             ).fetchall()
         return [LearnerWorkspaceSession.model_validate(json.loads(row["payload_json"])) for row in rows]
 
+    def list_all_learner_workspace_sessions(self) -> list[LearnerWorkspaceSession]:
+        """Return every workspace session across all enrollments.
+
+        Used by `LearnerStudioService.reconcile_stale_sessions` on
+        server startup to find sessions whose backing container no
+        longer exists after a process restart.
+        """
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM learner_workspace_sessions
+                ORDER BY datetime(updated_at) DESC
+                """,
+            ).fetchall()
+        return [LearnerWorkspaceSession.model_validate(json.loads(row["payload_json"])) for row in rows]
+
     def save_publish_snapshot(self, snapshot: PublishSnapshot) -> PublishSnapshot:
         payload = json.dumps(snapshot.model_dump(mode="json"))
         with self._lock, self._session() as connection:

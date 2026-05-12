@@ -153,6 +153,23 @@ async def lifespan(app: FastAPI):
             "course_active_operations_reconciliation_failed",
             error=str(exc),
         )
+
+    # Reconcile learner_workspace_sessions whose backing editor container
+    # was killed by the prior process shutdown. Without this, the web UI
+    # keeps showing the editor URL as active and the learner gets a 404.
+    try:
+        reconciled_sessions = app.state.learner_studio_service.reconcile_stale_sessions(store)
+        if reconciled_sessions:
+            log_coursegen_event(
+                "learner_workspace_sessions_reconciled_on_startup",
+                count=len(reconciled_sessions),
+                session_ids=reconciled_sessions,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log_coursegen_event(
+            "learner_workspace_sessions_reconciliation_failed",
+            error=str(exc),
+        )
     if not hasattr(app.state, "lms_service"):
         app.state.lms_service = LMSService(
             app.state.workflow_service.store,
