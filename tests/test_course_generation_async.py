@@ -50,7 +50,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
                     "Keep reservations correct under concurrency, retries, and stock transfers."
                 ),
                 creator_choices={
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "implementation_language": "python",
                     "application_framework": "fastapi",
                     "primary_database": "postgres",
@@ -102,7 +102,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
         plan_response = self.course_generation_service.generate_creator_plan(
             GenerateCreatorCoursePlanRequest(
                 goal="Build an inventory reservation service.",
-                creator_choices={"starter_type": "partial_implementation"},
+                creator_choices={"starter_type": "partial"},
             )
         )
         queued = self.course_generation_service.queue_course_run_from_creator_plan(
@@ -131,7 +131,7 @@ class CourseGenerationAsyncTests(unittest.TestCase):
                     "Keep reservations correct under concurrency, retries, and stock transfers."
                 ),
                 creator_choices={
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "implementation_language": "python",
                     "application_framework": "fastapi",
                     "primary_database": "postgres",
@@ -160,4 +160,9 @@ class CourseGenerationAsyncTests(unittest.TestCase):
             len(course_run.deliverables),
             len(shared_run.artifacts.task_agent_spec.deliverables),
         )
-        self.assertNotIn("Service contract and durable model", authored_titles)
+        # Pass 10 Job A: the planner's deliverable titles flow through 1:1.
+        # The course-plan fallback emits "Service contract and durable model" for
+        # transactional-stateful-service families, so it is now expected to land
+        # in the authored workflow deliverables instead of being replaced by an
+        # entity-templated family-specific title.
+        self.assertIn("Service contract and durable model", authored_titles)

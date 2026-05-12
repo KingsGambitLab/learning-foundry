@@ -23,10 +23,8 @@ class CatalogStatus(str, Enum):
 
 
 class StarterType(str, Enum):
-    bare_stub = "bare_stub"
-    partial_implementation = "partial_implementation"
-    working_buggy = "working_buggy"
-    working_suboptimal = "working_suboptimal"
+    empty = "empty"
+    partial = "partial"
 
 
 class OverlayDefinition(BaseModel):

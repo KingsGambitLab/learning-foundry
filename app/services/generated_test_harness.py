@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -15,15 +14,10 @@ from pydantic import BaseModel, Field
 from app.domain.registry import StarterType
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.learner_studio_service import LearnerStudioError, LearnerStudioService
-from app.services.task_agent_contract_surface import learner_editable_paths_for_manifest
-from app.services.task_agent_starter_templates import (
-    HIDDEN_MANIFEST_PATH,
-    RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
-    RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
+from app.services.task_agent_contract_surface import (
+    learner_editable_paths_for_manifest,
+    learner_editable_paths_for_spec,
 )
-
-DEFAULT_VISIBLE_CHECK_COMMAND = f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
-DEFAULT_HIDDEN_CHECK_COMMAND = f"sh {RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"
 
 
 class GeneratedTestCaseReport(BaseModel):
@@ -50,6 +44,7 @@ class BaselineSuiteOutcome(BaseModel):
     baseline: str
     suite_type: str
     report: GeneratedTestSuiteReport
+    deliverable_id: str | None = None
 
 
 class BaselineValidationIssue(BaseModel):
@@ -59,6 +54,7 @@ class BaselineValidationIssue(BaseModel):
     baseline: str | None = None
     suite_type: str | None = None
     relative_path: str | None = None
+    deliverable_id: str | None = None
 
 
 class BaselineValidationResult(BaseModel):
@@ -175,82 +171,118 @@ class GeneratedTestBaselineVerifier:
         self.learner_studio_service = learner_studio_service or LearnerStudioService()
         self.script_runner = script_runner or GeneratedTestScriptRunner()
 
-    def verify_deliverable(
+    def verify_course(
         self,
         *,
         workspace_root: str | Path,
+        private_root: str | Path,
         spec: TaskAgentServiceSpec,
-        starter_type: StarterType,
     ) -> BaselineValidationResult:
-        workspace_path = Path(workspace_root).resolve()
-        manifest = self.learner_studio_service._runtime_manifest(workspace_path)
-        visible_command = str(manifest.get("visible_check_command") or DEFAULT_VISIBLE_CHECK_COMMAND)
-        hidden_command = str(manifest.get("hidden_check_command") or DEFAULT_HIDDEN_CHECK_COMMAND)
+        """Boot the shared starter ONCE and run every deliverable's
+        visible/hidden suite against the live starter and an empty-repo copy.
+
+        Args:
+            workspace_root: ``public/`` root (contains ``starter/`` and ``checks/``).
+            private_root: ``private/`` root (contains ``grader/``).
+            spec: authoritative task-agent spec.
+        """
+        public_root = Path(workspace_root).resolve()
+        private_path = Path(private_root).resolve()
+        shared_starter_root = public_root / "starter"
 
         errors: list[BaselineValidationIssue] = []
         warnings: list[BaselineValidationIssue] = []
         outcomes: list[BaselineSuiteOutcome] = []
 
-        visible_script_path = self._command_target_path(workspace_path, visible_command)
-        hidden_script_path = self._command_target_path(workspace_path, hidden_command)
-        if visible_script_path is None or not visible_script_path.exists():
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="visible_test_command_missing",
-                    message="Visible test command does not point to a real script in the learner workspace.",
-                    suite_type="visible",
-                    relative_path=str(visible_script_path.relative_to(workspace_path)) if visible_script_path and visible_script_path.exists() else None,
-                )
+        # Resolve per-deliverable script paths up-front; missing scripts are a
+        # blocker that short-circuits the matrix.
+        per_deliverable_scripts: list[tuple[str, Path, Path]] = []
+        for deliverable in spec.deliverables:
+            visible_path = (
+                public_root / "checks" / deliverable.id / "run_visible_checks.py"
             )
-        if hidden_script_path is None or not hidden_script_path.exists():
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="hidden_test_command_missing",
-                    message="Hidden test command does not point to a real script in the learner workspace.",
-                    suite_type="hidden",
-                    relative_path=str(hidden_script_path.relative_to(workspace_path)) if hidden_script_path and hidden_script_path.exists() else None,
-                )
+            hidden_path = (
+                private_path / "grader" / deliverable.id / "run_hidden_checks.py"
             )
+            if not visible_path.exists():
+                errors.append(
+                    BaselineValidationIssue(
+                        level="error",
+                        code="visible_test_command_missing",
+                        message=(
+                            f"Visible test script missing for deliverable {deliverable.id} "
+                            f"at public/checks/{deliverable.id}/run_visible_checks.py."
+                        ),
+                        suite_type="visible",
+                        relative_path=f"checks/{deliverable.id}/run_visible_checks.py",
+                        deliverable_id=deliverable.id,
+                    )
+                )
+            if not hidden_path.exists():
+                errors.append(
+                    BaselineValidationIssue(
+                        level="error",
+                        code="hidden_test_command_missing",
+                        message=(
+                            f"Hidden test script missing for deliverable {deliverable.id} "
+                            f"at private/grader/{deliverable.id}/run_hidden_checks.py."
+                        ),
+                        suite_type="hidden",
+                        relative_path=f"grader/{deliverable.id}/run_hidden_checks.py",
+                        deliverable_id=deliverable.id,
+                    )
+                )
+            if visible_path.exists() and hidden_path.exists():
+                per_deliverable_scripts.append((deliverable.id, visible_path, hidden_path))
 
         if errors:
             return BaselineValidationResult(valid=False, errors=errors, warnings=warnings, outcomes=outcomes)
 
-        assert visible_script_path is not None
-        assert hidden_script_path is not None
-        if visible_script_path.read_text(encoding="utf-8") == hidden_script_path.read_text(encoding="utf-8"):
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="hidden_tests_match_visible_tests",
-                    message="Hidden and visible test scripts are identical; the hidden grader is not stronger than the learner-facing checks.",
-                    suite_type="hidden",
-                    relative_path=str(hidden_script_path.relative_to(workspace_path)),
-                )
-            )
+        # Identical-script check per deliverable.
+        for deliverable_id, visible_path, hidden_path in per_deliverable_scripts:
+            try:
+                if visible_path.read_text(encoding="utf-8") == hidden_path.read_text(encoding="utf-8"):
+                    errors.append(
+                        BaselineValidationIssue(
+                            level="error",
+                            code="hidden_tests_match_visible_tests",
+                            message=(
+                                f"Hidden and visible test scripts for deliverable {deliverable_id} are identical; "
+                                "the hidden grader is not stronger than the learner-facing checks."
+                            ),
+                            suite_type="hidden",
+                            relative_path=f"grader/{deliverable_id}/run_hidden_checks.py",
+                            deliverable_id=deliverable_id,
+                        )
+                    )
+            except OSError:
+                # Read failures are already surfaced by the existence checks above.
+                continue
 
-        if not errors:
-            outcomes.extend(
-                self._evaluate_workspace(
-                    label="empty_repo",
-                    workspace_root=self._make_empty_repo_copy(workspace_path, spec),
-                    spec=spec,
-                    visible_command=visible_command,
-                    hidden_command=hidden_command,
-                )
+        # Boot the shared starter and run each deliverable's suite.
+        outcomes.extend(
+            self._evaluate_shared_workspace(
+                label="starter_repo",
+                workspace_root=shared_starter_root,
+                spec=spec,
+                per_deliverable_scripts=per_deliverable_scripts,
+                cleanup_after=False,
             )
-            outcomes.extend(
-                self._evaluate_workspace(
-                    label="starter_repo",
-                    workspace_root=workspace_path,
-                    spec=spec,
-                    visible_command=visible_command,
-                    hidden_command=hidden_command,
-                )
-            )
+        )
 
-        errors.extend(self._expectation_issues(outcomes, starter_type))
+        # Build the empty-repo copy ONCE for the shared starter.
+        empty_repo_root = self._make_empty_repo_copy(shared_starter_root, spec)
+        outcomes.extend(
+            self._evaluate_shared_workspace(
+                label="empty_repo",
+                workspace_root=empty_repo_root,
+                spec=spec,
+                per_deliverable_scripts=per_deliverable_scripts,
+                cleanup_after=True,
+            )
+        )
+
+        errors.extend(self._expectation_issues(outcomes, spec))
         warnings.extend(self._depth_warnings(outcomes))
 
         return BaselineValidationResult(
@@ -260,220 +292,253 @@ class GeneratedTestBaselineVerifier:
             outcomes=outcomes,
         )
 
-    def _evaluate_workspace(
+    def _evaluate_shared_workspace(
         self,
         *,
         label: str,
         workspace_root: Path,
         spec: TaskAgentServiceSpec,
-        visible_command: str,
-        hidden_command: str,
+        per_deliverable_scripts: list[tuple[str, Path, Path]],
+        cleanup_after: bool,
     ) -> list[BaselineSuiteOutcome]:
-        cleanup_after = label == "empty_repo"
+        outcomes: list[BaselineSuiteOutcome] = []
         try:
-            with self._running_app(workspace_root=workspace_root, spec=spec) as base_url:
-                visible = self.script_runner.run_suite(
-                    workspace_root=workspace_root,
-                    command=visible_command,
-                    base_url=base_url,
-                    suite_type="visible",
-                )
-                hidden = self.script_runner.run_suite(
-                    workspace_root=workspace_root,
-                    command=hidden_command,
-                    base_url=base_url,
-                    suite_type="hidden",
-                )
-        except Exception as exc:  # noqa: BLE001
-            boot_failure = str(exc)
-            visible = GeneratedTestSuiteReport(
-                suite_type="visible",
-                command=visible_command,
-                exit_code=1,
-                valid=True,
-                passed=False,
-                tests=[
-                    GeneratedTestCaseReport(
-                        id=f"{label}_visible_boot",
-                        title=f"{label} visible boot",
-                        status="failed",
-                        summary="Application failed before visible tests could run.",
-                        diagnostics=[boot_failure],
+            try:
+                with self._running_app(workspace_root=workspace_root, spec=spec) as base_url:
+                    for deliverable_id, visible_path, hidden_path in per_deliverable_scripts:
+                        visible_command = f"python {visible_path}"
+                        hidden_command = f"python {hidden_path}"
+                        visible_report = self.script_runner.run_suite(
+                            workspace_root=workspace_root,
+                            command=visible_command,
+                            base_url=base_url,
+                            suite_type="visible",
+                        )
+                        hidden_report = self.script_runner.run_suite(
+                            workspace_root=workspace_root,
+                            command=hidden_command,
+                            base_url=base_url,
+                            suite_type="hidden",
+                        )
+                        outcomes.append(
+                            BaselineSuiteOutcome(
+                                baseline=label,
+                                suite_type="visible",
+                                report=visible_report,
+                                deliverable_id=deliverable_id,
+                            )
+                        )
+                        outcomes.append(
+                            BaselineSuiteOutcome(
+                                baseline=label,
+                                suite_type="hidden",
+                                report=hidden_report,
+                                deliverable_id=deliverable_id,
+                            )
+                        )
+            except Exception as exc:  # noqa: BLE001
+                boot_failure = str(exc)
+                for deliverable_id, visible_path, hidden_path in per_deliverable_scripts:
+                    outcomes.append(
+                        BaselineSuiteOutcome(
+                            baseline=label,
+                            suite_type="visible",
+                            deliverable_id=deliverable_id,
+                            report=GeneratedTestSuiteReport(
+                                suite_type="visible",
+                                command=f"python {visible_path}",
+                                exit_code=1,
+                                valid=True,
+                                passed=False,
+                                tests=[
+                                    GeneratedTestCaseReport(
+                                        id=f"{label}_{deliverable_id}_visible_boot",
+                                        title=f"{label} {deliverable_id} visible boot",
+                                        status="failed",
+                                        summary="Application failed before visible tests could run.",
+                                        diagnostics=[boot_failure],
+                                    )
+                                ],
+                                summary="Application failed before visible tests could run.",
+                                stderr=boot_failure,
+                            ),
+                        )
                     )
-                ],
-                summary="Application failed before visible tests could run.",
-                stderr=boot_failure,
-            )
-            hidden = GeneratedTestSuiteReport(
-                suite_type="hidden",
-                command=hidden_command,
-                exit_code=1,
-                valid=True,
-                passed=False,
-                tests=[
-                    GeneratedTestCaseReport(
-                        id=f"{label}_hidden_boot",
-                        title=f"{label} hidden boot",
-                        status="failed",
-                        summary="Application failed before hidden tests could run.",
-                        diagnostics=[boot_failure],
+                    outcomes.append(
+                        BaselineSuiteOutcome(
+                            baseline=label,
+                            suite_type="hidden",
+                            deliverable_id=deliverable_id,
+                            report=GeneratedTestSuiteReport(
+                                suite_type="hidden",
+                                command=f"python {hidden_path}",
+                                exit_code=1,
+                                valid=True,
+                                passed=False,
+                                tests=[
+                                    GeneratedTestCaseReport(
+                                        id=f"{label}_{deliverable_id}_hidden_boot",
+                                        title=f"{label} {deliverable_id} hidden boot",
+                                        status="failed",
+                                        summary="Application failed before hidden tests could run.",
+                                        diagnostics=[boot_failure],
+                                    )
+                                ],
+                                summary="Application failed before hidden tests could run.",
+                                stderr=boot_failure,
+                            ),
+                        )
                     )
-                ],
-                summary="Application failed before hidden tests could run.",
-                stderr=boot_failure,
-            )
         finally:
             if cleanup_after:
                 shutil.rmtree(workspace_root.parent, ignore_errors=True)
-        return [
-            BaselineSuiteOutcome(baseline=label, suite_type="visible", report=visible),
-            BaselineSuiteOutcome(baseline=label, suite_type="hidden", report=hidden),
-        ]
+        return outcomes
 
     def _expectation_issues(
         self,
         outcomes: list[BaselineSuiteOutcome],
-        starter_type: StarterType,
+        spec: TaskAgentServiceSpec,
     ) -> list[BaselineValidationIssue]:
+        """Per-deliverable expectations for the shared-starter matrix.
+
+        - Any empty-repo pass is broken (suite is not anchored to the real surface).
+        - For ``empty`` or ``partial`` starters, every deliverable's visible AND
+          hidden suite must FAIL against the shared starter. A pass means the
+          test does not measure the learner work and emits the single error code
+          ``starter_suite_passed_pre_implementation``.
+        - ``hidden_tests_weaker_than_visible`` still fires when visible failed
+          but hidden passed against the starter, attributed per deliverable.
+        - Invalid (unparseable) reports are surfaced once per (deliverable, suite).
+        """
         errors: list[BaselineValidationIssue] = []
-        by_key = {(outcome.baseline, outcome.suite_type): outcome.report for outcome in outcomes}
+        starter_type = spec.runtime_dependencies.starter_type
+        # Group outcomes by (deliverable_id, baseline, suite_type) for attribution.
+        by_key = {
+            (outcome.deliverable_id, outcome.baseline, outcome.suite_type): outcome.report
+            for outcome in outcomes
+        }
+        deliverable_ids = [d.id for d in spec.deliverables]
 
-        for suite_type in ("visible", "hidden"):
-            empty_report = by_key.get(("empty_repo", suite_type))
-            if empty_report is not None and empty_report.passed:
-                errors.append(
-                    BaselineValidationIssue(
-                        level="error",
-                        code=f"empty_repo_{suite_type}_tests_passed",
-                        message=f"The {suite_type} suite passed against an empty learner repo.",
-                        baseline="empty_repo",
-                        suite_type=suite_type,
+        for deliverable_id in deliverable_ids:
+            for suite_type in ("visible", "hidden"):
+                empty_report = by_key.get((deliverable_id, "empty_repo", suite_type))
+                if empty_report is not None and empty_report.passed:
+                    errors.append(
+                        BaselineValidationIssue(
+                            level="error",
+                            code=f"empty_repo_{suite_type}_tests_passed",
+                            message=(
+                                f"The {suite_type} suite for deliverable {deliverable_id} "
+                                "passed against an empty learner repo."
+                            ),
+                            baseline="empty_repo",
+                            suite_type=suite_type,
+                            deliverable_id=deliverable_id,
+                        )
                     )
-                )
 
-        starter_visible = by_key.get(("starter_repo", "visible"))
-        starter_hidden = by_key.get(("starter_repo", "hidden"))
-        if starter_type in {StarterType.bare_stub, StarterType.partial_implementation}:
-            if starter_visible is not None and starter_visible.passed:
+            starter_visible = by_key.get((deliverable_id, "starter_repo", "visible"))
+            starter_hidden = by_key.get((deliverable_id, "starter_repo", "hidden"))
+
+            # The starter is always pre-implementation: empty or partial. A pass
+            # there means the suite does not measure the gap between starter and
+            # the authored solution.
+            if starter_type in {StarterType.empty, StarterType.partial}:
+                for suite_type, report in (("visible", starter_visible), ("hidden", starter_hidden)):
+                    if report is not None and report.passed:
+                        errors.append(
+                            BaselineValidationIssue(
+                                level="error",
+                                code="starter_suite_passed_pre_implementation",
+                                message=(
+                                    f"The {suite_type} suite for deliverable {deliverable_id} "
+                                    "passed against the pre-implementation shared starter; the suite "
+                                    "must measure work the learner has not done yet."
+                                ),
+                                baseline="starter_repo",
+                                suite_type=suite_type,
+                                deliverable_id=deliverable_id,
+                            )
+                        )
+
+            if starter_visible is not None and not starter_visible.valid:
                 errors.append(
                     BaselineValidationIssue(
                         level="error",
-                        code="starter_visible_tests_passed_partial_repo",
-                        message="The visible suite passed against a partial starter that should still require learner work.",
+                        code="visible_tests_invalid",
+                        message=(
+                            f"Visible tests for deliverable {deliverable_id} "
+                            "did not emit a valid structured report."
+                        ),
                         baseline="starter_repo",
                         suite_type="visible",
+                        deliverable_id=deliverable_id,
                     )
                 )
-            if starter_hidden is not None and starter_hidden.passed:
+            if starter_hidden is not None and not starter_hidden.valid:
                 errors.append(
                     BaselineValidationIssue(
                         level="error",
-                        code="starter_hidden_tests_passed_partial_repo",
-                        message="The hidden suite passed against a partial starter that should still fail deeper checks.",
+                        code="hidden_tests_invalid",
+                        message=(
+                            f"Hidden tests for deliverable {deliverable_id} "
+                            "did not emit a valid structured report."
+                        ),
                         baseline="starter_repo",
                         suite_type="hidden",
+                        deliverable_id=deliverable_id,
                     )
                 )
-        elif starter_type in {StarterType.working_buggy, StarterType.working_suboptimal}:
-            if starter_hidden is not None and starter_hidden.passed:
+            if (
+                starter_visible is not None
+                and starter_hidden is not None
+                and starter_visible.passed is False
+                and starter_hidden.passed
+            ):
                 errors.append(
                     BaselineValidationIssue(
                         level="error",
-                        code="starter_hidden_tests_passed_buggy_repo",
-                        message="The hidden suite passed against a starter that is supposed to be incorrect or incomplete in meaningful ways.",
+                        code="hidden_tests_weaker_than_visible",
+                        message=(
+                            f"Hidden tests for deliverable {deliverable_id} passed on the starter "
+                            "even though the visible tests already found a failure."
+                        ),
                         baseline="starter_repo",
                         suite_type="hidden",
+                        deliverable_id=deliverable_id,
                     )
                 )
-        if starter_visible is not None and not starter_visible.valid:
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="visible_tests_invalid",
-                    message="Visible tests did not emit a valid structured report.",
-                    baseline="starter_repo",
-                    suite_type="visible",
-                )
-            )
-        if starter_hidden is not None and not starter_hidden.valid:
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="hidden_tests_invalid",
-                    message="Hidden tests did not emit a valid structured report.",
-                    baseline="starter_repo",
-                    suite_type="hidden",
-                )
-            )
-        if starter_visible is not None and starter_hidden is not None and starter_visible.passed is False and starter_hidden.passed:
-            errors.append(
-                BaselineValidationIssue(
-                    level="error",
-                    code="hidden_tests_weaker_than_visible",
-                    message="Hidden tests passed on the starter even though the visible tests already found a failure.",
-                    baseline="starter_repo",
-                    suite_type="hidden",
-                )
-            )
         return errors
 
     def _depth_warnings(self, outcomes: list[BaselineSuiteOutcome]) -> list[BaselineValidationIssue]:
         warnings: list[BaselineValidationIssue] = []
-        by_key = {(outcome.baseline, outcome.suite_type): outcome.report for outcome in outcomes}
-        starter_visible = by_key.get(("starter_repo", "visible"))
-        starter_hidden = by_key.get(("starter_repo", "hidden"))
-        if starter_visible is None or starter_hidden is None:
-            return warnings
-        if len(starter_hidden.tests) < len(starter_visible.tests):
-            warnings.append(
-                BaselineValidationIssue(
-                    level="warning",
-                    code="hidden_tests_not_deeper_than_visible",
-                    message="Hidden tests currently cover fewer cases than the visible suite.",
-                    baseline="starter_repo",
-                    suite_type="hidden",
+        by_key = {
+            (outcome.deliverable_id, outcome.baseline, outcome.suite_type): outcome.report
+            for outcome in outcomes
+        }
+        deliverable_ids: set[str] = {
+            outcome.deliverable_id for outcome in outcomes if outcome.deliverable_id is not None
+        }
+        for deliverable_id in deliverable_ids:
+            starter_visible = by_key.get((deliverable_id, "starter_repo", "visible"))
+            starter_hidden = by_key.get((deliverable_id, "starter_repo", "hidden"))
+            if starter_visible is None or starter_hidden is None:
+                continue
+            if len(starter_hidden.tests) < len(starter_visible.tests):
+                warnings.append(
+                    BaselineValidationIssue(
+                        level="warning",
+                        code="hidden_tests_not_deeper_than_visible",
+                        message=(
+                            f"Hidden tests for deliverable {deliverable_id} currently cover "
+                            "fewer cases than the visible suite."
+                        ),
+                        baseline="starter_repo",
+                        suite_type="hidden",
+                        deliverable_id=deliverable_id,
+                    )
                 )
-            )
         return warnings
-
-    def _command_target_path(self, workspace_root: Path, command: str) -> Path | None:
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            return None
-        if not tokens:
-            return None
-        for token in tokens[1:]:
-            if token.startswith("-"):
-                continue
-            candidate = workspace_root / token
-            if candidate.exists():
-                return self._follow_shell_wrapper(candidate, workspace_root)
-        return None
-
-    def _follow_shell_wrapper(self, candidate: Path, workspace_root: Path) -> Path:
-        if candidate.suffix != ".sh":
-            return candidate
-        try:
-            content = candidate.read_text(encoding="utf-8")
-        except OSError:
-            return candidate
-        for line in content.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("exec "):
-                continue
-            try:
-                tokens = shlex.split(stripped)
-            except ValueError:
-                return candidate
-            for token in tokens[1:]:
-                if token.startswith("-"):
-                    continue
-                nested = workspace_root / token
-                if nested.exists():
-                    return nested
-            break
-        return candidate
 
     def _make_empty_repo_copy(self, workspace_root: Path, spec: TaskAgentServiceSpec) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="coursegen_empty_repo_"))
@@ -481,6 +546,10 @@ class GeneratedTestBaselineVerifier:
         shutil.copytree(workspace_root, copy_root)
         manifest = self.learner_studio_service._runtime_manifest(copy_root)
         editable_paths = learner_editable_paths_for_manifest(manifest)
+        if not editable_paths:
+            # Shared starter root no longer carries a per-deliverable manifest;
+            # fall back to the authoritative spec to find editable paths.
+            editable_paths = learner_editable_paths_for_spec(spec)
         for relative_path in editable_paths:
             target = copy_root / str(relative_path)
             if target.exists():

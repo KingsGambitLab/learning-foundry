@@ -185,17 +185,44 @@ TOOL_USE_KEYWORDS = {
 }
 
 FRAMEWORK_LANGUAGE_HINTS: dict[str, str] = {
+    # Python
     "fastapi": "python",
     "flask": "python",
     "django": "python",
+    # TypeScript / Node
     "express": "typescript",
     "hono": "typescript",
     "nestjs": "typescript",
+    # Go
     "gin": "go",
     "fiber": "go",
+    # Rust
     "actix": "rust",
     "actix-web": "rust",
     "axum": "rust",
+    # Ruby — `framework` is the framework NAME ("rails"); the version
+    # is captured separately in `framework_version`, so don't add
+    # version-tagged keys like "rails 8" (they'd shadow "rails" on
+    # length-descending sort).
+    "ruby on rails": "ruby",
+    "rails": "ruby",
+    "sinatra": "ruby",
+    "hanami": "ruby",
+    # Java / Kotlin
+    "spring boot": "java",
+    "spring": "java",
+    "quarkus": "java",
+    "micronaut": "java",
+    "ktor": "kotlin",
+    # Elixir
+    "phoenix": "elixir",
+    # .NET
+    "aspnet": "csharp",
+    "asp.net": "csharp",
+    "asp.net core": "csharp",
+    # PHP
+    "laravel": "php",
+    "symfony": "php",
 }
 
 DEFAULT_FRAMEWORK_BY_LANGUAGE: dict[str, str] = {
@@ -204,6 +231,12 @@ DEFAULT_FRAMEWORK_BY_LANGUAGE: dict[str, str] = {
     "javascript": "express",
     "go": "gin",
     "rust": "actix-web",
+    "ruby": "rails",
+    "java": "spring boot",
+    "kotlin": "ktor",
+    "elixir": "phoenix",
+    "csharp": "aspnet",
+    "php": "laravel",
 }
 
 LANGUAGE_KEYWORDS: dict[str, list[str]] = {
@@ -212,6 +245,12 @@ LANGUAGE_KEYWORDS: dict[str, list[str]] = {
     "javascript": ["javascript", "node", "node.js", "express"],
     "go": ["go", "golang", "gin", "fiber"],
     "rust": ["rust", "actix", "axum"],
+    "ruby": ["ruby", "rails", "ruby on rails", "sinatra", "hanami", "gemfile"],
+    "java": ["java", "spring boot", "spring", "quarkus", "micronaut", "maven", "gradle"],
+    "kotlin": ["kotlin", "ktor"],
+    "elixir": ["elixir", "phoenix", "liveview"],
+    "csharp": ["c#", "csharp", "aspnet", "asp.net", "dotnet", ".net"],
+    "php": ["php", "laravel", "symfony"],
 }
 
 
@@ -597,29 +636,6 @@ def infer_package_manager(
     return None
 
 
-def runtime_entrypoint_for_stack(
-    *,
-    implementation_language: str | None,
-    application_framework: str | None,
-) -> str:
-    normalized_language = (implementation_language or "").strip().lower() or None
-    normalized_framework = (application_framework or "").strip().lower() or None
-
-    if normalized_language == "python":
-        if normalized_framework == "django":
-            return "manage.py"
-        return "app.py"
-    if normalized_language == "typescript":
-        return "src/main.ts"
-    if normalized_language == "javascript":
-        return "src/main.js"
-    if normalized_language == "go":
-        return "main.go"
-    if normalized_language == "rust":
-        return "src/main.rs"
-    return "app.py"
-
-
 def runtime_container_image_for_stack(
     *,
     implementation_language: str | None,
@@ -740,11 +756,6 @@ def build_project_runtime_plan(
         if allow_inference
         else None
     )
-    entrypoint_path = runtime_entrypoint_for_stack(
-        implementation_language=implementation_language,
-        application_framework=application_framework,
-    )
-
     services: list[ProjectRuntimeServiceSpec] = [
         ProjectRuntimeServiceSpec(
             service_id="app",
@@ -752,7 +763,7 @@ def build_project_runtime_plan(
             technology=application_framework or implementation_language,
                 version_hint=resolved_framework_version or resolved_language_version,
                 package_manager=resolved_package_manager,
-                entrypoint_path=entrypoint_path,
+                entrypoint_path=None,
                 container_image=runtime_container_image_for_stack(
                     implementation_language=implementation_language,
                     language_version=resolved_language_version,
@@ -973,7 +984,7 @@ def build_assignment_design(
     durable_state_required: bool = False,
     approval_flow_required: bool = False,
     execution_surface: ExecutionSurface = ExecutionSurface.http_service,
-    starter_type: StarterType = StarterType.partial_implementation,
+    starter_type: StarterType = StarterType.partial,
     implementation_language: str | None = None,
     language_version: str | None = None,
     application_framework: str | None = None,
@@ -997,11 +1008,7 @@ def build_assignment_design(
     local_run_command = fallback_local_run_command
     preview_command = fallback_preview_command
     visible_check_command = fallback_visible_check_command
-    editable_files = (
-        [app_service.entrypoint_path]
-        if app_service is not None and app_service.entrypoint_path
-        else []
-    )
+    editable_files: list[str] = []
     visible_fixture_files = [
         source.workspace_path
         for source in source_specs
@@ -1160,7 +1167,7 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=False,
             approval_flow_required=False,
-            starter_type=starter_type or StarterType.partial_implementation,
+            starter_type=starter_type or StarterType.partial,
             implementation_language=resolved_language,
             language_version=language_version,
             application_framework=resolved_framework,
@@ -1205,7 +1212,7 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=False,
             approval_flow_required=False,
-            starter_type=starter_type or StarterType.partial_implementation,
+            starter_type=starter_type or StarterType.partial,
             implementation_language=resolved_language,
             language_version=language_version,
             application_framework=resolved_framework,
@@ -1250,7 +1257,7 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=True,
             approval_flow_required=False,
-            starter_type=starter_type or StarterType.partial_implementation,
+            starter_type=starter_type or StarterType.partial,
             implementation_language=resolved_language,
             language_version=language_version,
             application_framework=resolved_framework,
@@ -1295,7 +1302,7 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required=True,
             approval_flow_required=False,
-            starter_type=starter_type or StarterType.partial_implementation,
+            starter_type=starter_type or StarterType.partial,
             implementation_language=resolved_language,
             language_version=language_version,
             application_framework=resolved_framework,
@@ -1344,7 +1351,7 @@ def infer_assignment_design(
             traceability_required=True,
             durable_state_required="state" in text or "resume" in text or "durable" in text,
             approval_flow_required="approval" in text or "escalat" in text or "handoff" in text,
-            starter_type=starter_type or StarterType.partial_implementation,
+            starter_type=starter_type or StarterType.partial,
             implementation_language=resolved_language,
             language_version=language_version,
             application_framework=resolved_framework,

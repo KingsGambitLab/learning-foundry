@@ -113,11 +113,38 @@ class OpenAITestScriptAuthoringService:
         )
         model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
 
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
             if deliverable.id not in requested_ids:
                 continue
-            starter_root = public_root / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            if shared_codebase:
+                # Shared layout: one starter root, per-deliverable manifest in
+                # private/grader/<id>/deliverable.json, per-deliverable scripts at
+                # public/checks/<id>/run_visible_checks.py and
+                # private/grader/<id>/run_hidden_checks.py.
+                starter_root = public_root / "starter"
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+                visible_path = (
+                    public_root / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                hidden_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+                visible_path = starter_root / VISIBLE_TEST_SCRIPT_PATH
+                hidden_path = starter_root / HIDDEN_TEST_SCRIPT_PATH
             if not starter_root.exists() or not manifest_path.exists():
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -134,8 +161,7 @@ class OpenAITestScriptAuthoringService:
             compile(scripts.visible_script, f"{deliverable.id}:{VISIBLE_TEST_SCRIPT_PATH}", "exec")
             compile(scripts.hidden_script, f"{deliverable.id}:{HIDDEN_TEST_SCRIPT_PATH}", "exec")
 
-            visible_path = starter_root / VISIBLE_TEST_SCRIPT_PATH
-            hidden_path = starter_root / HIDDEN_TEST_SCRIPT_PATH
+            visible_path.parent.mkdir(parents=True, exist_ok=True)
             hidden_path.parent.mkdir(parents=True, exist_ok=True)
             updated_files.extend(self._write_if_changed(visible_path, scripts.visible_script, workspace_root))
             updated_files.extend(self._write_if_changed(hidden_path, scripts.hidden_script, workspace_root))
@@ -146,6 +172,21 @@ class OpenAITestScriptAuthoringService:
                 "source": "openai_live",
                 "generated_for_deliverable": deliverable.id,
             }
+            # Snapshot starter_repo_bundle.source pre/post so we can
+            # confirm whether this writer alters it. Today it doesn't —
+            # only reads-and-preserves — but a regression that silently
+            # rewrote it to `starter_default` would be invisible without
+            # this log.
+            pre_starter_source = (manifest.get("starter_repo_bundle") or {}).get("source")
+            post_starter_source = (manifest.get("starter_repo_bundle") or {}).get("source")
+            log_coursegen_event(
+                "test_script_authoring_manifest_write",
+                workflow_run_id=run.id,
+                deliverable_id=deliverable.id,
+                manifest_path=str(manifest_path),
+                pre_starter_repo_bundle_source=pre_starter_source,
+                post_starter_repo_bundle_source=post_starter_source,
+            )
             updated_files.extend(
                 self._write_if_changed(
                     manifest_path,
@@ -185,10 +226,17 @@ class OpenAITestScriptAuthoringService:
             starter_root=starter_root,
             manifest=manifest,
         )
+        spec = run.artifacts.task_agent_spec
+        course_starter_type = (
+            spec.runtime_dependencies.starter_type.value
+            if spec is not None
+            else None
+        )
         return {
             "workflow_title": run.title,
             "problem_statement": run.intake.problem_statement,
             "starter_root": starter_root.name,
+            "course_starter_type": course_starter_type,
             "manifest": manifest,
             "files": prompt_files["learner_files"],
             "dependency_contract_files": prompt_files["dependency_contract_files"],
@@ -225,12 +273,17 @@ class OpenAITestScriptAuthoringService:
                         "If `REPORT_PATH` is set, write a JSON report there. Otherwise print the same JSON to stdout. "
                         "Report shape: {\"summary\": str, \"tests\": [{\"id\": str, \"title\": str, \"status\": \"passed\"|\"failed\", \"summary\": str, \"diagnostics\": [str]}]}. "
                         "Exit 0 only when every test passes. Exit non-zero when any test fails. "
-                        "Visible tests should be learner-friendly and basic. Hidden tests should be materially stronger. "
-                        "For `partial_implementation` starters, visible tests should still fail the untouched starter when core behavior is missing. "
-                        "For `working_buggy` starters, visible tests may pass but hidden tests should expose the deeper bug. "
+                        "Visible tests should be learner-friendly and basic (small, single-behavior assertions). Hidden tests must be materially stronger (cover edge cases, error paths, idempotency, concurrency, and adversarial inputs). "
+                        "Identical visible and hidden scripts are not allowed. "
+                        "The course-level `course_starter_type` in the payload is either `empty` or `partial`. For BOTH values, the shared starter ships no business-logic implementation — every business endpoint either does not exist (`empty`) or raises a not-implemented exception (`partial`). "
+                        "Therefore both the visible AND hidden suites MUST fail against the untouched shared starter. A test that passes against the untouched shared starter is broken: it is not exercising any deliverable behavior and must be rewritten or removed. "
                         "Use only the published endpoints and the actual learner files in the prompt, plus any dependency-contract or runtime protocol files provided separately. "
                         "Lockfiles, build artifacts, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
-                        "Do not import the learner application directly."
+                        "Do not import the learner application directly. "
+                        "The authored scripts will be shipped under `public/checks/<deliverable_id>/run_visible_checks.py` and `private/grader/<deliverable_id>/run_hidden_checks.py`. "
+                        "Both scripts MUST be fully self-contained. Do NOT read any file from disk at runtime — no manifest, no fixtures, no config JSON, no `.coursegen/deliverable.json`, no `Path(__file__).parents[N] / ...` indirection. The visible script in particular ships to learners and CANNOT reach the per-deliverable manifest under `private/`; reading it at runtime guarantees a `FileNotFoundError` crash. "
+                        "Inline every input as a Python literal in the script itself: request bodies, request paths, expected status codes, expected response fields, ids, sample payloads, fixture strings. Take the values from the `manifest.public_checks` and `public_endpoints` already provided in this prompt payload. "
+                        "The ONLY runtime inputs the scripts may consume are the environment variables `BASE_URL` (the live app URL) and `REPORT_PATH` (the optional JSON report destination). Nothing else from disk or env."
                     ),
                 },
                 {"role": "user", "content": json.dumps(payload, indent=2)},

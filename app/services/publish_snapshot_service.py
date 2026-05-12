@@ -299,6 +299,57 @@ class PublishSnapshotService:
         seed_files: list[LearnerPackageFile] = []
         if spec_deliverable_id is None or workflow_run.artifacts.materialized_bundle is None:
             return seed_files
+
+        shared_codebase = bool(
+            spec is not None
+            and spec.course_structure is not None
+            and spec.course_structure.shared_codebase
+        )
+
+        if shared_codebase:
+            # Shared-codebase layout: source code lives at `public/starter/`
+            # (no deliverable folder) and is shared across all deliverables;
+            # per-deliverable visible-check artifacts live at
+            # `public/checks/<id>/`.
+            #
+            # `learner_package_runtime._workspace_seed_source_files` takes only
+            # the FIRST deliverable's seed files for shared-codebase courses,
+            # so we pack everything the learner needs — shared starter content
+            # + ALL per-deliverable visible check scripts — into the first
+            # deliverable's seed_files. Non-first deliverables get nothing
+            # (avoiding N× duplication of the source tree in the snapshot).
+            first_deliverable_id = spec.deliverables[0].id if spec.deliverables else None
+            if spec_deliverable_id != first_deliverable_id:
+                return seed_files
+            for entry in workflow_run.artifacts.materialized_bundle.files:
+                if entry.visibility.value != "public":
+                    continue
+                path = entry.relative_path
+                if path.startswith("public/starter/"):
+                    # Shared starter content (source, Dockerfile, runtime
+                    # scripts). Strip the prefix so it lands at the
+                    # learner-workspace root.
+                    stripped = path.removeprefix("public/starter/")
+                    if not stripped or stripped == "README.md":
+                        continue
+                    seed_files.append(
+                        self._read_seed_file(workflow_run_id, stripped, path)
+                    )
+                elif path.startswith("public/checks/"):
+                    # Per-deliverable visible-check artifacts. Strip "public/"
+                    # so they land at `checks/<id>/...` in the workspace. The
+                    # per-deliverable README is materialized separately by
+                    # `seed_workspace_from_snapshot` via
+                    # `deliverable.starter_readme`, so skip it here.
+                    stripped = path.removeprefix("public/")
+                    if stripped.endswith("/README.md"):
+                        continue
+                    seed_files.append(
+                        self._read_seed_file(workflow_run_id, stripped, path)
+                    )
+            return seed_files
+
+        # Legacy non-shared layout: per-deliverable starter folder.
         starter_prefix = f"public/starter/{spec_deliverable_id}/"
         for entry in workflow_run.artifacts.materialized_bundle.files:
             if entry.visibility.value != "public":

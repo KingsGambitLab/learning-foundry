@@ -188,8 +188,12 @@ def build_task_agent_starter_files(
         RUNTIME_RUN_SCRIPT_PATH: render_task_agent_runtime_run_script(spec),
         RUNTIME_VISIBLE_CHECK_SCRIPT_PATH: render_task_agent_runtime_visible_check_script(),
         RUNTIME_HIDDEN_CHECK_SCRIPT_PATH: render_task_agent_runtime_hidden_check_script(),
-        "checks/run_visible_checks.py": render_task_agent_visible_checks_script(),
-        HIDDEN_GRADER_SCRIPT_PATH: render_task_agent_hidden_checks_script(),
+        "checks/run_visible_checks.py": render_task_agent_visible_checks_script(
+            public_checks=manifest_payload["public_checks"],
+        ),
+        HIDDEN_GRADER_SCRIPT_PATH: render_task_agent_hidden_checks_script(
+            public_checks=manifest_payload["public_checks"],
+        ),
         ".vscode/tasks.json": render_task_agent_vscode_tasks(),
     }
     files.update(runtime_protocol_files)
@@ -271,7 +275,22 @@ def render_task_agent_starter_dockerfile(spec: TaskAgentServiceSpec) -> str:
     )
 
 
-def render_task_agent_visible_checks_script() -> str:
+def render_task_agent_visible_checks_script(
+    *,
+    public_checks: list[dict] | None = None,
+) -> str:
+    """Render the deterministic-fallback visible-check script.
+
+    Pass 12: The script ships to learners under ``public/checks/<id>/``
+    and CANNOT read the per-deliverable manifest at runtime — the manifest
+    lives under ``private/grader/<id>/`` (harness-only), the legacy
+    ``public/starter/<id>/.coursegen/`` path doesn't exist post-Pass-2, and
+    learners receiving the script would have neither. So we inline
+    ``public_checks`` as a Python literal at render time. The script is
+    fully self-contained: only ``BASE_URL`` and ``REPORT_PATH`` env vars
+    are consumed at runtime.
+    """
+    inlined_checks = json.dumps(public_checks or [], indent=4)
     return (
         "from __future__ import annotations\n\n"
         "import json\n"
@@ -280,8 +299,7 @@ def render_task_agent_visible_checks_script() -> str:
         "from pathlib import Path\n"
         "from urllib.error import HTTPError, URLError\n"
         "from urllib.request import Request, urlopen\n\n"
-        "ROOT = Path(__file__).resolve().parents[1]\n"
-        f"MANIFEST_PATH = ROOT / '{HIDDEN_MANIFEST_PATH}'\n\n"
+        f"PUBLIC_CHECKS = {inlined_checks}\n\n"
         "BASE_URL = os.environ.get('BASE_URL', 'http://127.0.0.1:8000').rstrip('/')\n"
         "REPORT_PATH = os.environ.get('REPORT_PATH')\n\n"
         "def request(method: str, path: str, body=None):\n"
@@ -306,7 +324,6 @@ def render_task_agent_visible_checks_script() -> str:
         "        print(payload)\n"
         "    raise SystemExit(exit_code)\n\n"
         "def main():\n"
-        "    manifest = json.loads(MANIFEST_PATH.read_text(encoding='utf-8'))\n"
         "    cases = []\n"
         "    health_status, _payload = request('GET', '/health')\n"
         "    cases.append({\n"
@@ -316,7 +333,7 @@ def render_task_agent_visible_checks_script() -> str:
         "        'summary': 'Health endpoint responded.' if health_status == 200 else f'/health returned {health_status}',\n"
         "        'diagnostics': [] if health_status == 200 else [f'/health returned {health_status}'],\n"
         "    })\n"
-        "    for check in manifest.get('public_checks') or []:\n"
+        "    for check in PUBLIC_CHECKS:\n"
         "        method = str(check.get('request_method') or 'POST').upper()\n"
         "        path = str(check.get('request_path') or '')\n"
         "        title = str(check.get('title') or path or 'visible check')\n"
@@ -350,7 +367,18 @@ def render_task_agent_visible_checks_script() -> str:
     )
 
 
-def render_task_agent_hidden_checks_script() -> str:
+def render_task_agent_hidden_checks_script(
+    *,
+    public_checks: list[dict] | None = None,
+) -> str:
+    """Render the deterministic-fallback hidden-grader script.
+
+    Pass 12: the script is a placeholder telling the harness that a real
+    hidden grader has not been authored yet. It does not need ``public_checks``
+    but accepts the kwarg to match the visible-script signature so the
+    same caller can render both. No runtime file reads.
+    """
+    del public_checks  # placeholder doesn't reference test data
     return (
         "from __future__ import annotations\n\n"
         "import json\n"

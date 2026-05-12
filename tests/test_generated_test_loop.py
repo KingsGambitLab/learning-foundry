@@ -26,7 +26,7 @@ from app.storage.sqlite_store import SQLiteWorkflowStore
 
 
 class _BaselineAlwaysValid:
-    def verify_deliverable(self, **kwargs):  # noqa: ANN003
+    def verify_course(self, **kwargs):  # noqa: ANN003
         return BaselineValidationResult(valid=True)
 
 
@@ -103,17 +103,22 @@ class GeneratedTestLoopTests(unittest.TestCase):
             assert spec is not None
             workspace = run.artifacts.workspace_snapshot
             assert workspace is not None
+            public_root = Path(workspace.public_dir)
+            private_root = Path(workspace.private_dir)
             deliverable = spec.deliverables[0]
-            deliverable_root = Path(workspace.public_dir) / "starter" / deliverable.id
-            visible_path = deliverable_root / "checks" / "run_visible_checks.py"
-            hidden_path = deliverable_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+            visible_path = (
+                public_root / "checks" / deliverable.id / "run_visible_checks.py"
+            )
+            hidden_path = (
+                private_root / "grader" / deliverable.id / "run_hidden_checks.py"
+            )
             hidden_path.write_text(visible_path.read_text(encoding="utf-8"), encoding="utf-8")
 
             verifier = GeneratedTestBaselineVerifier()
-            result = verifier.verify_deliverable(
-                workspace_root=deliverable_root,
+            result = verifier.verify_course(
+                workspace_root=public_root,
+                private_root=private_root,
                 spec=spec,
-                starter_type=deliverable.starter_type,
             )
 
         self.assertFalse(result.valid)

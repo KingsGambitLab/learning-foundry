@@ -5,10 +5,30 @@ import tempfile
 from pathlib import Path
 
 from app.domain.registry import PackageType
+from app.domain.task_agent import DeliverableSpec
 from app.domain.workflow import MaterializeBundleRequest
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+
+
+def _default_planner_deliverables() -> list[DeliverableSpec]:
+    titles = [
+        "Inventory reservation contract and state model",
+        "Inventory reservation read/write correctness",
+        "Inventory reservation observability and recovery",
+        "Inventory reservation production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 from app.services.task_agent_starter_templates import RUNTIME_RUN_SCRIPT_PATH, build_task_agent_starter_files
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
@@ -33,6 +53,7 @@ def test_starter_files_use_runtime_run_script_for_preview() -> None:
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_default_planner_deliverables(),
     )
 
     starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
@@ -67,9 +88,9 @@ def test_materialized_starter_readme_uses_runtime_run_script() -> None:
         materialized = workflow_service.materialize_run(run.id, MaterializeBundleRequest(overwrite=True))
         starter_readme = workflow_service.read_bundle_file(
             run.id,
-            f"public/starter/{run.artifacts.task_agent_spec.deliverables[0].id}/README.md",
+            f"public/checks/{run.artifacts.task_agent_spec.deliverables[0].id}/README.md",
         ).content
         assert f"sh {RUNTIME_RUN_SCRIPT_PATH}" in starter_readme
         assert "uvicorn app:app" not in starter_readme
-        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / ".coursegen/preview_app.py"
+        launcher_path = Path(materialized.artifacts.materialized_bundle.root_dir) / "public" / "starter" / ".coursegen/preview_app.py"
         assert not launcher_path.exists()

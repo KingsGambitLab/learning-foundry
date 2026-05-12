@@ -17,6 +17,7 @@ from app.domain.grading import LiveAssignmentGradeReport, LiveGradeTaskAgentRequ
 from app.domain.learner import LearnerWorkspaceScope, LearnerWorkspaceSession, LearnerWorkspaceSessionStatus
 from app.domain.task_agent import TaskAgentServiceSpec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
+from app.services.artifact_materializer import SHARED_COURSE_MANIFEST_RELATIVE_PATH
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
     RUNTIME_INSTALL_SCRIPT_PATH,
@@ -27,6 +28,30 @@ from app.services.task_agent_starter_templates import (
 
 class LearnerStudioError(RuntimeError):
     """Raised when the learner workspace studio or grading runner fails."""
+
+
+class RuntimeImageBuildError(LearnerStudioError):
+    """Raised when `docker build` for the workspace runtime image fails.
+
+    Carries the build invocation so the sandbox harness can surface a
+    precise failure context (command, exit code, full build stderr) to the
+    repair model instead of a generic stringified error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str],
+        returncode: int,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.command = list(command)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def default_learner_studio_image() -> str:
@@ -172,6 +197,46 @@ class LearnerStudioService:
             container_prefix=session.container_name,
         )
 
+    def reconcile_stale_sessions(self, store) -> list[str]:
+        """Mark every session whose backing container is gone as
+        `stopped`. Run on server startup — background editor containers
+        don't survive a uvicorn restart, but the SQLite row claiming
+        `status=running` does, which makes the web UI keep showing the
+        editor URL and serving a 404 when the learner clicks it.
+
+        Acts on sessions in `running` or `starting`. For each such row,
+        invokes `docker inspect <container_name>`; if the container is
+        not running, the session is flipped to `stopped` with a
+        breadcrumb note explaining the restart.
+
+        Returns the list of session ids that were reconciled.
+        """
+        from app.domain.learner import LearnerWorkspaceSessionStatus
+
+        reconciled: list[str] = []
+        active_statuses = {
+            LearnerWorkspaceSessionStatus.running,
+            LearnerWorkspaceSessionStatus.starting,
+        }
+        for session in store.list_all_learner_workspace_sessions():
+            if session.status not in active_statuses:
+                continue
+            container_name = session.container_name
+            if container_name and self._container_running(container_name):
+                # Container survived the restart somehow; leave it alone.
+                continue
+            session.status = LearnerWorkspaceSessionStatus.stopped
+            session.updated_at = self._now()
+            note = (
+                "Editor session was interrupted by a server restart; the "
+                "backing container is no longer running. Re-launch the "
+                "editor to continue."
+            )
+            session.notes = list(dict.fromkeys([*session.notes, note]))
+            store.save_learner_workspace_session(session)
+            reconciled.append(session.id)
+        return reconciled
+
     def _can_reuse_session(
         self,
         *,
@@ -278,13 +343,17 @@ class LearnerStudioService:
             )
 
     def _runtime_manifest(self, workspace_path: Path) -> dict[str, object]:
-        manifest_path = workspace_path / HIDDEN_MANIFEST_PATH
-        if not manifest_path.exists():
-            return {}
-        try:
-            return json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        # Per-deliverable manifest (legacy non-shared layout); for shared-codebase
+        # courses this file does not live at the starter root anymore, so fall
+        # back to the shared course manifest at `.coursegen/course.json`.
+        for relative in (HIDDEN_MANIFEST_PATH, SHARED_COURSE_MANIFEST_RELATIVE_PATH):
+            manifest_path = workspace_path / relative
+            if manifest_path.exists():
+                try:
+                    return json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return {}
+        return {}
 
     @contextmanager
     def _ephemeral_runtime_workspace(self, workspace_path: Path):
@@ -495,8 +564,16 @@ class LearnerStudioService:
             timeout=self.build_timeout_s,
         )
         if result.returncode != 0:
-            raise LearnerStudioError(
-                (result.stderr or result.stdout).strip() or "Could not build learner runtime image."
+            message = (
+                (result.stderr or result.stdout).strip()
+                or "Could not build learner runtime image."
+            )
+            raise RuntimeImageBuildError(
+                message,
+                command=command,
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
             )
         return image_tag
 
@@ -757,8 +834,16 @@ class LearnerStudioService:
         )
 
     def _container_logs(self, container_name: str) -> str | None:
+        """Return interleaved stdout+stderr from the container, last 500 lines.
+
+        Stage detection (``_runtime_stage_from_logs``) reads the stage marker
+        echoed by the install/verify/boot scripts, which lands on stdout — so
+        this method must keep merging both streams. The wider 500-line window
+        ensures long install/build streams aren't truncated before the
+        diagnostic line.
+        """
         result = subprocess.run(
-            [self.docker_binary, "logs", "--tail", "80", container_name],
+            [self.docker_binary, "logs", "--tail", "500", container_name],
             check=False,
             capture_output=True,
             text=True,
@@ -767,14 +852,112 @@ class LearnerStudioService:
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         return logs or None
 
+    def _container_stderr(self, container_name: str) -> str | None:
+        """Return ONLY the container's stderr stream (errors + warnings).
+
+        ``docker logs`` writes the container's stdout to the docker CLI's
+        stdout and the container's stderr to the docker CLI's stderr, so we
+        just grab the subprocess's stderr verbatim. Last 500 lines.
+
+        Per-deliverable ``report.stderr`` should be stderr-only so the LLM
+        reads errors, not interleaved HTTP-200 noise.
+        """
+        result = subprocess.run(
+            [self.docker_binary, "logs", "--tail", "500", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        stderr_text = (result.stderr or "").strip()
+        return stderr_text or None
+
+    def _container_stdout(self, container_name: str) -> str | None:
+        """Return ONLY the container's stdout stream (framework boot logs).
+
+        Symmetric with ``_container_stderr``. Spring Boot, gunicorn, Flask
+        and most structured loggers write to stdout — so when the app fails
+        AFTER stdout-only startup banners (and stderr is empty), the
+        canonical diagnostic lives here. Last 100 lines is enough headroom
+        for the boot frame without bloating the failure context.
+        """
+        result = subprocess.run(
+            [self.docker_binary, "logs", "--tail", "100", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        stdout_text = (result.stdout or "").strip()
+        return stdout_text or None
+
+    def _container_exit_state(self, container_name: str) -> dict | None:
+        """Return container exit state (`docker inspect --format {{json .State}}`).
+
+        Captures the structured exit reason the LLM otherwise has to guess
+        from stderr alone:
+
+        - ``oom_killed=true`` means the container was killed by the kernel
+          OOM-killer (raise memory cap or trim resource use).
+        - ``exit_code=137`` (= 128 + SIGKILL) usually pairs with OOM.
+        - ``status="exited"`` vs ``"dead"`` distinguishes a clean process
+          exit from a Docker-level cleanup failure.
+        - ``error`` is Docker's own message when the container could not
+          even start (image not found, missing entrypoint binary, etc.).
+
+        Returns ``None`` if ``docker inspect`` itself fails (container
+        removed before inspect, daemon error, etc.).
+        """
+        result = subprocess.run(
+            [
+                self.docker_binary,
+                "inspect",
+                "--format",
+                "{{json .State}}",
+                container_name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return None
+        raw = (result.stdout or "").strip()
+        if not raw:
+            return None
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(state, dict):
+            return None
+        # Normalize the keys the LLM/repair-prompt expects.
+        return {
+            "exit_code": state.get("ExitCode"),
+            "oom_killed": bool(state.get("OOMKilled")),
+            "status": state.get("Status"),
+            "error": state.get("Error") or None,
+        }
+
     def _wait_for_http(self, url: str, *, container_name: str | None = None) -> None:
         deadline = time.time() + self.start_timeout_s
         last_error: Exception | None = None
+        # Track the last 5xx response so timeouts surface what the app
+        # *actually* returned (e.g. "501 Not Implemented" on /health for
+        # a partial-starter Python+Uvicorn app) instead of a generic
+        # "Last error: None". The Uvicorn startup banner pollutes
+        # stderr-tail summarizers when the real diagnostic is HTTP.
+        last_http_response: tuple[int, str] | None = None
         while time.time() < deadline:
             try:
                 response = httpx.get(url, timeout=2.0, follow_redirects=False)
                 if response.status_code < 500:
                     return
+                body = (response.text or "").strip()
+                if len(body) > 200:
+                    body = body[:200] + "…"
+                last_http_response = (response.status_code, body)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
             if container_name and not self._container_running(container_name):
@@ -789,10 +972,14 @@ class LearnerStudioService:
                         f"Container '{container_name}' stopped before '{url}' became healthy. "
                         f"Last error: {last_error}"
                     )
+                http_part = self._format_last_http_response(last_http_response)
+                if http_part:
+                    details = f"{details} {http_part}"
                 if logs:
                     details = f"{details}\n\nContainer logs:\n{logs}"
                 raise LearnerStudioError(details)
             time.sleep(1.0)
+        http_part = self._format_last_http_response(last_http_response)
         if container_name:
             logs = self._container_logs(container_name)
             stage = self._runtime_stage_from_logs(logs)
@@ -800,11 +987,33 @@ class LearnerStudioService:
                 details = f"Timed out waiting for '{url}' during '{stage}'. Last error: {last_error}"
             else:
                 details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
+            if http_part:
+                details = f"{details} {http_part}"
             if logs:
                 details = f"{details}\n\nContainer logs:\n{logs}"
             raise LearnerStudioError(details)
         details = f"Timed out waiting for '{url}' to respond. Last error: {last_error}"
+        if http_part:
+            details = f"{details} {http_part}"
         raise LearnerStudioError(details)
+
+    @staticmethod
+    def _format_last_http_response(
+        last_http_response: tuple[int, str] | None,
+    ) -> str:
+        """Format the last observed 5xx response for the timeout error.
+
+        The marker prefix ``Last HTTP response:`` is load-bearing — the
+        sandbox runner's stage summarizer scans for that exact phrase to
+        promote the HTTP signal into the boot-stage headline. Don't
+        rename it without updating ``_summarize_stage_failure``.
+        """
+        if last_http_response is None:
+            return ""
+        status, body = last_http_response
+        if body:
+            return f"Last HTTP response: {status} {body}"
+        return f"Last HTTP response: {status}"
 
     def _allocate_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

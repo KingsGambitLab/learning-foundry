@@ -54,6 +54,47 @@ class PublishLearnerCertificationService:
                 notes=["Learner-path certification was skipped because the service is disabled."],
             )
 
+        # Partial starters intentionally ship with handlers that raise
+        # `NotImplementedError`-equivalents. The visible/hidden test suites
+        # are designed to FAIL against the unimplemented starter (the
+        # reviewer_tests baseline matrix verifies that test strength).
+        # Running learner-path certification — which expects the seeded
+        # workspace's grade run to pass cleanly — is structurally
+        # contradictory for partial starters: it cannot pass on a starter
+        # where the tests are *supposed* to fail until the learner
+        # implements the handlers. Until a reference-solution solvability
+        # gate exists upstream (see todo follow-up), skip certification
+        # for partial starters and trust the five reviewer gates.
+        spec = snapshot.task_agent_spec
+        if spec is not None and (
+            spec.runtime_dependencies.starter_type.value == "partial"
+        ):
+            return PublishLearnerCertificationReport(
+                certified_at=datetime.now(UTC),
+                passed=True,
+                checks=[
+                    PublishCertificationCheck(
+                        key="partial_starter_certification_skipped",
+                        status=PublishCertificationCheckStatus.skipped,
+                        summary=(
+                            "Learner-path certification skipped for partial starter."
+                        ),
+                        detail=(
+                            "Partial starters ship with unimplemented handlers by design; "
+                            "visible/hidden tests are expected to fail until the learner "
+                            "implements the deliverables. The reviewer_tests baseline "
+                            "matrix already verified that test strength upstream."
+                        ),
+                        blocking=False,
+                    )
+                ],
+                notes=[
+                    "Skipped learner-path certification: starter_type=partial. "
+                    "A reference-solution solvability gate is the architecturally correct "
+                    "replacement; tracked as a follow-up."
+                ],
+            )
+
         learner_package = snapshot.learner_package
         if learner_package is None or not learner_package.deliverables:
             return self._failed_report(

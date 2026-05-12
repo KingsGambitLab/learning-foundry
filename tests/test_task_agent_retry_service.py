@@ -8,6 +8,7 @@ import json
 
 from app.domain.ai import AIUsageSummary
 from app.domain.sandbox import DeliverableSandboxReport, SandboxExecutionResult, SandboxExecutionStatus, SandboxFailureStage
+from app.domain.task_agent import DeliverableSpec
 from app.domain.workflow import ReviewerFinding, ReviewerFindingSeverity, WorkflowNodeExecution, WorkflowNodeKind, WorkflowNodeStatus
 from app.services.assignment_design_inference import GenerationIntake, infer_assignment_design
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
@@ -129,7 +130,13 @@ class _RecordingRepoAuthoringService:
         updated_files: list[str] = []
         target_ids = deliverable_ids or [deliverable.id for deliverable in spec.deliverables]
         for deliverable_id in target_ids:
-            target = Path(workspace.public_dir) / "starter" / deliverable_id / "repair_scope_marker.txt"
+            target = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / deliverable_id
+                / "repair_scope_marker.txt"
+            )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f"repaired {deliverable_id}\n", encoding="utf-8")
             updated_files.append(str(target.relative_to(workspace.root_dir)))
@@ -172,10 +179,27 @@ def _make_run(temp_dir: Path):
         data_sources=intake.data_sources,
     )
     assert inferred.design_spec is not None
+    # In production, primary_editable_paths is authored by the OpenAI task-agent
+    # call. These tests bypass that call, so seed a FastAPI-shaped editable file
+    # at the design-spec level — downstream artifacts derive primary_editable_paths
+    # and brief.files_to_edit from runtime_dependencies.editable_files.
+    if not inferred.design_spec.runtime_dependencies.editable_files:
+        inferred.design_spec.runtime_dependencies.editable_files = ["app.py"]
+    planner_deliverables = [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=f"Inventory reservation deliverable {index}",
+            objective=f"Build deliverable {index} of the reservation surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index in range(1, 5)
+    ]
     run = workflow_service.create_run_from_explicit_plan(
         intake=intake,
         design_spec=inferred.design_spec,
         execute_nodes=False,
+        planner_deliverables=planner_deliverables,
     )
     return run
 
@@ -519,6 +543,124 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertFalse(result.skip_workspace_authoring)
             self.assertIs(updated_run, run)
 
+    def test_failure_context_propagates_sidecar_diagnostics(self) -> None:
+        """``DeliverableSandboxReport`` carries Pass-8 diagnostic fields
+        (stdout_tail, exit_state, sidecar_diagnostics, http_response).
+        ``FailureContextDeliverableReport`` must surface those in the
+        repair packet (capped to 8KB per text field) so the LLM sees
+        sidecar postgres/redis errors, OOM-kills, framework boot logs,
+        and contract-probe HTTP response bodies — without losing them
+        to the per-stage stderr summary.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            sandbox_result = SandboxExecutionResult(
+                status=SandboxExecutionStatus.failed,
+                available=True,
+                build_succeeded=True,
+                run_succeeded=False,
+                generated_at=datetime.now(UTC),
+                workspace_root=str(temp_dir / "workspaces"),
+                deliverable_reports=[
+                    DeliverableSandboxReport(
+                        deliverable_id="deliverable_1",
+                        compile_succeeded=True,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.boot,
+                        stage_command=["sh", ".coursegen/runtime/run.sh"],
+                        stage_exit_code=137,
+                        stderr="HikariPool boot failed",
+                        stdout="Started ledger app",
+                        error="deliverable_1 failed during boot: HikariPool boot failed",
+                        stdout_tail="Spring Boot started\nAttempting db connection",
+                        exit_state={
+                            "exit_code": 137,
+                            "oom_killed": True,
+                            "status": "exited",
+                            "error": None,
+                        },
+                        sidecar_diagnostics={
+                            "postgres": {
+                                "stderr_tail": "FATAL: out of memory",
+                                "stdout_tail": None,
+                                "exit_state": {
+                                    "exit_code": 137,
+                                    "oom_killed": True,
+                                    "status": "exited",
+                                    "error": None,
+                                },
+                            },
+                            "redis": {
+                                "stderr_tail": None,
+                                "stdout_tail": "Ready to accept connections",
+                                "exit_state": {
+                                    "exit_code": 0,
+                                    "oom_killed": False,
+                                    "status": "running",
+                                    "error": None,
+                                },
+                            },
+                        },
+                        http_response={
+                            "request_method": "POST",
+                            "request_path": "/ledger/debit",
+                            "request_body": {"account_id": "a1", "amount": 100},
+                            "response_status": 500,
+                            "response_headers": {"content-type": "application/json"},
+                            "response_body_text": (
+                                '{"error": "NoSuchAccount", '
+                                '"detail": "account a1 not seeded"}'
+                            ),
+                        },
+                    )
+                ],
+                error="Boot failed",
+            )
+            latest = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Sandbox boot failed.",
+                created_at=datetime.now(UTC),
+                sandbox_result=sandbox_result,
+                findings=[
+                    ReviewerFinding(
+                        category="runtime",
+                        severity=ReviewerFindingSeverity.error,
+                        title="Sandbox boot failed",
+                        detail="boot failed",
+                    )
+                ],
+            )
+
+            failure_context = build_failure_context(run, latest)
+
+            self.assertIsNotNone(failure_context.sandbox)
+            report = failure_context.sandbox.deliverable_reports[0]
+            # New propagated fields:
+            self.assertIsNotNone(report.stdout_excerpt)
+            self.assertIn("Spring Boot started", report.stdout_excerpt)
+            self.assertIsNotNone(report.exit_state)
+            self.assertTrue(report.exit_state["oom_killed"])
+            self.assertEqual(report.exit_state["exit_code"], 137)
+            self.assertIsNotNone(report.sidecar_diagnostics)
+            self.assertIn("postgres", report.sidecar_diagnostics)
+            self.assertIn(
+                "out of memory",
+                report.sidecar_diagnostics["postgres"]["stderr_tail"],
+            )
+            self.assertTrue(
+                report.sidecar_diagnostics["postgres"]["exit_state"]["oom_killed"]
+            )
+            self.assertIsNotNone(report.http_response)
+            self.assertEqual(report.http_response["response_status"], 500)
+            self.assertIn(
+                "NoSuchAccount",
+                report.http_response["response_body_text"],
+            )
+
     def test_failure_context_prefers_structured_sandbox_stage_over_string_guessing(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
@@ -533,6 +675,183 @@ class TaskAgentRetryServiceTests(TestCase):
                 ["sh", ".coursegen/runtime/verify.sh"],
             )
             self.assertEqual(failure_context.sandbox.deliverable_reports[0].stage_exit_code, 1)
+
+    def test_reviewer_tests_failure_context_phase_is_tests_not_runtime(self) -> None:
+        """A reviewer_tests failure (from the baseline matrix verifier) must be
+        classified as phase=`tests`, not the catch-all `runtime`. Misclassifying
+        sends the repair model to fix runtime code when the issue is in the
+        visible/hidden test scripts.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            # Prior authoring_runtime that fully passed sandbox; reviewer_tests
+            # later flagged that the visible/hidden test scripts the model
+            # authored are too lenient (baseline matrix discrimination failure).
+            passing_runtime = _passing_runtime_node(
+                kind=WorkflowNodeKind.reviewer_runtime, attempt=1
+            )
+            reviewer_tests_failure = WorkflowNodeExecution(
+                node_id="reviewer_tests_1",
+                kind=WorkflowNodeKind.reviewer_tests,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer test node failed the baseline matrix.",
+                created_at=datetime.now(UTC),
+                sandbox_result=None,
+                findings=[
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_visible_tests_passed_partial_repo",
+                        detail="The visible suite passed against a partial starter that should still require learner work.",
+                        code="starter_visible_tests_passed_partial_repo",
+                        location="starter/deliverable_2",
+                    ),
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_hidden_tests_passed_buggy_repo",
+                        detail="The hidden suite passed against a starter that is supposed to be incorrect.",
+                        code="starter_hidden_tests_passed_buggy_repo",
+                        location="starter/deliverable_4",
+                    ),
+                ],
+            )
+            run.artifacts.node_executions = [passing_runtime, reviewer_tests_failure]
+
+            failure_context = build_failure_context(run, reviewer_tests_failure)
+
+            self.assertEqual(failure_context.phase, "tests")
+
+    def test_reviewer_tests_failure_context_failed_deliverables_match_finding_locations(self) -> None:
+        """When the reviewer_tests findings flag specific deliverables via
+        `location=starter/deliverable_X`, the failure context's
+        failed_deliverables list must reflect those locations only. Today the
+        list inherits the sandbox aggregate (often all four deliverables),
+        which misleads downstream callers about the actual repair scope.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            passing_runtime = _passing_runtime_node(
+                kind=WorkflowNodeKind.reviewer_runtime, attempt=1
+            )
+            reviewer_tests_failure = WorkflowNodeExecution(
+                node_id="reviewer_tests_1",
+                kind=WorkflowNodeKind.reviewer_tests,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer test node failed for d2 and d4 only.",
+                created_at=datetime.now(UTC),
+                sandbox_result=None,
+                findings=[
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_visible_tests_passed_partial_repo",
+                        detail="too lenient on partial repo",
+                        code="starter_visible_tests_passed_partial_repo",
+                        location="starter/deliverable_2",
+                    ),
+                    ReviewerFinding(
+                        category="tests_review",
+                        severity=ReviewerFindingSeverity.error,
+                        title="starter_hidden_tests_passed_buggy_repo",
+                        detail="too lenient on buggy repo",
+                        code="starter_hidden_tests_passed_buggy_repo",
+                        location="starter/deliverable_4",
+                    ),
+                ],
+            )
+            run.artifacts.node_executions = [passing_runtime, reviewer_tests_failure]
+
+            failure_context = build_failure_context(run, reviewer_tests_failure)
+
+            self.assertIsNotNone(failure_context.sandbox)
+            self.assertEqual(
+                set(failure_context.sandbox.failed_deliverables),
+                {"deliverable_2", "deliverable_4"},
+            )
+
+    def test_failure_context_carries_last_attempted_runtime_even_when_sandbox_failed(self) -> None:
+        """When repair runs after a failed authoring_runtime, the failure
+        context must carry that just-failed attempt's stage outcomes and
+        runtime protocol file contents so the model can preserve files
+        implicated only in stages that already succeeded.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            # The just-failed authoring_runtime: image_build + install + verify
+            # + boot all succeeded; only the public_check (contract stage)
+            # failed. That partial success is what the next repair pass must
+            # see so it knows not to rewrite the runtime bundle.
+            contract_failure_sandbox = SandboxExecutionResult(
+                status=SandboxExecutionStatus.failed,
+                available=True,
+                build_succeeded=True,
+                run_succeeded=False,
+                generated_at=datetime.now(UTC),
+                workspace_root=f"/tmp/{run.id}",
+                error="Public checks failed",
+                deliverable_reports=[
+                    DeliverableSandboxReport(
+                        deliverable_id="deliverable_1",
+                        compile_succeeded=True,
+                        runtime_succeeded=False,
+                        failed_stage=SandboxFailureStage.contract,
+                        public_checks_passed=False,
+                        health_status_code=200,
+                        error="One or more starter smoke checks failed.",
+                    )
+                ],
+            )
+            failed_runtime = WorkflowNodeExecution(
+                node_id="authoring_runtime_1",
+                kind=WorkflowNodeKind.authoring_runtime,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Sandbox failed at contract stage.",
+                created_at=datetime.now(UTC),
+                sandbox_result=contract_failure_sandbox,
+            )
+            run.artifacts.node_executions = [failed_runtime]
+
+            failure_context = build_failure_context(run, failed_runtime)
+
+            self.assertIsNotNone(failure_context.last_attempted_runtime)
+            last = failure_context.last_attempted_runtime
+            assert last is not None
+
+            # Stage outcomes reflect the partial success of the just-failed attempt.
+            self.assertEqual(last.stage_outcomes.get("image_build"), "passed")
+            self.assertEqual(last.stage_outcomes.get("install"), "passed")
+            self.assertEqual(last.stage_outcomes.get("verify"), "passed")
+            self.assertEqual(last.stage_outcomes.get("boot"), "passed")
+            self.assertEqual(last.stage_outcomes.get("contract"), "failed")
+
+            # Because boot passed, the runtime protocol files are pinned for
+            # the next repair pass.
+            verified_paths = {item.path: item for item in last.verified_files}
+            self.assertIn("Dockerfile", verified_paths)
+            self.assertIsNotNone(verified_paths["Dockerfile"].content)
+            self.assertTrue(verified_paths["Dockerfile"].preserve_verbatim)
 
     def test_failure_context_includes_previously_verified_runtime_facts(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -566,6 +885,143 @@ class TaskAgentRetryServiceTests(TestCase):
             self.assertEqual(verified_paths["Dockerfile"].role, "runtime_protocol")
             self.assertIsNotNone(verified_paths["Dockerfile"].content)
             self.assertTrue(verified_paths["Dockerfile"].preserve_verbatim)
+
+    def test_repair_workspace_for_readme_only_findings_skips_llm_reauthoring(self) -> None:
+        """When reviewer_code emits ONLY documentation-class findings (e.g.
+        starter_readme_missing_local_reference), repair_workspace must
+        regenerate the deterministic README templates WITHOUT calling
+        ``author_workspace_repo``.
+
+        The old behavior: any reviewer_code finding triggered a full
+        LLM-driven workspace re-author, which is a fresh roll of the
+        dependency-manifest dice. A README path bug would trigger
+        re-authoring, which would regenerate requirements.txt, which
+        would silently drop or swap dependencies → ModuleNotFoundError on
+        the next sandbox attempt → "repair regression".
+
+        Proportional repair scope: documentation-only findings → re-render
+        the README templates from the deterministic builder; code and
+        manifests stay byte-for-byte unchanged.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="reviewer_code_1",
+                kind=WorkflowNodeKind.reviewer_code,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Reviewer code flagged README path inconsistencies.",
+                created_at=datetime.now(UTC),
+                findings=[
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="starter_readme_missing_local_reference",
+                        detail=(
+                            "README references checks/run_visible_checks.py but "
+                            "that file is not present in the learner workspace."
+                        ),
+                        location="public/checks/deliverable_1/README.md",
+                    ),
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="starter_readme_missing_local_reference",
+                        detail="same",
+                        location="public/checks/deliverable_2/README.md",
+                    ),
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+
+            repaired_run, repaired, message = workspace_authoring.repair_workspace(
+                run, latest_node, failure_context=failure_context,
+            )
+
+            self.assertTrue(repaired)
+            self.assertEqual(
+                repo_authoring.calls, [],
+                "README-only reviewer findings must NOT trigger LLM-driven "
+                "workspace re-authoring. That fresh roll of the dependency "
+                "dice is what caused the repair-regression class of failures.",
+            )
+            self.assertIn("README", message)
+            # The README files for the affected deliverables should now exist
+            # (regenerated from the deterministic template).
+            repaired_workspace = repaired_run.artifacts.workspace_snapshot
+            assert repaired_workspace is not None
+            for did in ("deliverable_1", "deliverable_2"):
+                readme_path = (
+                    Path(repaired_workspace.public_dir) / "checks" / did / "README.md"
+                )
+                self.assertTrue(
+                    readme_path.exists(),
+                    f"README for {did} should be re-rendered at {readme_path}.",
+                )
+
+    def test_repair_workspace_for_mixed_findings_still_uses_llm_reauthoring(self) -> None:
+        """If ANY error finding is not documentation-class (e.g. a real
+        code issue), repair_workspace must fall back to the full LLM
+        re-authoring path. Pinning the narrow scope: don't accidentally
+        skip a real repair just because a README error also fires.
+        """
+        with TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            run = _make_run(temp_dir)
+            workspace_manager = AssignmentWorkspaceManager(base_dir=temp_dir / "workspaces")
+            repo_authoring = _RecordingRepoAuthoringService()
+            workspace_authoring = TaskAgentWorkspaceAuthoringService(
+                workspace_manager=workspace_manager,
+                repo_authoring_service=repo_authoring,
+            )
+            run = workspace_authoring.ensure_workspace(run)
+
+            latest_node = WorkflowNodeExecution(
+                node_id="reviewer_code_1",
+                kind=WorkflowNodeKind.reviewer_code,
+                status=WorkflowNodeStatus.failed,
+                attempt=1,
+                summary="Mixed findings.",
+                created_at=datetime.now(UTC),
+                findings=[
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="starter_readme_missing_local_reference",
+                        title="...",
+                        detail="...",
+                        location="public/checks/deliverable_1/README.md",
+                    ),
+                    ReviewerFinding(
+                        category="code",
+                        severity=ReviewerFindingSeverity.error,
+                        code="missing_required_endpoint",
+                        title="non-README issue",
+                        detail="Handler is missing.",
+                        location="public/starter/app/main.py",
+                    ),
+                ],
+            )
+            failure_context = build_failure_context(run, latest_node)
+            workspace_authoring.repair_workspace(
+                run, latest_node, failure_context=failure_context,
+            )
+            self.assertNotEqual(
+                repo_authoring.calls, [],
+                "Mixed findings (with at least one non-README error) must still "
+                "fall through to LLM-driven workspace re-authoring.",
+            )
 
     def test_workspace_repair_keeps_runtime_failures_scoped_to_failed_deliverables(self) -> None:
         with TemporaryDirectory() as temp_dir_name:
@@ -641,10 +1097,10 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertFalse(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_1" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_workspace_repair_rebuilds_failed_progressive_stage_and_descendants(self) -> None:
@@ -721,13 +1177,13 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertFalse(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_1" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_2" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_2" / "repair_scope_marker.txt").exists()
             )
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_workspace_repair_rebuilds_all_progressive_stages_for_install_failures(self) -> None:
@@ -792,7 +1248,7 @@ class TaskAgentRetryServiceTests(TestCase):
             repaired_workspace = repaired_run.artifacts.workspace_snapshot
             assert repaired_workspace is not None
             self.assertTrue(
-                (Path(repaired_workspace.public_dir) / "starter" / "deliverable_4" / "repair_scope_marker.txt").exists()
+                (Path(repaired_workspace.root_dir) / "private" / "grader" / "deliverable_4" / "repair_scope_marker.txt").exists()
             )
 
     def test_retry_service_stops_when_same_workspace_blocker_repeats_after_repair(self) -> None:
@@ -1016,8 +1472,14 @@ class TaskAgentRetryServiceTests(TestCase):
 
             workspace = run.artifacts.workspace_snapshot
             assert workspace is not None
-            starter_root = Path(workspace.public_dir) / "starter" / "deliverable_1"
-            manifest_path = starter_root / ".coursegen" / "deliverable.json"
+            starter_root = Path(workspace.public_dir) / "starter"
+            manifest_path = (
+                Path(workspace.root_dir)
+                / "private"
+                / "grader"
+                / "deliverable_1"
+                / "deliverable.json"
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["dependency_contract"] = {
                 "manifest_paths": ["Cargo.toml"],

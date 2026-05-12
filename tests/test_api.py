@@ -81,7 +81,28 @@ from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
 from app.services.task_agent_grader import grade_assignment_submission, grade_task_agent_submission
 from app.services.learner_studio_service import LearnerStudioError
+from app.domain.task_agent import DeliverableSpec
 from app.services.task_agent_scaffolds import build_task_agent_scaffold
+
+
+def _default_planner_deliverables_test(titles: list[str] | None = None) -> list[DeliverableSpec]:
+    """Minimal four-deliverable planner list for tests building scaffolds directly."""
+    titles = titles or [
+        "Public surface contract",
+        "Core read/write correctness",
+        "Observability and recovery",
+        "Production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
 from app.services.task_agent_starter_templates import (
     build_task_agent_starter_files,
     HIDDEN_MANIFEST_PATH,
@@ -363,11 +384,12 @@ class FakeTaskAgentAuthoringService:
             env_file="/tmp/fake-openai.env",
         )
 
-    def generate_scaffold(self, *, title, summary, design_spec) -> TaskAgentAuthoringResult:
+    def generate_scaffold(self, *, title, summary, design_spec, planner_deliverables) -> TaskAgentAuthoringResult:
         spec, origin_template = build_task_agent_scaffold(
             title=title,
             summary=summary,
             design_spec=design_spec,
+            planner_deliverables=planner_deliverables,
         )
         spec.deliverables[0].title = "OpenAI-authored foundation"
         spec.summary = f"{summary} Generated with fake OpenAI."
@@ -407,7 +429,7 @@ class FakeTaskAgentAuthoringService:
 
 
 class _AlwaysValidBaselineVerifier:
-    def verify_deliverable(self, **kwargs):  # noqa: ANN003
+    def verify_course(self, **kwargs):  # noqa: ANN003
         return BaselineValidationResult(valid=True)
 
 
@@ -426,9 +448,24 @@ class FakeRepoAuthoringService:
             )
         updated_files: list[str] = []
         public_root = Path(workspace.public_dir)
+        workspace_root = Path(workspace.root_dir)
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            # Shared courses share one starter root; the per-deliverable manifest
+            # lives in private/grader/<id>/deliverable.json. Legacy non-shared
+            # courses keep the per-deliverable starter subtree + manifest.
+            if shared_codebase:
+                starter_root = public_root / "starter"
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             if not manifest_path.exists():
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -550,15 +587,36 @@ class FakeTestScriptAuthoringService:
                 "",
             ]
         )
+        workspace_root = Path(workspace.root_dir)
+        shared_codebase = bool(spec.course_structure.shared_codebase)
         for deliverable in spec.deliverables:
-            starter_root = public_root / "starter" / deliverable.id
-            visible_path = starter_root / "checks" / "run_visible_checks.py"
-            hidden_path = starter_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+            if shared_codebase:
+                visible_path = (
+                    public_root / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                hidden_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "run_hidden_checks.py"
+                )
+                manifest_path = (
+                    workspace_root
+                    / "private"
+                    / "grader"
+                    / deliverable.id
+                    / "deliverable.json"
+                )
+            else:
+                starter_root = public_root / "starter" / deliverable.id
+                visible_path = starter_root / "checks" / "run_visible_checks.py"
+                hidden_path = starter_root / ".coursegen" / "grader" / "run_hidden_checks.py"
+                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             visible_path.parent.mkdir(parents=True, exist_ok=True)
             hidden_path.parent.mkdir(parents=True, exist_ok=True)
             visible_path.write_text(passing_script, encoding="utf-8")
             hidden_path.write_text(passing_script, encoding="utf-8")
-            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["generated_test_scripts"] = {
                 "source": "openai_live",
@@ -590,23 +648,31 @@ class WorkspaceCompileSandboxRunner(FakeSandboxRunner):
         success = True
         workspace_root = workspace.public_dir if workspace is not None else "/tmp/missing-workspace"
         if run.artifacts.task_agent_spec is not None and workspace is not None:
+            spec = run.artifacts.task_agent_spec
             public_dir = Path(workspace.public_dir)
-            for deliverable in run.artifacts.task_agent_spec.deliverables:
-                editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            # Shared courses keep one starter root at public/starter/; legacy
+            # non-shared courses use per-deliverable subtree public/starter/<id>/.
+            for deliverable in spec.deliverables:
+                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
+                if shared_codebase:
+                    starter_root = public_dir / "starter"
+                else:
+                    starter_root = public_dir / "starter" / deliverable.id
                 compile_targets = [
-                    public_dir / "starter" / deliverable.id / relative_path
+                    starter_root / relative_path
                     for relative_path in editable_paths
                     if relative_path.endswith(".py")
                 ]
                 content_targets = [
-                    public_dir / "starter" / deliverable.id / relative_path
+                    starter_root / relative_path
                     for relative_path in editable_paths
                     if not relative_path.endswith(".py")
                 ]
                 missing_targets = [
-                    str((public_dir / "starter" / deliverable.id / relative_path).relative_to(public_dir))
+                    str((starter_root / relative_path).relative_to(public_dir))
                     for relative_path in editable_paths
-                    if not (public_dir / "starter" / deliverable.id / relative_path).exists()
+                    if not (starter_root / relative_path).exists()
                 ]
                 try:
                     if missing_targets:
@@ -662,16 +728,21 @@ class BrokenFirstWorkspaceAuthoringService(TaskAgentWorkspaceAuthoringService):
         run, result = super().author_workspace(run)
         self.author_calls += 1
         if self.author_calls == 1 and run.artifacts.workspace_snapshot is not None:
-            deliverable = run.artifacts.task_agent_spec.deliverables[0]
-            editable_paths = learner_editable_paths_for_deliverable(run.artifacts.task_agent_spec, deliverable)
+            spec = run.artifacts.task_agent_spec
+            deliverable = spec.deliverables[0]
+            editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
             if not editable_paths:
                 return run, result
-            broken_path = (
-                Path(run.artifacts.workspace_snapshot.public_dir)
-                / "starter"
-                / deliverable.id
-                / editable_paths[0]
-            )
+            # Shared courses share one starter root; legacy non-shared courses
+            # use per-deliverable subtree.
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            public_dir = Path(run.artifacts.workspace_snapshot.public_dir)
+            if shared_codebase:
+                broken_path = public_dir / "starter" / editable_paths[0]
+            else:
+                broken_path = (
+                    public_dir / "starter" / deliverable.id / editable_paths[0]
+                )
             broken_path.parent.mkdir(parents=True, exist_ok=True)
             broken_contents = "def broken(:\n" if broken_path.suffix == ".py" else "BROKEN_STARTER_SENTINEL\n"
             broken_path.write_text(broken_contents, encoding="utf-8")
@@ -803,6 +874,7 @@ class OpenAILearnerFeedbackServiceTests(unittest.TestCase):
                 problem_statement="Build a grounded internal docs assistant with citations and abstention.",
                 learning_outcomes=["retrieval", "grounded answers", "abstention"],
             ),
+            planner_deliverables=_default_planner_deliverables_test(),
         )
 
         failed_deliverable = spec.deliverables[0]
@@ -1039,6 +1111,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             title="Build a feature flag control plane",
             summary="Feature flag runtime",
             design_spec=inferred.design_spec,
+            planner_deliverables=_default_planner_deliverables_test(),
         )
         starter_files = build_task_agent_starter_files(spec, spec.deliverables[0].id)
         starter_manifest = json.loads(starter_files["starter_manifest.json"])
@@ -1451,7 +1524,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "primary_database": "postgres",
                     "cache_backend": "redis",
                 },
@@ -1525,7 +1598,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "bare_stub",
+                    "starter_type": "empty",
                     "implementation_language": "go",
                     "language_version": "1.25",
                     "application_framework": "gin",
@@ -1546,7 +1619,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 200)
         body = created.json()
-        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "bare_stub")
+        self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["starter_type"], "empty")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["implementation_language"], "go")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["language_version"], "1.25")
         self.assertEqual(body["shared_design_spec"]["runtime_dependencies"]["application_framework"], "gin")
@@ -1596,7 +1669,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["plan"]["creator_choices"]["starter_type"], "partial_implementation")
+        self.assertEqual(body["plan"]["creator_choices"]["starter_type"], "partial")
         self.assertEqual(len(body["plan"]["creator_choices"]["data_sources"]), 1)
         source = body["plan"]["creator_choices"]["data_sources"][0]
         self.assertEqual(source["purpose"], "retrieval")
@@ -1649,7 +1722,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             json={
                 "goal": "Build a production-ready internal docs RAG system that answers from uploaded airline policies with citations.",
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "data_sources": [asset["data_source"]],
                 },
             },
@@ -1705,7 +1778,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Explain the tradeoffs between different locking strategies.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                     "primary_database": "postgres",
                     "cache_backend": "redis",
                 },
@@ -1764,7 +1837,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
             json={
                 "goal": "Build a grounded internal docs assistant that answers from a visible corpus with citations and abstains when support is weak.",
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                 },
             },
         )
@@ -1810,7 +1883,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                     "Return citations for every supported answer.",
                 ],
                 "creator_choices": {
-                    "starter_type": "partial_implementation",
+                    "starter_type": "partial",
                 },
             },
         )
@@ -2169,7 +2242,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertEqual(review.status_code, 200)
         body = review.json()
         self.assertTrue(body["review_ready"])
-        self.assertEqual(body["policy"]["max_authoring_attempts"], 3)
+        self.assertEqual(body["policy"]["max_authoring_attempts"], 5)
         self.assertEqual(body["policy"]["max_reviewer_attempts"], 2)
         self.assertEqual(body["authoring"]["attempts_used"], 1)
         self.assertEqual(body["reviewer"]["attempts_used"], 1)
@@ -2309,7 +2382,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         workspace = run.artifacts.workspace_snapshot
         self.assertIsNotNone(workspace)
-        readme_path = Path(workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
+        readme_path = Path(workspace.public_dir) / "checks" / "deliverable_1" / "README.md"
         original = readme_path.read_text(encoding="utf-8")
         readme_path.write_text("STALE README\n", encoding="utf-8")
 
@@ -2363,7 +2436,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
         repaired_workspace = repaired_run.artifacts.workspace_snapshot
         self.assertIsNotNone(repaired_workspace)
         repaired_readme = (
-            Path(repaired_workspace.public_dir) / "starter" / "deliverable_1" / "README.md"
+            Path(repaired_workspace.public_dir) / "checks" / "deliverable_1" / "README.md"
         ).read_text(encoding="utf-8")
         self.assertEqual(repaired_readme, original)
 
@@ -2701,6 +2774,7 @@ class CourseGenCodexApiTests(unittest.TestCase):
                 problem_statement="Return grounded answers with citations.",
                 learning_outcomes=["grounded answers", "citations"],
             ),
+            planner_deliverables=_default_planner_deliverables_test(),
         )
         deliverable = spec.deliverables[0]
         original_checks = [check.model_dump(mode="json") for check in deliverable.public_checks]

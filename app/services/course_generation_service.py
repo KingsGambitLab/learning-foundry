@@ -1396,13 +1396,9 @@ class CourseGenerationService:
         )
 
     def _starter_type_for_goal(self, lowered_goal: str) -> StarterType:
-        if any(keyword in lowered_goal for keyword in ["buggy", "fix", "debug", "legacy", "broken"]):
-            return StarterType.working_buggy
-        if any(keyword in lowered_goal for keyword in ["refactor", "improve", "optimize", "suboptimal"]):
-            return StarterType.working_suboptimal
         if any(keyword in lowered_goal for keyword in ["from scratch", "blank", "implement everything"]):
-            return StarterType.bare_stub
-        return StarterType.partial_implementation
+            return StarterType.empty
+        return StarterType.partial
 
     def _infer_default_data_sources(self, lowered_goal: str) -> list[DataSourceSpec]:
         if any(
@@ -1428,54 +1424,84 @@ class CourseGenerationService:
         design_spec: AssignmentDesignSpec | None,
         creator_choices,
     ) -> AssignmentDesignSpec | None:
+        """Overlay creator picks on top of an inferred design_spec.
+
+        Each field uses `creator_choices.X or design_spec.runtime_dependencies.X`
+        so an empty creator_choices (the default when the API request
+        omits `creator_setup`) preserves the inferred stack instead of
+        nulling it out. Observed bug today: a Rails brief produced a
+        spec with `implementation_language="ruby"` from inference, but
+        this function was unconditionally writing
+        `creator_choices.implementation_language=None` over it, so the
+        persisted spec ended up `implementation_language=None` despite
+        the workspace being correctly authored as Rails.
+        """
         if design_spec is None:
             return None
+        rd = design_spec.runtime_dependencies
+        # Prefer creator's pick if set, else preserve inferred value.
+        resolved_language = creator_choices.implementation_language or rd.implementation_language
+        resolved_language_version = creator_choices.language_version or rd.language_version
+        resolved_framework = creator_choices.application_framework or rd.application_framework
+        resolved_framework_version = creator_choices.framework_version or rd.framework_version
+        resolved_package_manager = creator_choices.package_manager or rd.package_manager
+        resolved_primary_database = creator_choices.primary_database or rd.primary_database
+        resolved_primary_database_version = (
+            creator_choices.primary_database_version or rd.primary_database_version
+        )
+        resolved_cache_backend = creator_choices.cache_backend or rd.cache_backend
+        resolved_cache_backend_version = (
+            creator_choices.cache_backend_version or rd.cache_backend_version
+        )
+        resolved_tech_stack = list(creator_choices.tech_stack) or list(rd.tech_stack)
+        resolved_data_sources = list(creator_choices.data_sources) or list(rd.data_sources)
+
         runtime_binding = build_project_runtime_binding(
             family=design_spec.project_contract.family,
-            implementation_language=creator_choices.implementation_language,
-            application_framework=creator_choices.application_framework,
-            primary_database=creator_choices.primary_database,
-            cache_backend=creator_choices.cache_backend,
-            tech_stack=list(creator_choices.tech_stack),
-            data_sources=list(creator_choices.data_sources),
+            implementation_language=resolved_language,
+            application_framework=resolved_framework,
+            primary_database=resolved_primary_database,
+            cache_backend=resolved_cache_backend,
+            tech_stack=resolved_tech_stack,
+            data_sources=resolved_data_sources,
         )
         runtime_plan = build_project_runtime_plan(
             family=design_spec.project_contract.family,
-            implementation_language=creator_choices.implementation_language,
-            language_version=creator_choices.language_version,
-            application_framework=creator_choices.application_framework,
-            framework_version=creator_choices.framework_version,
-            package_manager=creator_choices.package_manager,
-            primary_database=creator_choices.primary_database,
-            primary_database_version=creator_choices.primary_database_version,
-            cache_backend=creator_choices.cache_backend,
-            cache_backend_version=creator_choices.cache_backend_version,
-            tech_stack=list(creator_choices.tech_stack),
-            data_sources=list(creator_choices.data_sources),
+            implementation_language=resolved_language,
+            language_version=resolved_language_version,
+            application_framework=resolved_framework,
+            framework_version=resolved_framework_version,
+            package_manager=resolved_package_manager,
+            primary_database=resolved_primary_database,
+            primary_database_version=resolved_primary_database_version,
+            cache_backend=resolved_cache_backend,
+            cache_backend_version=resolved_cache_backend_version,
+            tech_stack=resolved_tech_stack,
+            data_sources=resolved_data_sources,
             allow_inference=False,
         )
         return design_spec.model_copy(
             update={
                 "runtime_dependencies": design_spec.runtime_dependencies.model_copy(
                     update={
-                        "starter_type": creator_choices.starter_type,
-                        "implementation_language": creator_choices.implementation_language,
-                        "language_version": creator_choices.language_version,
-                        "application_framework": creator_choices.application_framework,
-                        "framework_version": creator_choices.framework_version,
-                        "package_manager": creator_choices.package_manager,
+                        "starter_type": creator_choices.starter_type or rd.starter_type,
+                        "implementation_language": resolved_language,
+                        "language_version": resolved_language_version,
+                        "application_framework": resolved_framework,
+                        "framework_version": resolved_framework_version,
+                        "package_manager": resolved_package_manager,
                         "visible_fixture_files": [
                             source.workspace_path
                             for source in creator_choices.data_sources
                             if source.learner_visible and source.workspace_path
                         ]
                         or list(design_spec.runtime_dependencies.visible_fixture_files),
-                        "primary_database": creator_choices.primary_database,
-                        "primary_database_version": creator_choices.primary_database_version,
-                        "cache_backend": creator_choices.cache_backend,
-                        "cache_backend_version": creator_choices.cache_backend_version,
-                        "tech_stack": list(creator_choices.tech_stack),
-                        "data_sources": list(creator_choices.data_sources),
+                        "primary_database": resolved_primary_database,
+                        "primary_database_version": resolved_primary_database_version,
+                        "cache_backend": resolved_cache_backend,
+                        "cache_backend_version": resolved_cache_backend_version,
+                        "tech_stack": resolved_tech_stack,
+                        "data_sources": resolved_data_sources,
                     }
                 ),
                 "project_contract": design_spec.project_contract.model_copy(
@@ -1494,7 +1520,7 @@ class CourseGenerationService:
             else "We will create the course as separate deliverable projects.",
             (
                 "Learners start from a starter app with key pieces already wired."
-                if creator_choices.starter_type != StarterType.bare_stub
+                if creator_choices.starter_type != StarterType.empty
                 else "Learners start closer to a blank starter and implement most of the system themselves."
             ),
         ]
@@ -1562,9 +1588,7 @@ class CourseGenerationService:
                 + ", ".join(f"`{item}`" for item in creator_choices.tech_stack[:3])
                 + "."
             )
-        if creator_choices.starter_type.name.startswith("working"):
-            notes.append("Learners should inherit a starter that already runs, then improve it.")
-        elif creator_choices.starter_type == creator_choices.starter_type.partial_implementation:
+        if creator_choices.starter_type == StarterType.partial:
             notes.append("Learners should inherit a partial starter so they can focus on the core change.")
         else:
             notes.append("Learners should implement most of this deliverable themselves from a bare starter.")

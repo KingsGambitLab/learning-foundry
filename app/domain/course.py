@@ -301,7 +301,7 @@ class CreatorCourseSetupInput(BaseModel):
 
 
 class CreatorCourseSetupChoices(BaseModel):
-    starter_type: StarterType = StarterType.partial_implementation
+    starter_type: StarterType = StarterType.partial
     implementation_language: str | None = None
     language_version: str | None = None
     application_framework: str | None = None

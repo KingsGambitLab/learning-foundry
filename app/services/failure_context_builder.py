@@ -10,6 +10,7 @@ from app.domain.workflow import (
     FailureContextDeliverableReport,
     FailureContextSandboxSummary,
     FailureContextValidationIssue,
+    FailureContextLastAttemptedRuntime,
     FailureContextVerifiedRuntime,
     FailureContextVerifiedRuntimeFile,
     ReviewerFinding,
@@ -55,11 +56,17 @@ def build_failure_context(
         if run.artifacts.task_agent_spec is not None
         else None,
         deliverable_ids=list(sandbox.failed_deliverables if sandbox is not None else []),
+        workspace_root=(run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None),
+        shared_codebase=bool(
+            run.artifacts.task_agent_spec is not None
+            and run.artifacts.task_agent_spec.course_structure.shared_codebase
+        ),
     )
     owner_hint = _owner_hint(latest_node, validation_issues, sandbox)
     phase = _phase(latest_node, validation_issues, sandbox)
     failure_signature = _failure_signature(latest_node, validation_issues, sandbox)
     previously_verified_runtime = _previously_verified_runtime(run, latest_node)
+    last_attempted_runtime = _last_attempted_runtime(run, latest_node)
     return FailureContext(
         source_node_kind=latest_node.kind,
         source_node_attempt=latest_node.attempt,
@@ -72,6 +79,7 @@ def build_failure_context(
         sandbox=sandbox,
         dependency_contracts=dependency_contracts,
         previously_verified_runtime=previously_verified_runtime,
+        last_attempted_runtime=last_attempted_runtime,
     )
 
 
@@ -143,18 +151,34 @@ def _sandbox_summary(
     if sandbox_result is None:
         return None
 
+    # Real failures: anything that didn't compile, didn't run, or carries an
+    # explicit error. Plain stderr content alone is not failure — boot logs
+    # always have stderr output even on a passing sandbox.
     failed_reports = [
         report
         for report in sandbox_result.deliverable_reports
-        if not report.compile_succeeded or not report.runtime_succeeded or report.error or report.stderr
+        if not report.compile_succeeded or not report.runtime_succeeded or report.error
     ]
+    failed_deliverable_ids = [report.deliverable_id for report in failed_reports]
+
+    # When reviewer-side findings flag specific deliverables via
+    # `location=starter/deliverable_X`, treat those as the authoritative
+    # failed set for this attempt — the sandbox itself may have passed earlier
+    # but the reviewer disagreed about a specific deliverable's quality.
+    for finding in latest_node.findings:
+        if finding.severity.value != "error":
+            continue
+        deliverable_id = _deliverable_id_from_location(finding.location)
+        if deliverable_id and deliverable_id not in failed_deliverable_ids:
+            failed_deliverable_ids.append(deliverable_id)
+
     return FailureContextSandboxSummary(
         error=sandbox_result.error,
         build_stdout_excerpt=_excerpt(sandbox_result.build_stdout),
         build_stderr_excerpt=_excerpt(sandbox_result.build_stderr),
         run_stdout_excerpt=_excerpt(sandbox_result.run_stdout),
         run_stderr_excerpt=_excerpt(sandbox_result.run_stderr),
-        failed_deliverables=[report.deliverable_id for report in failed_reports],
+        failed_deliverables=failed_deliverable_ids,
         deliverable_reports=[
             FailureContextDeliverableReport(
                 deliverable_id=report.deliverable_id,
@@ -165,13 +189,84 @@ def _sandbox_summary(
                 stage_exit_code=report.stage_exit_code,
                 error=report.error,
                 stderr_excerpt=_excerpt(report.stderr),
+                stdout_excerpt=_excerpt(report.stdout_tail or report.stdout),
+                exit_state=report.exit_state,
+                sidecar_diagnostics=_apply_sidecar_excerpts(report.sidecar_diagnostics),
+                http_response=_apply_http_response_excerpt(report.http_response),
             )
             for report in failed_reports[:8]
         ],
     )
 
 
-def _excerpt(text: str, *, max_chars: int = 1200) -> str | None:
+def _deliverable_id_from_location(location: str | None) -> str | None:
+    """Extract a deliverable id from a reviewer finding location.
+
+    Reviewer findings point at concrete files using locations like
+    `starter/deliverable_2`, `starter/deliverable_2/.coursegen/...`, or
+    `public/starter/deliverable_4/README.md`. Return the deliverable id when
+    present, else None.
+    """
+    if not location:
+        return None
+    parts = [part for part in location.replace("\\", "/").split("/") if part]
+    for index, part in enumerate(parts):
+        if part == "starter" and index + 1 < len(parts):
+            candidate = parts[index + 1]
+            if candidate.startswith("deliverable"):
+                return candidate
+    return None
+
+
+def _apply_sidecar_excerpts(
+    sidecar_diagnostics: dict[str, dict] | None,
+) -> dict[str, dict] | None:
+    """Tail-clip the text fields inside each sidecar's diagnostics.
+
+    Postgres can dump kilobytes of buffer-pool stats before the actual
+    FATAL line; redis can spew Lua traces. We apply the same 8KB tail
+    cap as :func:`_excerpt` to ``stderr_tail`` / ``stdout_tail`` so the
+    canonical diagnostic at the end of the stream survives the prompt
+    budget. ``exit_state`` passes through untouched.
+    """
+    if not sidecar_diagnostics:
+        return None
+    trimmed: dict[str, dict] = {}
+    for service_id, payload in sidecar_diagnostics.items():
+        if not isinstance(payload, dict):
+            continue
+        trimmed[service_id] = {
+            "stderr_tail": _excerpt(payload.get("stderr_tail") or ""),
+            "stdout_tail": _excerpt(payload.get("stdout_tail") or ""),
+            "exit_state": payload.get("exit_state"),
+        }
+    return trimmed or None
+
+
+def _apply_http_response_excerpt(http_response: dict | None) -> dict | None:
+    """Tail-clip the response body in a captured contract-probe HTTP
+    exchange so very large error bodies (stack traces, framework error
+    pages) don't blow the prompt budget.
+    """
+    if not http_response:
+        return None
+    trimmed = dict(http_response)
+    body = trimmed.get("response_body_text")
+    if isinstance(body, str):
+        trimmed["response_body_text"] = _excerpt(body)
+    return trimmed
+
+
+def _excerpt(text: str, *, max_chars: int = 8000) -> str | None:
+    """Tail-clipped excerpt of a (possibly huge) log stream.
+
+    Real ecosystem failures spill multi-KB of stderr — Go's ``go mod tidy``
+    can dump a 5KB dependency tree before the version-mismatch error, Maven
+    prints the full effective POM, Docker buildkit's ``------`` block runs
+    a few KB. We default to an 8KB tail (~200 lines x 40 chars) so the
+    canonical diagnostic at the end of the log survives the prompt budget.
+    Tail strategy is correct here: errors are at the END of the stream.
+    """
     cleaned = (text or "").strip()
     if not cleaned:
         return None
@@ -287,6 +382,16 @@ def _phase(
 ) -> str | None:
     if validation_issues:
         return "validation"
+    # Reviewer-side failures classify by the reviewer node, not by stage-mining
+    # the carried-over passing sandbox. reviewer_tests in particular surfaces
+    # baseline-matrix discrimination issues, which are a test-authoring concern
+    # — not the runtime layer.
+    if latest_node.kind == WorkflowNodeKind.reviewer_tests:
+        return "tests"
+    if latest_node.kind == WorkflowNodeKind.reviewer_code:
+        return "code_review"
+    if latest_node.kind == WorkflowNodeKind.reviewer_pedagogy:
+        return "pedagogy_review"
     if sandbox is None:
         return None
     structured_stage = _structured_failed_stage(sandbox)
@@ -411,19 +516,30 @@ def _previously_verified_runtime(
     ]
 
     public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    workspace_root = (
+        run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None
+    )
     runtime_plan = (
         run.artifacts.task_agent_spec.project_contract.runtime_plan
         if run.artifacts.task_agent_spec is not None
         else None
     )
+    shared_codebase = bool(
+        run.artifacts.task_agent_spec is not None
+        and run.artifacts.task_agent_spec.course_structure.shared_codebase
+    )
     dependency_contracts = dependency_contract_facts_for_deliverables(
         public_root=public_root,
         runtime_plan=runtime_plan,
         deliverable_ids=passed_deliverables,
+        workspace_root=workspace_root,
+        shared_codebase=shared_codebase,
     )
     verified_files = _verified_runtime_files(
         public_root=public_root,
         source_deliverable_id=passed_deliverables[0],
+        shared_codebase=shared_codebase,
+        workspace_root=workspace_root,
     )
     return FailureContextVerifiedRuntime(
         source_node_kind=runtime_node.kind,
@@ -437,15 +553,156 @@ def _previously_verified_runtime(
     )
 
 
+_STAGE_ORDER = ("image_build", "install", "verify", "boot", "contract", "checks")
+
+
+def _stage_outcomes_for_report(report) -> dict[str, str]:
+    """Infer per-stage outcomes from a DeliverableSandboxReport.
+
+    Stages before `failed_stage` are inferred as `passed`; the failed stage is
+    `failed`; later stages are `not_run`. When the report has no `failed_stage`
+    but `compile_succeeded` / `runtime_succeeded` / `public_checks_passed` are
+    set, we fill those in directly.
+    """
+    failed_stage_value = report.failed_stage.value if report.failed_stage else None
+    outcomes: dict[str, str] = {}
+
+    if failed_stage_value is not None:
+        for stage in _STAGE_ORDER:
+            if stage == failed_stage_value:
+                outcomes[stage] = "failed"
+                break
+            outcomes[stage] = "passed"
+        # remaining stages didn't run
+        seen = set(outcomes)
+        for stage in _STAGE_ORDER:
+            if stage not in seen:
+                outcomes[stage] = "not_run"
+        return outcomes
+
+    # No structured failed_stage — fall back to boolean signals.
+    if report.compile_succeeded:
+        outcomes["image_build"] = "passed"
+        outcomes["install"] = "passed"
+    if report.runtime_succeeded:
+        outcomes["verify"] = "passed"
+        outcomes["boot"] = "passed"
+    if report.public_checks_passed is True:
+        outcomes["contract"] = "passed"
+        outcomes["checks"] = "passed"
+    elif report.public_checks_passed is False:
+        outcomes["contract"] = "failed"
+    return outcomes
+
+
+def _last_attempted_runtime(
+    run: WorkflowRun,
+    latest_node: WorkflowNodeExecution,
+) -> FailureContextLastAttemptedRuntime | None:
+    history = run.artifacts.node_executions
+    latest_index = next(
+        (
+            index
+            for index, node in reversed(list(enumerate(history)))
+            if node.node_id == latest_node.node_id
+            and node.kind == latest_node.kind
+            and node.attempt == latest_node.attempt
+            and node.created_at == latest_node.created_at
+        ),
+        len(history),
+    )
+    # Include the latest_node itself in the search window: when repair runs
+    # after a failed authoring_runtime, latest_node IS the most recent attempt
+    # whose stage outcomes we want to carry forward.
+    runtime_node = next(
+        (
+            node
+            for node in reversed(history[: latest_index + 1])
+            if node.kind in {WorkflowNodeKind.authoring_runtime, WorkflowNodeKind.reviewer_runtime}
+            and node.sandbox_result is not None
+            and node.sandbox_result.deliverable_reports
+        ),
+        None,
+    )
+    if runtime_node is None or runtime_node.sandbox_result is None:
+        return None
+
+    reports = list(runtime_node.sandbox_result.deliverable_reports)
+    if not reports:
+        return None
+    source_report = reports[0]
+    source_deliverable_id = source_report.deliverable_id
+
+    stage_outcomes = _stage_outcomes_for_report(source_report)
+
+    public_root = run.artifacts.workspace_snapshot.public_dir if run.artifacts.workspace_snapshot else None
+    workspace_root = (
+        run.artifacts.workspace_snapshot.root_dir if run.artifacts.workspace_snapshot else None
+    )
+    shared_codebase = bool(
+        run.artifacts.task_agent_spec is not None
+        and run.artifacts.task_agent_spec.course_structure.shared_codebase
+    )
+    verified_files = _verified_runtime_files(
+        public_root=public_root,
+        source_deliverable_id=source_deliverable_id,
+        shared_codebase=shared_codebase,
+        workspace_root=workspace_root,
+    )
+
+    # Whether each file should be preserved depends on which stages of the
+    # harness it contributed to. If `boot` passed, the entire runtime bundle
+    # (Dockerfile + install/verify/run.sh) is verified by the harness; if
+    # `install` passed, dependency-contract files are verified.
+    runtime_bundle_verified = stage_outcomes.get("boot") == "passed"
+    deps_verified = stage_outcomes.get("install") == "passed"
+    for file in verified_files:
+        if file.role == "runtime_protocol":
+            file.preserve_verbatim = runtime_bundle_verified
+        elif file.role == "dependency_contract":
+            file.preserve_verbatim = deps_verified
+        else:
+            file.preserve_verbatim = False
+
+    return FailureContextLastAttemptedRuntime(
+        source_node_kind=runtime_node.kind,
+        source_node_attempt=runtime_node.attempt,
+        attempted_at=runtime_node.created_at,
+        source_deliverable_id=source_deliverable_id,
+        stage_outcomes=stage_outcomes,
+        verified_files=verified_files,
+    )
+
+
 def _verified_runtime_files(
     *,
     public_root: str | None,
     source_deliverable_id: str,
+    shared_codebase: bool = False,
+    workspace_root: str | None = None,
 ) -> list[FailureContextVerifiedRuntimeFile]:
     if not public_root:
         return []
-    starter_root = Path(public_root) / "starter" / source_deliverable_id
-    manifest = load_starter_manifest(starter_root)
+    if shared_codebase:
+        starter_root = Path(public_root) / "starter"
+        if workspace_root:
+            manifest_path = (
+                Path(workspace_root) / "private" / "grader" / source_deliverable_id / "deliverable.json"
+            )
+        else:
+            manifest_path = (
+                Path(public_root).parent / "private" / "grader" / source_deliverable_id / "deliverable.json"
+            )
+        manifest: dict | None = None
+        if manifest_path.exists():
+            try:
+                import json as _json
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                manifest = None
+    else:
+        starter_root = Path(public_root) / "starter" / source_deliverable_id
+        manifest = load_starter_manifest(starter_root)
     if manifest is None:
         return []
 

@@ -107,6 +107,15 @@ class FailureContextDeliverableReport(BaseModel):
     stage_exit_code: int | None = None
     error: str | None = None
     stderr_excerpt: str | None = None
+    # Pass-8 diagnostic surface. ``stdout_excerpt`` mirrors
+    # ``stderr_excerpt`` for framework boot logs that the app writes to
+    # stdout (Spring Boot, gunicorn, structured loggers). The other three
+    # carry structured signals — container exit reasons, per-sidecar logs,
+    # and the verbatim HTTP exchange for contract failures.
+    stdout_excerpt: str | None = None
+    exit_state: dict | None = None
+    sidecar_diagnostics: dict[str, dict] | None = None
+    http_response: dict | None = None
 
 
 class FailureContextDependencyContract(BaseModel):
@@ -150,6 +159,23 @@ class FailureContextVerifiedRuntime(BaseModel):
     dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
 
 
+class FailureContextLastAttemptedRuntime(BaseModel):
+    """Snapshot of the most recent authoring_runtime attempt's stage outcomes
+    plus the runtime/dep-contract files that were on disk for that attempt.
+
+    Unlike `FailureContextVerifiedRuntime`, this is populated even when the
+    overall sandbox failed — so repair can preserve files implicated only in
+    stages that succeeded.
+    """
+
+    source_node_kind: WorkflowNodeKind
+    source_node_attempt: int
+    attempted_at: datetime
+    source_deliverable_id: str | None = None
+    stage_outcomes: dict[str, str] = Field(default_factory=dict)
+    verified_files: list[FailureContextVerifiedRuntimeFile] = Field(default_factory=list)
+
+
 class FailureContextSandboxSummary(BaseModel):
     error: str | None = None
     build_stdout_excerpt: str | None = None
@@ -172,6 +198,7 @@ class FailureContext(BaseModel):
     sandbox: FailureContextSandboxSummary | None = None
     dependency_contracts: list[FailureContextDependencyContract] = Field(default_factory=list)
     previously_verified_runtime: FailureContextVerifiedRuntime | None = None
+    last_attempted_runtime: FailureContextLastAttemptedRuntime | None = None
 
 
 class WorkflowNodeExecution(BaseModel):

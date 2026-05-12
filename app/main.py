@@ -14,6 +14,7 @@ from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
 from app.services.course_generation_service import CourseGenerationService
 from app.services.course_workflow_service import CourseWorkflowService
+from app.services.coursegen_logging import log_coursegen_event
 from app.services.creator_asset_service import CreatorAssetService
 from app.services.dashboard_page import build_dashboard_state, render_author_dashboard
 from app.services.draft_timeline_page import build_draft_timeline_state, render_draft_timeline_page
@@ -132,6 +133,42 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "course_generation_service"):
         app.state.course_generation_service = CourseGenerationService(
             app.state.course_workflow_service,
+        )
+
+    # Reconcile any course_runs whose `active_operation` survived a prior
+    # process restart. Background tasks don't survive uvicorn shutdown, so
+    # any non-null `active_operation` at this point is by definition stale.
+    # Without this, publish/revise/materialize endpoints return "already
+    # busy with `<operation>`" until the row is manually patched.
+    try:
+        reconciled = app.state.course_workflow_service.reconcile_stale_active_operations()
+        if reconciled:
+            log_coursegen_event(
+                "course_active_operations_reconciled_on_startup",
+                count=len(reconciled),
+                course_run_ids=reconciled,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log_coursegen_event(
+            "course_active_operations_reconciliation_failed",
+            error=str(exc),
+        )
+
+    # Reconcile learner_workspace_sessions whose backing editor container
+    # was killed by the prior process shutdown. Without this, the web UI
+    # keeps showing the editor URL as active and the learner gets a 404.
+    try:
+        reconciled_sessions = app.state.learner_studio_service.reconcile_stale_sessions(store)
+        if reconciled_sessions:
+            log_coursegen_event(
+                "learner_workspace_sessions_reconciled_on_startup",
+                count=len(reconciled_sessions),
+                session_ids=reconciled_sessions,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log_coursegen_event(
+            "learner_workspace_sessions_reconciliation_failed",
+            error=str(exc),
         )
     if not hasattr(app.state, "lms_service"):
         app.state.lms_service = LMSService(

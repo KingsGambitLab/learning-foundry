@@ -233,6 +233,8 @@ def dependency_contract_facts_for_deliverables(
     public_root: str | None,
     runtime_plan: ProjectRuntimePlanSpec | None,
     deliverable_ids: list[str],
+    workspace_root: str | None = None,
+    shared_codebase: bool = False,
 ) -> list[FailureContextDependencyContract]:
     if not public_root or not deliverable_ids:
         return []
@@ -241,10 +243,31 @@ def dependency_contract_facts_for_deliverables(
     container_image = _primary_container_image(runtime_plan)
     facts: list[FailureContextDependencyContract] = []
     for deliverable_id in deliverable_ids:
-        starter_root = public_dir / "starter" / deliverable_id
+        if shared_codebase:
+            starter_root = public_dir / "starter"
+            workspace_dir = (
+                Path(workspace_root)
+                if workspace_root
+                else public_dir.parent
+            )
+            manifest_path = (
+                workspace_dir / "private" / "grader" / deliverable_id / "deliverable.json"
+            )
+            manifest = None
+            if manifest_path.exists():
+                try:
+                    import json as _json
+
+                    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    manifest = None
+        else:
+            starter_root = public_dir / "starter" / deliverable_id
+            if not starter_root.exists():
+                continue
+            manifest = load_starter_manifest(starter_root)
         if not starter_root.exists():
             continue
-        manifest = load_starter_manifest(starter_root)
         contract = dependency_contract_from_manifest(manifest)
         manifest_paths = list(contract.get("manifest_paths", []))
         lockfile_paths = list(contract.get("lockfile_paths", []))

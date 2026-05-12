@@ -12,6 +12,7 @@ from app.domain.ai import AIUsageSummary, merge_ai_usage
 from app.domain.registry import PackageType, RiskClass
 from app.domain.task_agent import (
     AssignmentDesignSpec,
+    DeliverableSpec,
     EndpointSpec,
     LearnerStarterSurfaceSpec,
     PublicCheckSpec,
@@ -67,6 +68,7 @@ class StarterScenarioCustomization(BaseModel):
 
 class StarterSurfaceCustomization(BaseModel):
     starter_summary: str | None = None
+    primary_editable_paths: list[str] = Field(default_factory=list)
     implementation_checklist: list[str] = Field(default_factory=list)
     domain_scenarios: list[StarterScenarioCustomization] = Field(default_factory=list)
 
@@ -244,6 +246,7 @@ class OpenAITaskAgentAuthoringService:
         title: str,
         summary: str,
         design_spec: AssignmentDesignSpec,
+        planner_deliverables: list[DeliverableSpec],
     ) -> TaskAgentAuthoringResult:
         log_coursegen_event(
             "task_agent_authoring_generate_started",
@@ -256,6 +259,7 @@ class OpenAITaskAgentAuthoringService:
             title=title,
             summary=summary,
             design_spec=design_spec,
+            planner_deliverables=planner_deliverables,
         )
         base_spec = ensure_task_agent_deliverable_briefs(base_spec, overwrite=True)
         status = self.status()
@@ -481,10 +485,9 @@ class OpenAITaskAgentAuthoringService:
             if patch.learning_outcomes:
                 deliverable.learning_outcomes = _normalize_text_list(patch.learning_outcomes)
             if patch.learner_starter_surface is not None:
-                editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 authored_surface = deliverable.learner_starter_surface or LearnerStarterSurfaceSpec(
                     starter_summary="",
-                    primary_editable_paths=list(editable_paths),
+                    primary_editable_paths=[],
                     support_paths=[],
                     required_endpoints=[endpoint.model_copy(deep=True) for endpoint in spec.public_endpoints],
                     implementation_checklist=[],
@@ -492,6 +495,10 @@ class OpenAITaskAgentAuthoringService:
                 )
                 if patch.learner_starter_surface.starter_summary:
                     authored_surface.starter_summary = patch.learner_starter_surface.starter_summary.strip()
+                if patch.learner_starter_surface.primary_editable_paths:
+                    authored_surface.primary_editable_paths = _normalize_text_list(
+                        patch.learner_starter_surface.primary_editable_paths
+                    )
                 if patch.learner_starter_surface.implementation_checklist:
                     authored_surface.implementation_checklist = _normalize_text_list(
                         patch.learner_starter_surface.implementation_checklist
@@ -586,7 +593,11 @@ class OpenAITaskAgentAuthoringService:
                         "Starter scenarios and visible checks should use concrete domain language, not labels like `Primary request` or `Edge or failure path`. "
                         "Deliverable titles such as `Service contract`, `Operational hardening`, or other generic scaffolding labels are too weak; "
                         "when a public check needs a body, put a compact JSON object string in `request_body_json` and leave it null for bodyless requests. "
-                        "keep the titles grounded in the project's actual resources and workflows."
+                        "keep the titles grounded in the project's actual resources and workflows. "
+                        "For every deliverable, set `learner_starter_surface.primary_editable_paths` to the relative paths "
+                        "the learner edits in the chosen stack and the layout you will author. Pick paths that match the creator-selected "
+                        "implementation language, application framework, and package manager rather than copying a previous stack's defaults. "
+                        "Do not leave `primary_editable_paths` empty: a starter without a primary file is invalid."
                     ),
                 },
                 {"role": "user", "content": json.dumps(prompt_payload, indent=2)},

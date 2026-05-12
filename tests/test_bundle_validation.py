@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from app.domain.task_agent import EndpointSpec
+from app.domain.task_agent import DeliverableSpec, EndpointSpec
 from app.domain.workflow import MaterializeBundleRequest
 from app.domain.registry import PackageType
 from app.services.artifact_materializer import ArtifactMaterializer
@@ -29,6 +29,26 @@ from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
 
+def _inventory_planner_deliverables() -> list[DeliverableSpec]:
+    """Minimal four-deliverable planner list used by tests for the inventory service."""
+    titles = [
+        "Inventory reservation contract and state model",
+        "Inventory reservation read/write correctness",
+        "Inventory reservation observability and recovery",
+        "Inventory reservation production hardening",
+    ]
+    return [
+        DeliverableSpec(
+            id=f"deliverable_{index}",
+            title=title,
+            objective=f"Build the {title.lower()} surface.",
+            learning_outcomes=[],
+            overlay_ids=[],
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
+
+
 def _inventory_design():
     inferred = infer_assignment_design(
         title="Inventory Reservation Service",
@@ -49,6 +69,7 @@ def test_transactional_scaffold_is_family_specific_not_agentic() -> None:
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
 
     assert origin_template == "transactional_stateful_service"
@@ -107,6 +128,7 @@ def test_validation_rejects_title_slug_public_endpoints() -> None:
         title="Build a concurrency-safe multi-warehouse inventory reservation service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     spec.public_endpoints[1].path = "/build-a-concurrency-safe-multi-warehouse-inventory-reservation-service"
 
@@ -121,6 +143,7 @@ def test_validation_rejects_generic_deliverable_titles_when_entities_are_known()
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     spec.deliverables[0].title = "Service contract and durable model"
 
@@ -181,7 +204,7 @@ def test_bundle_validation_flags_secondary_brief_reference_in_starter_readme() -
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             starter_readme_path.read_text(encoding="utf-8") + "\nSee `deliverable_content.md` for more detail.\n",
             encoding="utf-8",
@@ -212,7 +235,7 @@ def test_bundle_validation_flags_unpublished_endpoint_reference_in_starter_readm
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             starter_readme_path.read_text(encoding="utf-8")
             + "\nKeep `POST /and-resolutions` stable while you work.\n",
@@ -244,7 +267,7 @@ def test_bundle_validation_flags_generic_starter_readme_without_domain_entities(
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_readme_path = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
+        starter_readme_path = Path(bundle.root_dir) / "public" / "checks" / run.artifacts.task_agent_spec.deliverables[0].id / "README.md"
         starter_readme_path.write_text(
             "# Starter\n\n"
             "Serve the current state safely under load.\n\n"
@@ -281,8 +304,14 @@ def test_bundle_validation_flags_runtime_protocol_bundle_marked_authored_when_pl
             execute_nodes=False,
         )
         bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
-        starter_root = Path(bundle.root_dir) / "public" / "starter" / run.artifacts.task_agent_spec.deliverables[0].id
-        manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+        starter_root = Path(bundle.root_dir) / "public" / "starter"
+        manifest_path = (
+            Path(bundle.root_dir)
+            / "private"
+            / "grader"
+            / run.artifacts.task_agent_spec.deliverables[0].id
+            / "deliverable.json"
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["runtime_protocol_bundle"] = {
             "source": "openai_live",
@@ -331,6 +360,7 @@ def test_ensure_task_agent_deliverable_briefs_normalizes_stale_required_endpoint
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -361,6 +391,7 @@ def test_ensure_task_agent_deliverable_briefs_falls_back_when_only_health_surviv
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -388,6 +419,7 @@ def test_validation_rejects_stale_required_endpoint_not_in_public_surface() -> N
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     assert deliverable.learner_starter_surface is not None
@@ -406,6 +438,7 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
         title="Inventory Reservation Service",
         summary="Build a concurrency-safe inventory reservation backend.",
         design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
     )
     deliverable = spec.deliverables[0]
     brief = deliverable.learner_brief or build_task_agent_deliverable_brief(spec, deliverable)
@@ -443,3 +476,140 @@ def test_seeded_workspace_validation_rejects_secondary_brief_duplication() -> No
         )
         assert not result.valid
         assert any(issue.code == "deprecated_secondary_brief_present" for issue in result.errors)
+
+
+def test_seeded_workspace_validator_accepts_source_code_refs_from_project_root() -> None:
+    """The seeded learner workspace's review-area README sits at
+    ``.coursegen/review_areas/<id>/README.md`` and references both
+    sibling artifacts and source-code files that live at the workspace
+    project root (e.g. ``app/main.py``).
+
+    Old behavior: validator passed reference_root=readme.parent only, so
+    every source-code reference falsely flagged ``starter_readme_missing_local_reference``
+    as soon as a learner workspace got seeded for a published course.
+
+    Fix: multi-root resolution — README references resolve under the
+    README's own directory OR the workspace project root.
+    """
+    design_spec = _inventory_design()
+    spec, _origin_template = build_task_agent_scaffold(
+        title="Inventory Reservation Service",
+        summary="Build a concurrency-safe inventory reservation backend.",
+        design_spec=design_spec,
+        planner_deliverables=_inventory_planner_deliverables(),
+    )
+    deliverable = spec.deliverables[0]
+    brief = deliverable.learner_brief or build_task_agent_deliverable_brief(spec, deliverable)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        workspace_root = Path(temp_dir)
+        review_area_dir = workspace_root.joinpath(".coursegen/review_areas/exercise-1")
+        review_area_dir.mkdir(parents=True)
+        workspace_root.joinpath("README.md").write_text("# Inventory Reservation Service\n", encoding="utf-8")
+        # Materialize the source-code files the README references at the
+        # workspace project root (NOT alongside the review-area README).
+        assert deliverable.learner_starter_surface is not None
+        for editable in deliverable.learner_starter_surface.primary_editable_paths:
+            target = workspace_root.joinpath(editable)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# learner-owned\n", encoding="utf-8")
+        # Sibling artifact next to the review-area README (the visible check
+        # script is named in the README's "Support files" section). The
+        # multi-root validator should find it under readme.parent.
+        review_area_dir.joinpath("run_visible_checks.py").write_text(
+            "# visible check script\n", encoding="utf-8",
+        )
+        review_area_dir.joinpath("README.md").write_text(
+            render_learner_starter_readme(
+                title=deliverable.title,
+                summary=deliverable.objective,
+                learning_outcomes=list(deliverable.learning_outcomes),
+                brief=brief,
+            ),
+            encoding="utf-8",
+        )
+
+        result = validate_seeded_learner_workspace(
+            spec, workspace_root, deliverable_ids=["exercise-1"],
+        )
+        # The validator may still emit other findings, but it MUST NOT
+        # falsely flag source-code references that exist at the workspace
+        # project root.
+        local_ref_errors = [
+            issue for issue in result.errors
+            if issue.code == "starter_readme_missing_local_reference"
+        ]
+        assert not local_ref_errors, (
+            "Seeded-workspace validator falsely flagged source-code references "
+            f"that exist at the project root: {[i.message for i in local_ref_errors]}"
+        )
+
+
+def test_bundle_validation_resolves_readme_refs_against_readme_dir_not_starter_root() -> None:
+    """Bug 1, on the validator side.
+
+    Under the shared-codebase layout, README sits at
+    ``public/checks/<id>/README.md`` and references the script as
+    ``run_visible_checks.py`` (sibling in the same directory). The
+    validator was resolving those references against ``starter_root``
+    (``public/starter/``), which never contains the per-deliverable
+    visible script — so every shared-codebase course got falsely flagged
+    with ``starter_readme_missing_local_reference``.
+
+    Fix: resolve README references against the README's OWN directory.
+    The same rule also works for the legacy non-shared layout, where the
+    README under ``public/starter/<id>/README.md`` references its
+    ``checks/run_visible_checks.py`` sibling subdirectory.
+    """
+    design_spec = _inventory_design()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        store = SQLiteWorkflowStore(db_path=f"{temp_dir}/test.db")
+        workflow_service = WorkflowService(
+            store,
+            materializer=ArtifactMaterializer(base_dir=f"{temp_dir}/generated"),
+        )
+        run = workflow_service.create_run_from_explicit_plan(
+            intake=GenerationIntake(
+                title="Inventory Reservation Service",
+                problem_statement=(
+                    "Build a multi-warehouse inventory reservation service with FastAPI, Postgres, and Redis. "
+                    "Keep reservations correct under concurrency, retries, and stock transfers."
+                ),
+            ),
+            design_spec=design_spec,
+            execute_nodes=False,
+        )
+        bundle = workflow_service.materializer.materialize_run(run, overwrite=True)
+        spec = run.artifacts.task_agent_spec
+        # Pre-condition: this is a shared-codebase course.
+        assert spec.course_structure.shared_codebase
+        # The materializer should have written the README and the visible
+        # script side-by-side under public/checks/<id>/.
+        for deliverable in spec.deliverables:
+            readme_path = (
+                Path(bundle.root_dir) / "public" / "checks" / deliverable.id / "README.md"
+            )
+            visible_script_path = (
+                Path(bundle.root_dir) / "public" / "checks" / deliverable.id / "run_visible_checks.py"
+            )
+            assert readme_path.exists(), f"expected README at {readme_path}"
+            assert visible_script_path.exists(), f"expected script at {visible_script_path}"
+            # The README must reference the script using the sibling-relative
+            # name ('run_visible_checks.py') so the validator's reference
+            # resolution lands on the actual file.
+            readme_content = readme_path.read_text(encoding="utf-8")
+            assert "run_visible_checks.py" in readme_content
+            # And it must NOT use the legacy nested 'checks/' prefix.
+            assert "checks/run_visible_checks.py" not in readme_content
+
+        # End-to-end: validator should pass these references (no
+        # starter_readme_missing_local_reference findings).
+        result = validate_materialized_bundle(spec, bundle)
+        local_ref_errors = [
+            issue for issue in result.errors
+            if issue.code == "starter_readme_missing_local_reference"
+        ]
+        assert not local_ref_errors, (
+            "Validator falsely flagged sibling 'run_visible_checks.py' as missing. "
+            f"Errors: {[i.message for i in local_ref_errors]}"
+        )

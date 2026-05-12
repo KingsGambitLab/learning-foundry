@@ -23,7 +23,7 @@ from app.services.coursegen_logging import log_coursegen_event
 from app.services.bundle_validation import inspect_materialized_starter_surface, validate_materialized_bundle
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.failure_context_builder import build_failure_context
-from app.services.generated_test_harness import GeneratedTestBaselineVerifier
+from app.services.generated_test_harness import BaselineSuiteOutcome, GeneratedTestBaselineVerifier
 from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringService
 from app.services.public_surface_quality import starter_surface_markers
 from app.services.spec_validation import validate_task_agent_spec
@@ -31,7 +31,6 @@ from app.services.task_agent_retry_service import TaskAgentRetryService
 from app.services.task_agent_repair_service import TaskAgentRepairService
 from app.services.task_agent_starter_templates import (
     HIDDEN_GRADER_SCRIPT_PATH,
-    HIDDEN_MANIFEST_PATH,
     RUNTIME_HIDDEN_CHECK_SCRIPT_PATH,
     RUNTIME_VISIBLE_CHECK_SCRIPT_PATH,
 )
@@ -73,7 +72,7 @@ class LangGraphAssignmentGraph:
         test_authoring_service: OpenAITestScriptAuthoringService | None = None,
         retry_service: TaskAgentRetryService | None = None,
         baseline_verifier: GeneratedTestBaselineVerifier | None = None,
-        max_authoring_attempts: int = 3,
+        max_authoring_attempts: int = 5,
         max_reviewer_attempts: int = 2,
     ) -> None:
         self.sandbox_runner = sandbox_runner
@@ -509,11 +508,31 @@ class LangGraphAssignmentGraph:
                 )
             )
         else:
+            # Shared-codebase layout: visible script at public/checks/<id>/run_visible_checks.py
+            # and hidden script at private/grader/<id>/run_hidden_checks.py.
+            # Legacy non-shared courses keep the per-deliverable starter layout.
+            spec_for_paths = run.artifacts.task_agent_spec
+            shared_codebase = bool(
+                spec_for_paths is not None and spec_for_paths.course_structure.shared_codebase
+            )
             public_dir = Path(workspace.public_dir)
+            workspace_root = Path(workspace.root_dir)
             for deliverable in run.artifacts.task_agent_spec.deliverables:  # type: ignore[union-attr]
-                starter_root = public_dir / "starter" / deliverable.id
-                visible_path = starter_root / "checks" / "run_visible_checks.py"
-                hidden_path = starter_root / HIDDEN_GRADER_SCRIPT_PATH
+                if shared_codebase:
+                    visible_path = (
+                        public_dir / "checks" / deliverable.id / "run_visible_checks.py"
+                    )
+                    hidden_path = (
+                        workspace_root
+                        / "private"
+                        / "grader"
+                        / deliverable.id
+                        / "run_hidden_checks.py"
+                    )
+                else:
+                    starter_root = public_dir / "starter" / deliverable.id
+                    visible_path = starter_root / "checks" / "run_visible_checks.py"
+                    hidden_path = starter_root / HIDDEN_GRADER_SCRIPT_PATH
                 if not visible_path.exists() or not hidden_path.exists():
                     status = WorkflowNodeStatus.failed
                     findings.append(
@@ -841,38 +860,61 @@ class LangGraphAssignmentGraph:
             return {("generated_test_workspace_missing", None)}
 
         public_dir = Path(workspace.public_dir)
+        private_dir = Path(workspace.private_dir)
         known_ids = {deliverable.id for deliverable in spec.deliverables}
         target_ids = set(deliverable_ids) & known_ids if deliverable_ids else known_ids
         blockers: set[tuple[str, str | None]] = set()
+        any_targeted = False
         for deliverable in spec.deliverables:
             if deliverable.id not in target_ids:
                 continue
-            deliverable_dir = public_dir / "starter" / deliverable.id
-            manifest_path = deliverable_dir / HIDDEN_MANIFEST_PATH
-            visible_check_path = deliverable_dir / "checks" / "run_visible_checks.py"
-            hidden_check_path = deliverable_dir / HIDDEN_GRADER_SCRIPT_PATH
+            any_targeted = True
+            manifest_path = (
+                private_dir / "grader" / deliverable.id / "deliverable.json"
+            )
+            visible_check_path = (
+                public_dir / "checks" / deliverable.id / "run_visible_checks.py"
+            )
+            hidden_check_path = (
+                private_dir / "grader" / deliverable.id / "run_hidden_checks.py"
+            )
             if not manifest_path.exists():
-                blockers.add(("generated_test_manifest_missing", f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}"))
+                blockers.add(
+                    (
+                        "generated_test_manifest_missing",
+                        f"grader/{deliverable.id}/deliverable.json",
+                    )
+                )
                 continue
             if not visible_check_path.exists() or not hidden_check_path.exists():
-                blockers.add(("generated_test_scripts_missing", f"starter/{deliverable.id}"))
+                blockers.add(("generated_test_scripts_missing", f"checks/{deliverable.id}"))
                 continue
 
             manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             generated_test_scripts = manifest_payload.get("generated_test_scripts") or {}
             generated_test_source = str(generated_test_scripts.get("source") or "").strip().lower()
             if generated_test_source in {"", "starter_default"}:
-                blockers.add(("generated_test_scripts_not_authored", f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}"))
+                blockers.add(
+                    (
+                        "generated_test_scripts_not_authored",
+                        f"grader/{deliverable.id}/deliverable.json",
+                    )
+                )
 
-            baseline = self.baseline_verifier.verify_deliverable(
-                workspace_root=deliverable_dir,
+        if any_targeted:
+            baseline = self.baseline_verifier.verify_course(
+                workspace_root=public_dir,
+                private_root=private_dir,
                 spec=spec,
-                starter_type=deliverable.starter_type,
             )
-            blockers.update(
-                (issue.code, issue.relative_path or f"starter/{deliverable.id}")
-                for issue in baseline.errors
-            )
+            for issue in baseline.errors:
+                # Group per-deliverable findings under their own checks/<id> key.
+                location_default = (
+                    f"checks/{issue.deliverable_id}"
+                    if issue.deliverable_id is not None
+                    else None
+                )
+                blockers.add((issue.code, issue.relative_path or location_default))
         return blockers
 
     def _blocking_issue_keys(
@@ -916,8 +958,32 @@ class LangGraphAssignmentGraph:
         if state["run"].artifacts.workspace_snapshot is not None:
             placeholder_deliverables = []
             wrapper_deliverables = []
+            shared_codebase = bool(spec.course_structure.shared_codebase)
+            # Partial starters ship with explicit unimplemented stubs BY
+            # DESIGN (the authoring prompt requires `status_code=501` /
+            # `raise NotImplementedError` placeholders so visible/hidden
+            # tests fail until the learner implements them). Flagging
+            # those placeholders as an error is structurally
+            # contradictory and forces reviewer_repair to regenerate the
+            # workspace — at which point previously-verified files
+            # (Dockerfile FROM line, install.sh, lockfiles) get blown
+            # away. Skip the placeholder check entirely for partial
+            # starters; the wrapper check still applies (partial
+            # starters must still ship REAL files with substantive
+            # learner-owned structure, not generated-runtime wrappers).
+            partial_starter = (
+                spec.runtime_dependencies.starter_type.value == "partial"
+            )
+            shared_starter_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter"
             for deliverable in spec.deliverables:
-                deliverable_dir = Path(state["run"].artifacts.workspace_snapshot.public_dir) / "starter" / deliverable.id
+                # Shared-codebase courses keep one shared starter root at
+                # public/starter/; legacy non-shared courses use the
+                # per-deliverable subtree public/starter/<deliverable.id>/.
+                deliverable_dir = (
+                    shared_starter_dir
+                    if shared_codebase
+                    else shared_starter_dir / deliverable.id
+                )
                 editable_paths = learner_editable_paths_for_deliverable(spec, deliverable)
                 deliverable_has_placeholder = False
                 deliverable_has_wrapper = False
@@ -926,9 +992,14 @@ class LangGraphAssignmentGraph:
                     try:
                         source = deliverable_app.read_text(encoding="utf-8")
                     except OSError:
+                        # Missing-file detection is still useful for
+                        # partial starters — a partial starter must
+                        # at least HAVE the editable file present.
                         deliverable_has_placeholder = True
                         continue
-                    if "Implement /run" in source or "status_code=501" in source:
+                    if not partial_starter and (
+                        "Implement /run" in source or "status_code=501" in source
+                    ):
                         deliverable_has_placeholder = True
                     if "from runtime.task_agent_runtime import" in source or (
                         "app = create_app_from_manifest(" in source
@@ -1290,17 +1361,25 @@ class LangGraphAssignmentGraph:
             )
         else:
             public_dir = Path(workspace.public_dir)
+            private_dir = Path(workspace.private_dir)
+            deliverable_eligible_for_baseline: list[str] = []
             for deliverable in spec.deliverables:
-                deliverable_dir = public_dir / "starter" / deliverable.id
-                manifest_path = deliverable_dir / HIDDEN_MANIFEST_PATH
-                visible_check_path = deliverable_dir / "checks" / "run_visible_checks.py"
-                hidden_check_path = deliverable_dir / HIDDEN_GRADER_SCRIPT_PATH
-                tasks_path = deliverable_dir / ".vscode" / "tasks.json"
-                missing_paths = [
-                    path.relative_to(public_dir).as_posix()
-                    for path in (manifest_path, visible_check_path, hidden_check_path, tasks_path)
-                    if not path.exists()
-                ]
+                manifest_path = (
+                    private_dir / "grader" / deliverable.id / "deliverable.json"
+                )
+                visible_check_path = (
+                    public_dir / "checks" / deliverable.id / "run_visible_checks.py"
+                )
+                hidden_check_path = (
+                    private_dir / "grader" / deliverable.id / "run_hidden_checks.py"
+                )
+                missing_paths: list[str] = []
+                if not manifest_path.exists():
+                    missing_paths.append(f"private/grader/{deliverable.id}/deliverable.json")
+                if not visible_check_path.exists():
+                    missing_paths.append(f"public/checks/{deliverable.id}/run_visible_checks.py")
+                if not hidden_check_path.exists():
+                    missing_paths.append(f"private/grader/{deliverable.id}/run_hidden_checks.py")
                 if missing_paths:
                     learner_checks_valid = False
                     findings.append(
@@ -1323,6 +1402,7 @@ class LangGraphAssignmentGraph:
                 starter_repo_source = str(starter_repo_bundle.get("source") or "").strip().lower()
                 runtime_protocol_bundle = manifest_payload.get("runtime_protocol_bundle") or {}
                 runtime_protocol_source = str(runtime_protocol_bundle.get("source") or "").strip().lower()
+                manifest_location = f"grader/{deliverable.id}/deliverable.json"
                 if (
                     visible_check_command != f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
                     or hidden_check_command != f"sh {RUNTIME_HIDDEN_CHECK_SCRIPT_PATH}"
@@ -1340,7 +1420,7 @@ class LangGraphAssignmentGraph:
                                 "plus a real learner starter surface."
                             ),
                             code="generated_test_commands_incomplete",
-                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                            location=manifest_location,
                         )
                     )
                     continue
@@ -1356,7 +1436,7 @@ class LangGraphAssignmentGraph:
                                 "Authoring must produce the learner-owned repo bundle before review."
                             ),
                             code="starter_repo_bundle_not_authored",
-                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                            location=manifest_location,
                         )
                     )
                     continue
@@ -1372,7 +1452,7 @@ class LangGraphAssignmentGraph:
                                 "Authoring must produce the real runtime scripts before review."
                             ),
                             code="runtime_protocol_bundle_not_authored",
-                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                            location=manifest_location,
                         )
                     )
                     continue
@@ -1388,18 +1468,28 @@ class LangGraphAssignmentGraph:
                                 "Authoring must produce real visible and hidden scripts from the materialized workspace."
                             ),
                             code="generated_test_scripts_not_authored",
-                            location=f"starter/{deliverable.id}/{HIDDEN_MANIFEST_PATH}",
+                            location=manifest_location,
                         )
                     )
                     continue
 
-                baseline = self.baseline_verifier.verify_deliverable(
-                    workspace_root=deliverable_dir,
+                deliverable_eligible_for_baseline.append(deliverable.id)
+
+            # Run the baseline matrix ONCE for the shared starter, then attribute
+            # findings back to the deliverable that originated each issue.
+            if deliverable_eligible_for_baseline:
+                baseline = self.baseline_verifier.verify_course(
+                    workspace_root=public_dir,
+                    private_root=private_dir,
                     spec=spec,
-                    starter_type=deliverable.starter_type,
                 )
                 for issue in baseline.errors:
                     learner_checks_valid = False
+                    location_default = (
+                        f"checks/{issue.deliverable_id}"
+                        if issue.deliverable_id is not None
+                        else None
+                    )
                     findings.append(
                         ReviewerFinding(
                             category="tests_review",
@@ -1407,10 +1497,15 @@ class LangGraphAssignmentGraph:
                             title=issue.code,
                             detail=issue.message,
                             code=issue.code,
-                            location=issue.relative_path or f"starter/{deliverable.id}",
+                            location=issue.relative_path or location_default,
                         )
                     )
                 for issue in baseline.warnings:
+                    location_default = (
+                        f"checks/{issue.deliverable_id}"
+                        if issue.deliverable_id is not None
+                        else None
+                    )
                     findings.append(
                         ReviewerFinding(
                             category="tests_review",
@@ -1418,25 +1513,32 @@ class LangGraphAssignmentGraph:
                             title=issue.code,
                             detail=issue.message,
                             code=issue.code,
-                            location=issue.relative_path or f"starter/{deliverable.id}",
+                            location=issue.relative_path or location_default,
                         )
                     )
                 if baseline.valid:
-                    outcome_bits = [
-                        f"{outcome.baseline}:{outcome.suite_type}={len(outcome.report.tests)}"
-                        for outcome in baseline.outcomes
-                    ]
-                    findings.append(
-                        ReviewerFinding(
-                            category="tests_review",
-                            severity=ReviewerFindingSeverity.info,
-                            title=f"Generated tests discriminate correctly for {deliverable.id}",
-                            detail=(
-                                "Baseline matrix verified the empty repo and untouched starter against the generated visible "
-                                "and hidden scripts: " + ", ".join(outcome_bits)
-                            ),
+                    outcomes_per_deliverable: dict[str, list[BaselineSuiteOutcome]] = {}
+                    for outcome in baseline.outcomes:
+                        if outcome.deliverable_id is None:
+                            continue
+                        outcomes_per_deliverable.setdefault(outcome.deliverable_id, []).append(outcome)
+                    for deliverable_id in deliverable_eligible_for_baseline:
+                        outcomes_for_d = outcomes_per_deliverable.get(deliverable_id, [])
+                        outcome_bits = [
+                            f"{outcome.baseline}:{outcome.suite_type}={len(outcome.report.tests)}"
+                            for outcome in outcomes_for_d
+                        ]
+                        findings.append(
+                            ReviewerFinding(
+                                category="tests_review",
+                                severity=ReviewerFindingSeverity.info,
+                                title=f"Generated tests discriminate correctly for {deliverable_id}",
+                                detail=(
+                                    "Baseline matrix verified the empty repo and untouched shared starter against the generated visible "
+                                    "and hidden scripts: " + ", ".join(outcome_bits)
+                                ),
+                            )
                         )
-                    )
 
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or not validation.valid or not learner_checks_valid:

@@ -651,6 +651,23 @@ class SQLiteWorkflowStore:
             ).fetchall()
         return [LearnerWorkspaceSession.model_validate(json.loads(row["payload_json"])) for row in rows]
 
+    def list_all_learner_workspace_sessions(self) -> list[LearnerWorkspaceSession]:
+        """Return every workspace session across all enrollments.
+
+        Used by `LearnerStudioService.reconcile_stale_sessions` on
+        server startup to find sessions whose backing container no
+        longer exists after a process restart.
+        """
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM learner_workspace_sessions
+                ORDER BY datetime(updated_at) DESC
+                """,
+            ).fetchall()
+        return [LearnerWorkspaceSession.model_validate(json.loads(row["payload_json"])) for row in rows]
+
     def save_publish_snapshot(self, snapshot: PublishSnapshot) -> PublishSnapshot:
         payload = json.dumps(snapshot.model_dump(mode="json"))
         with self._lock, self._session() as connection:
@@ -890,12 +907,50 @@ class SQLiteWorkflowStore:
                         "task_agent_spec": self._normalize_task_agent_spec_payload(task_agent_spec),
                     },
                 }
-        return payload
+        # Pre-refactor rows may carry the legacy 4-value `starter_type` strings
+        # at intake.starter_type and other nested specs. Coerce recursively.
+        return self._coerce_starter_type_recursively(payload)
+
+    @staticmethod
+    def _coerce_legacy_starter_type(value: object) -> str | None:
+        """Map legacy four-value starter_type strings onto the new two-value enum.
+
+        Pre-refactor rows may carry `bare_stub`, `partial_implementation`,
+        `working_buggy`, or `working_suboptimal`. Defensive read-side coerce so
+        we never feed those into the new Pydantic enum.
+        """
+        if not isinstance(value, str):
+            return None
+        legacy = value.strip().lower()
+        if legacy == "bare_stub":
+            return "empty"
+        if legacy in {"partial_implementation", "working_buggy", "working_suboptimal"}:
+            return "partial"
+        if legacy in {"empty", "partial"}:
+            return legacy
+        return None
 
     def _normalize_task_agent_spec_payload(self, payload: dict) -> dict:
         package_type = payload.get("package_type", "progressive_codebase_course")
         course_structure = payload.get("course_structure")
         runtime_dependencies = payload.get("runtime_dependencies")
+        if isinstance(runtime_dependencies, dict):
+            legacy_starter = self._coerce_legacy_starter_type(
+                runtime_dependencies.get("starter_type")
+            )
+            if legacy_starter is not None:
+                runtime_dependencies = {
+                    **runtime_dependencies,
+                    "starter_type": legacy_starter,
+                }
+        deliverables_payload = payload.get("deliverables")
+        if isinstance(deliverables_payload, list):
+            sanitized_deliverables = []
+            for entry in deliverables_payload:
+                if isinstance(entry, dict) and "starter_type" in entry:
+                    entry = {key: value for key, value in entry.items() if key != "starter_type"}
+                sanitized_deliverables.append(entry)
+            payload = {**payload, "deliverables": sanitized_deliverables}
         capabilities = payload.get("capabilities")
         assessment_strategy = payload.get("assessment_strategy")
         project_contract = payload.get("project_contract")
@@ -1004,7 +1059,7 @@ class SQLiteWorkflowStore:
             "runtime_dependencies": (
                 {
                     "execution_surface": "http_service",
-                    "starter_type": StarterType.partial_implementation.value,
+                    "starter_type": StarterType.partial.value,
                     "implementation_language": resolved_language,
                     "language_version": resolved_language_version,
                     "application_framework": resolved_framework,
@@ -1024,7 +1079,7 @@ class SQLiteWorkflowStore:
                 if runtime_dependencies is None
                 else {
                     **runtime_dependencies,
-                    "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial_implementation.value,
+                    "starter_type": runtime_dependencies.get("starter_type") or StarterType.partial.value,
                     "implementation_language": runtime_dependencies.get("implementation_language") or resolved_language,
                     "language_version": runtime_dependencies.get("language_version") or resolved_language_version,
                     "application_framework": runtime_dependencies.get("application_framework") or resolved_framework,
@@ -1087,6 +1142,24 @@ class SQLiteWorkflowStore:
                 **payload,
                 "course_family_id": payload.get("id"),
             }
+        # CourseRun payloads carry several nested specs (generated_plan,
+        # shared_design_spec, design_spec, runtime_dependencies, ...) — each of
+        # which may have a legacy `starter_type` string written by pre-refactor
+        # rows. Walk the whole tree and coerce.
+        return self._coerce_starter_type_recursively(payload)
+
+    def _coerce_starter_type_recursively(self, payload):
+        if isinstance(payload, dict):
+            coerced: dict = {}
+            for key, value in payload.items():
+                if key == "starter_type":
+                    normalized = self._coerce_legacy_starter_type(value)
+                    coerced[key] = normalized if normalized is not None else value
+                else:
+                    coerced[key] = self._coerce_starter_type_recursively(value)
+            return coerced
+        if isinstance(payload, list):
+            return [self._coerce_starter_type_recursively(item) for item in payload]
         return payload
 
     def _normalize_learner_enrollment_payload(self, payload: dict) -> dict:
