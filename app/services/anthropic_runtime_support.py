@@ -16,6 +16,7 @@ is:
 """
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import queue
@@ -179,25 +180,144 @@ def _call_anthropic_messages_parse(
     max_tokens: int,
     extra_request_kwargs: dict[str, Any] | None = None,
 ) -> tuple[BaseModel, Any]:
-    """One Anthropic structured-output call. Returns (parsed pydantic
-    instance, usage namespace). Raises LLMStructuredOutputError if the
-    SDK returns no parsed payload (refusal / safety / early cut)."""
-    response = client.messages.parse(
-        model=model,
-        max_tokens=max_tokens,
-        system=_build_system_blocks(system),
-        messages=[{"role": "user", "content": user}],
-        output_format=text_format,
-        thinking={"type": "disabled"},
-        timeout=request_timeout_s,
-        **(extra_request_kwargs or {}),
-    )
+    """One Anthropic structured-output call.
+
+    Tries ``client.messages.parse(output_format=...)`` first. If
+    Anthropic rejects the call with the specific
+    ``BadRequestError: Schema is too complex.`` (deep Pydantic models
+    like ``TaskAgentServiceSpec`` exceed the server-side complexity
+    ceiling), falls back to ``client.messages.create(...)`` with the
+    schema embedded in the system prompt, and validates the response
+    text with Pydantic on our side.
+
+    Raises ``LLMStructuredOutputError`` if neither path produces a
+    parseable payload. Other ``BadRequestError`` shapes propagate
+    untouched."""
+    try:
+        response = client.messages.parse(
+            model=model,
+            max_tokens=max_tokens,
+            system=_build_system_blocks(system),
+            messages=[{"role": "user", "content": user}],
+            output_format=text_format,
+            thinking={"type": "disabled"},
+            timeout=request_timeout_s,
+            **(extra_request_kwargs or {}),
+        )
+    except Exception as exc:
+        if _is_schema_too_complex_error(exc):
+            return _call_anthropic_messages_create_with_json_fallback(
+                client=client,
+                model=model,
+                system=system,
+                user=user,
+                text_format=text_format,
+                request_timeout_s=request_timeout_s,
+                max_tokens=max_tokens,
+                extra_request_kwargs=extra_request_kwargs,
+            )
+        raise
     parsed = getattr(response, "parsed_output", None)
     if parsed is None:
         raise LLMStructuredOutputError(
             "Anthropic structured response returned no parsed payload "
             "(refusal, safety stop, or max-tokens early cut)."
         )
+    return parsed, getattr(response, "usage", None)
+
+
+def _is_schema_too_complex_error(exc: Exception) -> bool:
+    """True for the specific Anthropic 400 the server returns when an
+    output_format / tool input_schema exceeds the complexity ceiling.
+
+    Detect on message substring rather than class identity so we don't
+    care whether the caller saw ``BadRequestError`` or another
+    ``APIStatusError`` subclass."""
+    try:
+        from anthropic import APIStatusError
+    except Exception:
+        APIStatusError = ()  # type: ignore[assignment]
+    if APIStatusError and not isinstance(exc, APIStatusError):  # type: ignore[arg-type]
+        return False
+    text = str(exc).lower()
+    return "schema is too complex" in text or "schema is too complex." in text
+
+
+_MD_FENCE_PREFIX = "```"
+
+
+def _unwrap_markdown_fence(text: str) -> str:
+    """Strip a wrapping ```json ... ``` fence if present. The
+    fallback prompt asks Claude for raw JSON, but the model still
+    sometimes wraps it."""
+    stripped = text.strip()
+    if not stripped.startswith(_MD_FENCE_PREFIX):
+        return stripped
+    body = stripped[len(_MD_FENCE_PREFIX):]
+    # Drop optional language tag on the first line.
+    first_newline = body.find("\n")
+    if first_newline != -1:
+        first_line = body[:first_newline].strip().lower()
+        if first_line in {"", "json"} or first_line.isalpha():
+            body = body[first_newline + 1:]
+    if body.rstrip().endswith(_MD_FENCE_PREFIX):
+        body = body.rstrip()[: -len(_MD_FENCE_PREFIX)]
+    return body.strip()
+
+
+def _call_anthropic_messages_create_with_json_fallback(
+    *,
+    client: Any,
+    model: str,
+    system: str,
+    user: str,
+    text_format: type[BaseModel],
+    request_timeout_s: float,
+    max_tokens: int,
+    extra_request_kwargs: dict[str, Any] | None,
+) -> tuple[BaseModel, Any]:
+    """Last-resort path when ``messages.parse()`` rejects the schema as
+    too complex: ask the model for raw JSON inline, then validate with
+    Pydantic on our side."""
+    schema = text_format.model_json_schema()
+    schema_text = json.dumps(schema, indent=2, sort_keys=True)
+    fallback_system = (
+        system
+        + "\n\n"
+        + "OUTPUT CONTRACT — your response MUST be a single JSON object that "
+        + "validates against the schema below. No prose, no markdown fences, "
+        + "no commentary. JSON only.\n\nSchema:\n"
+        + schema_text
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=_build_system_blocks(fallback_system),
+        messages=[{"role": "user", "content": user}],
+        thinking={"type": "disabled"},
+        timeout=request_timeout_s,
+        **(extra_request_kwargs or {}),
+    )
+    # Extract the first text block from response.content.
+    text_payload: str | None = None
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            text_payload = getattr(block, "text", None)
+            if text_payload:
+                break
+    if not text_payload:
+        raise LLMStructuredOutputError(
+            "Anthropic create-fallback returned no text content (refusal, "
+            "safety stop, or max-tokens early cut)."
+        )
+    unwrapped = _unwrap_markdown_fence(text_payload)
+    try:
+        parsed = text_format.model_validate_json(unwrapped)
+    except Exception as exc:
+        raise LLMStructuredOutputError(
+            f"Anthropic create-fallback produced text that did not parse "
+            f"into {text_format.__name__}: {exc}"
+        ) from exc
     return parsed, getattr(response, "usage", None)
 
 

@@ -187,3 +187,135 @@ def test_call_anthropic_messages_parse_enables_prompt_cache_on_system() -> None:
     assert any(
         (b.get("cache_control") == {"type": "ephemeral"}) for b in sys
     ), f"system content blocks should carry cache_control: {sys}"
+
+
+# ---------------- "Schema is too complex" fallback path ----------------
+
+
+def _make_schema_too_complex_error() -> Exception:
+    """Build the shape Anthropic returns when the output_format schema
+    blows past their server-side complexity ceiling. The SDK raises
+    ``anthropic.BadRequestError`` (a subclass of APIStatusError) with the
+    message ``Schema is too complex.``."""
+    from anthropic import BadRequestError
+
+    request = MagicMock()
+    response = MagicMock()
+    response.status_code = 400
+    response.headers = {}
+    body = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "Schema is too complex."},
+    }
+    # The SDK accepts (message, *, response, body) — pin shape loosely.
+    try:
+        return BadRequestError(
+            message="Schema is too complex.",
+            response=response,
+            body=body,
+        )
+    except TypeError:
+        return BadRequestError("Schema is too complex.")
+
+
+def test_call_anthropic_messages_parse_falls_back_to_create_on_schema_too_complex() -> None:
+    """When messages.parse() rejects the schema as too complex, the
+    helper must retry via messages.create() + prompt-engineered JSON
+    output, then validate the response text with Pydantic."""
+    schema_err = _make_schema_too_complex_error()
+
+    expected = _Echo(text="from-create", count=7)
+
+    client = MagicMock()
+    # messages.parse fails with the complexity error
+    client.messages.parse.side_effect = schema_err
+    # messages.create returns a text block carrying the JSON we want
+    text_block = SimpleNamespace(type="text", text=expected.model_dump_json())
+    client.messages.create.return_value = SimpleNamespace(
+        content=[text_block],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        ),
+    )
+
+    parsed, usage = _call_anthropic_messages_parse(
+        client=client,
+        model="claude-sonnet-4-6",
+        system="You are a JSON extractor.",
+        user="anything",
+        text_format=_Echo,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+    assert isinstance(parsed, _Echo)
+    assert parsed.text == "from-create"
+    assert parsed.count == 7
+    # The fallback must have actually invoked messages.create
+    assert client.messages.create.called
+    # The fallback's system prompt must mention JSON / schema so Claude
+    # knows what shape to emit
+    create_call = client.messages.create.call_args
+    sys_blocks = create_call.kwargs["system"]
+    sys_text = " ".join(
+        (b.get("text") or "") for b in sys_blocks if isinstance(b, dict)
+    ) if isinstance(sys_blocks, list) else str(sys_blocks)
+    assert "JSON" in sys_text or "json" in sys_text
+    # Usage namespace still surfaces
+    assert usage.input_tokens == 10
+
+
+def test_call_anthropic_messages_parse_raises_on_other_400() -> None:
+    """A non-complexity BadRequestError must propagate — we only fall
+    back on the specific 'Schema is too complex' signature."""
+    from anthropic import BadRequestError
+
+    client = MagicMock()
+    other_err = BadRequestError(
+        message="model is overloaded",
+        response=MagicMock(status_code=400, headers={}),
+        body={"type": "error", "error": {"type": "invalid_request_error", "message": "model is overloaded"}},
+    )
+    client.messages.parse.side_effect = other_err
+    with pytest.raises(BadRequestError):
+        _call_anthropic_messages_parse(
+            client=client,
+            model="claude-sonnet-4-6",
+            system="s",
+            user="u",
+            text_format=_Echo,
+            request_timeout_s=10.0,
+            max_tokens=512,
+        )
+    # The fallback must NOT have been called
+    client.messages.create.assert_not_called()
+
+
+def test_call_anthropic_fallback_strips_markdown_code_fences() -> None:
+    """messages.create() commonly wraps JSON in ```json ... ``` fences.
+    The fallback must unwrap them before Pydantic validation."""
+    schema_err = _make_schema_too_complex_error()
+    expected = _Echo(text="fenced", count=3)
+
+    client = MagicMock()
+    client.messages.parse.side_effect = schema_err
+    fenced = "```json\n" + expected.model_dump_json() + "\n```"
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=fenced)],
+        usage=None,
+    )
+
+    parsed, _ = _call_anthropic_messages_parse(
+        client=client,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_Echo,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+    assert isinstance(parsed, _Echo)
+    assert parsed.text == "fenced"
+    assert parsed.count == 3
