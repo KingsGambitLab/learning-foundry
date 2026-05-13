@@ -11,10 +11,21 @@ from pydantic import BaseModel, Field
 from app.services.anthropic_runtime_support import (
     LLMStructuredOutputError,
     _call_anthropic_messages_parse,
+    _reset_too_complex_schema_cache,
     extract_anthropic_usage,
     load_anthropic_env_file,
     resolve_anthropic_env_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_too_complex_cache():
+    """The known-too-complex schema cache lives at module scope so it
+    survives the subprocess boundary at runtime. For tests, clear it
+    before and after each case so order doesn't matter."""
+    _reset_too_complex_schema_cache()
+    yield
+    _reset_too_complex_schema_cache()
 
 
 # ---------------- env-file helpers ----------------
@@ -291,6 +302,205 @@ def test_call_anthropic_messages_parse_raises_on_other_400() -> None:
         )
     # The fallback must NOT have been called
     client.messages.create.assert_not_called()
+
+
+def test_second_call_with_known_complex_schema_skips_parse_entirely() -> None:
+    """Once Anthropic rejects a schema as too complex, every subsequent
+    call with the SAME schema must skip ``messages.parse()`` and go
+    straight to the create-fallback. Burning ~3 min waiting for a
+    deterministic 400 per call is wasteful."""
+    from app.services.anthropic_runtime_support import (
+        _reset_too_complex_schema_cache,
+    )
+
+    _reset_too_complex_schema_cache()  # hermetic test isolation
+
+    schema_err = _make_schema_too_complex_error()
+    expected = _Echo(text="cached-fallback", count=9)
+    fallback_response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=expected.model_dump_json())],
+        usage=None,
+    )
+
+    # First call: parse() fails, fallback runs.
+    client = MagicMock()
+    client.messages.parse.side_effect = schema_err
+    client.messages.create.return_value = fallback_response
+    _call_anthropic_messages_parse(
+        client=client,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u1",
+        text_format=_Echo,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+    assert client.messages.parse.call_count == 1
+    assert client.messages.create.call_count == 1
+
+    # Second call with same schema on a fresh client: parse() MUST be
+    # skipped (cache hit on fingerprint), fallback fires directly.
+    client2 = MagicMock()
+    client2.messages.create.return_value = fallback_response
+    parsed, _ = _call_anthropic_messages_parse(
+        client=client2,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u2",
+        text_format=_Echo,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+    assert parsed.text == "cached-fallback"
+    client2.messages.parse.assert_not_called()
+    assert client2.messages.create.call_count == 1
+
+
+def test_cache_is_per_schema_not_global() -> None:
+    """A different Pydantic class with a small schema must still go
+    through messages.parse() even after a different (deep) schema has
+    been marked too-complex."""
+    from app.services.anthropic_runtime_support import (
+        _reset_too_complex_schema_cache,
+    )
+
+    _reset_too_complex_schema_cache()
+
+    class _OtherSchema(BaseModel):
+        label: str
+        score: int
+
+    # 1) Mark _Echo's schema as too-complex via a real fallback.
+    client = MagicMock()
+    client.messages.parse.side_effect = _make_schema_too_complex_error()
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=_Echo(text="x", count=0).model_dump_json())],
+        usage=None,
+    )
+    _call_anthropic_messages_parse(
+        client=client,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_Echo,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+
+    # 2) Now call with _OtherSchema — parse() must still be the first
+    # attempt because the cache is per-fingerprint.
+    client2 = MagicMock()
+    other_parsed = _OtherSchema(label="ok", score=1)
+    client2.messages.parse.return_value = SimpleNamespace(parsed_output=other_parsed, usage=None)
+    parsed, _ = _call_anthropic_messages_parse(
+        client=client2,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_OtherSchema,
+        request_timeout_s=10.0,
+        max_tokens=512,
+    )
+    assert isinstance(parsed, _OtherSchema)
+    client2.messages.parse.assert_called_once()
+    client2.messages.create.assert_not_called()
+
+
+def test_outer_entry_point_passes_skip_parse_when_schema_cached_in_parent(monkeypatch) -> None:
+    """The parent-process cache must be consulted BEFORE we spawn the
+    subprocess. When the fingerprint is known-too-complex, the
+    subprocess gets ``skip_parse=True`` so the worker bypasses
+    ``messages.parse()`` and saves the ~3-minute toll."""
+    from app.services import anthropic_runtime_support as ars
+
+    ars._reset_too_complex_schema_cache()
+    ars._mark_schema_too_complex(_Echo)
+
+    captured: dict = {}
+
+    def fake_runner(*, skip_parse, **rest):
+        captured["skip_parse"] = skip_parse
+        captured.update(rest)
+        return {
+            "ok": True,
+            "parsed": _Echo(text="x", count=1).model_dump(mode="json"),
+            "usage": None,
+            "schema_too_complex_observed": False,
+        }
+
+    monkeypatch.setattr(ars, "_run_anthropic_call_in_subprocess", fake_runner)
+    ars.parse_structured_anthropic_response_with_hard_timeout(
+        api_key="k",
+        base_url=None,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_Echo,
+        request_timeout_s=5.0,
+        max_tokens=512,
+    )
+    assert captured["skip_parse"] is True
+
+
+def test_outer_entry_point_does_not_pass_skip_parse_for_new_schema(monkeypatch) -> None:
+    from app.services import anthropic_runtime_support as ars
+
+    ars._reset_too_complex_schema_cache()
+
+    captured: dict = {}
+
+    def fake_runner(*, skip_parse, **rest):
+        captured["skip_parse"] = skip_parse
+        return {
+            "ok": True,
+            "parsed": _Echo(text="x", count=1).model_dump(mode="json"),
+            "usage": None,
+            "schema_too_complex_observed": False,
+        }
+
+    monkeypatch.setattr(ars, "_run_anthropic_call_in_subprocess", fake_runner)
+    ars.parse_structured_anthropic_response_with_hard_timeout(
+        api_key="k",
+        base_url=None,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_Echo,
+        request_timeout_s=5.0,
+        max_tokens=512,
+    )
+    assert captured["skip_parse"] is False
+
+
+def test_outer_entry_point_marks_cache_when_worker_reports_observation(monkeypatch) -> None:
+    """When the worker actually saw the schema-too-complex 400 and
+    fell back, the parent must record that schema's fingerprint so the
+    NEXT call skips ``parse()`` from the start."""
+    from app.services import anthropic_runtime_support as ars
+
+    ars._reset_too_complex_schema_cache()
+    assert not ars._is_schema_known_too_complex(_Echo)
+
+    def fake_runner(*, skip_parse, **rest):
+        return {
+            "ok": True,
+            "parsed": _Echo(text="x", count=1).model_dump(mode="json"),
+            "usage": None,
+            "schema_too_complex_observed": True,
+        }
+
+    monkeypatch.setattr(ars, "_run_anthropic_call_in_subprocess", fake_runner)
+    ars.parse_structured_anthropic_response_with_hard_timeout(
+        api_key="k",
+        base_url=None,
+        model="claude-sonnet-4-6",
+        system="s",
+        user="u",
+        text_format=_Echo,
+        request_timeout_s=5.0,
+        max_tokens=512,
+    )
+    assert ars._is_schema_known_too_complex(_Echo)
 
 
 def test_call_anthropic_fallback_strips_markdown_code_fences() -> None:

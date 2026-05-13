@@ -16,6 +16,7 @@ is:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -169,6 +170,30 @@ def _build_system_blocks(system: str) -> list[dict[str, Any]]:
     ]
 
 
+_KNOWN_TOO_COMPLEX_SCHEMAS: set[str] = set()
+
+
+def _schema_fingerprint(text_format: type[BaseModel]) -> str:
+    """Stable hash of a Pydantic model's JSON schema. Two callsites that
+    use the same schema produce the same fingerprint."""
+    schema = text_format.model_json_schema()
+    payload = json.dumps(schema, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _mark_schema_too_complex(text_format: type[BaseModel]) -> None:
+    _KNOWN_TOO_COMPLEX_SCHEMAS.add(_schema_fingerprint(text_format))
+
+
+def _is_schema_known_too_complex(text_format: type[BaseModel]) -> bool:
+    return _schema_fingerprint(text_format) in _KNOWN_TOO_COMPLEX_SCHEMAS
+
+
+def _reset_too_complex_schema_cache() -> None:
+    """Test-only hook to drop the learned fingerprints between cases."""
+    _KNOWN_TOO_COMPLEX_SCHEMAS.clear()
+
+
 def _call_anthropic_messages_parse(
     *,
     client: Any,
@@ -182,17 +207,31 @@ def _call_anthropic_messages_parse(
 ) -> tuple[BaseModel, Any]:
     """One Anthropic structured-output call.
 
-    Tries ``client.messages.parse(output_format=...)`` first. If
-    Anthropic rejects the call with the specific
-    ``BadRequestError: Schema is too complex.`` (deep Pydantic models
-    like ``TaskAgentServiceSpec`` exceed the server-side complexity
-    ceiling), falls back to ``client.messages.create(...)`` with the
-    schema embedded in the system prompt, and validates the response
-    text with Pydantic on our side.
+    Tries ``client.messages.parse(output_format=...)`` first — unless
+    we have already observed Anthropic reject this exact schema as too
+    complex in a prior call, in which case we skip ``parse()`` and go
+    straight to the create-fallback (saves ~3 min per call against
+    deep schemas like ``TaskAgentServiceSpec``).
+
+    On the first ``BadRequestError: Schema is too complex.`` for any
+    new schema, fall back to ``client.messages.create(...)`` with the
+    JSON Schema embedded in the system prompt and remember the
+    fingerprint so subsequent calls skip ``parse()`` entirely.
 
     Raises ``LLMStructuredOutputError`` if neither path produces a
     parseable payload. Other ``BadRequestError`` shapes propagate
     untouched."""
+    if _is_schema_known_too_complex(text_format):
+        return _call_anthropic_messages_create_with_json_fallback(
+            client=client,
+            model=model,
+            system=system,
+            user=user,
+            text_format=text_format,
+            request_timeout_s=request_timeout_s,
+            max_tokens=max_tokens,
+            extra_request_kwargs=extra_request_kwargs,
+        )
     try:
         response = client.messages.parse(
             model=model,
@@ -206,6 +245,7 @@ def _call_anthropic_messages_parse(
         )
     except Exception as exc:
         if _is_schema_too_complex_error(exc):
+            _mark_schema_too_complex(text_format)
             return _call_anthropic_messages_create_with_json_fallback(
                 client=client,
                 model=model,
@@ -345,7 +385,58 @@ def parse_structured_anthropic_response_with_hard_timeout(
     so the LLMRouter can dispatch to either provider with the same
     guardrail: the SDK call lives inside a spawned process, and the
     parent process holds the authoritative wall-clock deadline.
+
+    Parent-side learned cache: when a prior call for this schema's
+    fingerprint observed ``BadRequestError: Schema is too complex.``,
+    skip ``messages.parse()`` from the start and go straight to the
+    create-fallback (saves ~3 min per call). On the first observation
+    for a new schema, record the fingerprint so the next call benefits.
     """
+    skip_parse = _is_schema_known_too_complex(text_format)
+    result = _run_anthropic_call_in_subprocess(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        system=system,
+        user=user,
+        text_format=text_format,
+        request_timeout_s=request_timeout_s,
+        max_tokens=max_tokens,
+        extra_request_kwargs=extra_request_kwargs or {},
+        skip_parse=skip_parse,
+    )
+    if not result.get("ok"):
+        error_text = result.get("error") or "Anthropic structured response subprocess failed."
+        trace = result.get("traceback")
+        if trace:
+            raise RuntimeError(f"{error_text}\n{trace}")
+        raise RuntimeError(error_text)
+    if result.get("schema_too_complex_observed"):
+        _mark_schema_too_complex(text_format)
+    parsed_payload = result.get("parsed")
+    parsed = text_format.model_validate(parsed_payload)
+    return _ParsedStructuredAnthropicResponse(
+        output_parsed=parsed,
+        usage=_usage_namespace(result.get("usage")),
+    )
+
+
+def _run_anthropic_call_in_subprocess(
+    *,
+    api_key: str,
+    base_url: str | None,
+    model: str,
+    system: str,
+    user: str,
+    text_format: type[BaseModel],
+    request_timeout_s: float,
+    max_tokens: int,
+    extra_request_kwargs: dict[str, Any],
+    skip_parse: bool,
+) -> dict[str, Any]:
+    """Spawn the worker, enforce the wall-clock deadline, return the
+    raw result dict. Extracted so the parent-side cache plumbing is
+    testable without spawning a real subprocess."""
     ctx = mp.get_context("spawn")
     result_queue: Any = ctx.Queue(maxsize=1)
     process = ctx.Process(
@@ -360,7 +451,8 @@ def parse_structured_anthropic_response_with_hard_timeout(
             text_format,
             request_timeout_s,
             max_tokens,
-            extra_request_kwargs or {},
+            extra_request_kwargs,
+            skip_parse,
         ),
     )
     process.start()
@@ -375,23 +467,11 @@ def parse_structured_anthropic_response_with_hard_timeout(
             f"Anthropic structured response exceeded {request_timeout_s:.0f}s and was terminated."
         )
     try:
-        result = result_queue.get_nowait()
+        return result_queue.get_nowait()
     except queue.Empty as exc:
         raise RuntimeError(
             f"Anthropic structured response subprocess exited without returning a result (exit_code={process.exitcode})."
         ) from exc
-    if not result.get("ok"):
-        error_text = result.get("error") or "Anthropic structured response subprocess failed."
-        trace = result.get("traceback")
-        if trace:
-            raise RuntimeError(f"{error_text}\n{trace}")
-        raise RuntimeError(error_text)
-    parsed_payload = result.get("parsed")
-    parsed = text_format.model_validate(parsed_payload)
-    return _ParsedStructuredAnthropicResponse(
-        output_parsed=parsed,
-        usage=_usage_namespace(result.get("usage")),
-    )
 
 
 def _structured_anthropic_parse_worker(
@@ -405,6 +485,7 @@ def _structured_anthropic_parse_worker(
     request_timeout_s: float,
     max_tokens: int,
     extra_request_kwargs: dict[str, Any],
+    skip_parse: bool = False,
 ) -> None:
     try:
         from anthropic import Anthropic
@@ -416,21 +497,65 @@ def _structured_anthropic_parse_worker(
         if base_url:
             client_kwargs["base_url"] = base_url
         client = Anthropic(**client_kwargs)
-        parsed, usage = _call_anthropic_messages_parse(
-            client=client,
-            model=model,
-            system=system,
-            user=user,
-            text_format=text_format,
-            request_timeout_s=request_timeout_s,
-            max_tokens=max_tokens,
-            extra_request_kwargs=extra_request_kwargs,
-        )
+        schema_too_complex_observed = False
+        if skip_parse:
+            # Parent told us this schema's been rejected before — skip
+            # the ~3-minute toll on parse() and go straight to fallback.
+            parsed, usage = _call_anthropic_messages_create_with_json_fallback(
+                client=client,
+                model=model,
+                system=system,
+                user=user,
+                text_format=text_format,
+                request_timeout_s=request_timeout_s,
+                max_tokens=max_tokens,
+                extra_request_kwargs=extra_request_kwargs,
+            )
+            # If the parent told us to skip parse, the schema is
+            # known-too-complex from a prior observation. Re-report so
+            # the parent's cache stays warm if the runtime is long-lived.
+            schema_too_complex_observed = True
+        else:
+            try:
+                response = client.messages.parse(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=_build_system_blocks(system),
+                    messages=[{"role": "user", "content": user}],
+                    output_format=text_format,
+                    thinking={"type": "disabled"},
+                    timeout=request_timeout_s,
+                    **(extra_request_kwargs or {}),
+                )
+            except Exception as exc:
+                if _is_schema_too_complex_error(exc):
+                    schema_too_complex_observed = True
+                    parsed, usage = _call_anthropic_messages_create_with_json_fallback(
+                        client=client,
+                        model=model,
+                        system=system,
+                        user=user,
+                        text_format=text_format,
+                        request_timeout_s=request_timeout_s,
+                        max_tokens=max_tokens,
+                        extra_request_kwargs=extra_request_kwargs,
+                    )
+                else:
+                    raise
+            else:
+                parsed = getattr(response, "parsed_output", None)
+                usage = getattr(response, "usage", None)
+                if parsed is None:
+                    raise LLMStructuredOutputError(
+                        "Anthropic structured response returned no parsed payload "
+                        "(refusal, safety stop, or max-tokens early cut)."
+                    )
         result_queue.put(
             {
                 "ok": True,
                 "parsed": parsed.model_dump(mode="json"),
                 "usage": _usage_to_plain(usage),
+                "schema_too_complex_observed": schema_too_complex_observed,
             }
         )
     except Exception as exc:  # pragma: no cover - subprocess path varies by platform/network
@@ -439,6 +564,7 @@ def _structured_anthropic_parse_worker(
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
                 "traceback": traceback.format_exc(),
+                "schema_too_complex_observed": False,
             }
         )
 
