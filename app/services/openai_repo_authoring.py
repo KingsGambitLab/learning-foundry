@@ -19,6 +19,7 @@ from app.services.openai_runtime_support import (
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
 )
+from app.services.runtime_normalization import normalize_runtime_protocol_dict
 from app.services.runtime_contract_surface import (
     dependency_contract_from_manifest,
     is_repo_contract_path,
@@ -599,6 +600,18 @@ class OpenAIStarterRepoAuthoringService:
             for relative_path, content in self._normalize_repo_files(bundle.files).items()
             if relative_path not in _RUNTIME_PROTOCOL_PATHS
         }
+        # Post-author platform normalization: cacheable Dockerfile + CPU-only
+        # torch for CPU sandboxes. Language-agnostic; driven by the creator's
+        # declared package_manager and the authored requirements file.
+        package_manager: str | None = None
+        runtime_dependencies = getattr(spec, "runtime_dependencies", None)
+        if runtime_dependencies is not None:
+            package_manager = getattr(runtime_dependencies, "package_manager", None)
+        normalized_runtime_files = normalize_runtime_protocol_dict(
+            normalized_runtime_files,
+            requirements_content=normalized_repo_files.get("requirements.txt"),
+            package_manager=package_manager,
+        )
         updated_files: list[str] = []
         notes = list(bundle.notes)
 
