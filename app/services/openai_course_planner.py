@@ -513,13 +513,21 @@ class OpenAICoursePlanner:
                 }
                 if not isinstance(model, str) or text_format is None:
                     raise RuntimeError("OpenAI course planner is missing model or text_format for structured parsing.")
-                return parse_structured_openai_response_with_hard_timeout(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    input=request_kwargs.get("input"),
+                from app.services.llm_router import (
+                    LLMTier,
+                    get_default_router,
+                    messages_to_system_user,
+                )
+
+                router = get_default_router()
+                system, user = messages_to_system_user(request_kwargs.get("input"))
+                return router.parse_structured(
+                    tier=LLMTier.sonnet,
+                    system=system,
+                    user=user,
                     text_format=text_format,
                     request_timeout_s=self.request_timeout_s,
+                    max_tokens=8_000,
                     extra_request_kwargs=extra_request_kwargs,
                 )
             except Exception as exc:  # pragma: no cover - network and SDK failures vary

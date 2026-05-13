@@ -141,30 +141,41 @@ ANTHROPIC_MODEL_HAIKU=claude-haiku-4-5-20251001 # optional, default below
 ANTHROPIC_BASE_URL=...                          # optional
 ```
 
-Defaults baked into code:
+Defaults baked into code (aliases, no date suffix per `anthropic-skills:claude-api`):
 
 | Tier | Default model id |
 |---|---|
 | `sonnet` | `claude-sonnet-4-6` |
-| `haiku` | `claude-haiku-4-5-20251001` |
+| `haiku` | `claude-haiku-4-5` |
 
 These can be rotated by editing the env file, no code change.
 
-### Structured output via forced `tool_use`
+### Structured output via `client.messages.parse()`
 
-1. `schema = pydantic.TypeAdapter(Model).json_schema()`. Strip
-   `$defs` / `definitions` ref cycles into inline form using a small
-   normalizer (Anthropic's tool input_schema does not support `$ref` /
-   `definitions` reliably for nested models — flatten or expand refs).
-2. Define one tool: `{"name": Model.__name__, "input_schema": schema,
-   "description": Model.__doc__ or "..."}`.
-3. Force `tool_choice={"type": "tool", "name": Model.__name__}`.
-4. From `response.content`, find the first block with
-   `block.type == "tool_use"` and `block.name == Model.__name__`.
-   `block.input` is a dict. Validate with `Model.model_validate(block.input)`.
-5. If no tool_use block (model declined / stopped early) → raise
-   `LLMStructuredOutputError`, which the callsite's existing retry loop
-   already handles.
+The Anthropic SDK ships a Pydantic-validated structured-output entry
+point: `client.messages.parse(model=..., output_format=PydanticModel,
+...)`. Supported on Sonnet 4.6 / Haiku 4.5. The SDK auto-strips JSON-
+schema features Anthropic doesn't honor (numerical bounds, string
+length, recursive `$ref`) and validates the response client-side, so we
+do not need to forge a forced-`tool_use` request or flatten `$defs`.
+
+Call shape:
+
+```python
+response = client.messages.parse(
+    model=model_id,
+    max_tokens=max_tokens,
+    system=system_blocks,
+    messages=[{"role": "user", "content": user_prompt}],
+    output_format=text_format,
+    thinking={"type": "disabled"},   # structured extraction, no chain-of-thought
+)
+parsed: BaseModel = response.parsed_output  # already a validated Pydantic instance
+```
+
+If `parsed_output` is `None` (refusal / safety stop / max_tokens early
+cut) → raise `LLMStructuredOutputError`, which the callsite's existing
+retry loop handles.
 
 ### Usage tracking
 

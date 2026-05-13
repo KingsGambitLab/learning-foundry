@@ -37,6 +37,7 @@ from app.services.task_agent_scaffolds import build_task_agent_scaffold
 
 class TaskAgentAuthoringSource(str, Enum):
     openai_live = "openai_live"
+    anthropic_live = "anthropic_live"
     deterministic_fallback = "deterministic_fallback"
 
 
@@ -188,54 +189,57 @@ class OpenAITaskAgentAuthoringService:
         self._last_customization_validation_error: str | None = None
 
     def status(self) -> TaskAgentAuthoringStatus:
-        config = self._config()
-        sdk_installed = self._openai_sdk_available()
-        api_key_present = bool(config.get("OPENAI_API_KEY"))
-        model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
+        # Authoring is now routed through the LLMRouter. Use its
+        # provider-aware status as the source of truth so /v1/task-agent-
+        # authoring/status reflects whichever provider is currently
+        # active (Anthropic by default, OpenAI when COURSE_GEN_LLM_PROVIDER
+        # is flipped).
+        from app.services.llm_router import get_default_router
+
+        router = get_default_router()
+        router_status = router.status()
         if not self.enabled:
             return TaskAgentAuthoringStatus(
+                provider=router_status["provider"],
                 available=False,
                 source=TaskAgentAuthoringSource.deterministic_fallback,
-                message="OpenAI authoring is disabled for this app instance.",
-                sdk_installed=sdk_installed,
-                api_key_present=api_key_present,
-                model_id=model_id,
-                env_file=self.env_file,
+                message="Authoring is disabled for this app instance.",
+                sdk_installed=router_status["sdk_installed"],
+                api_key_present=router_status["api_key_present"],
+                model_id=router_status["model_id"],
+                env_file=router_status["env_file"],
                 customization_validation_rejection_count=self._customization_validation_rejection_count,
                 last_customization_validation_error=self._last_customization_validation_error,
             )
-        if not sdk_installed:
+        available = router_status["available"]
+        if not available:
             return TaskAgentAuthoringStatus(
+                provider=router_status["provider"],
                 available=False,
                 source=TaskAgentAuthoringSource.deterministic_fallback,
-                message="The OpenAI Python SDK is not installed, so course authoring will use the deterministic scaffold.",
-                sdk_installed=False,
-                api_key_present=api_key_present,
-                model_id=model_id,
-                env_file=self.env_file,
+                message=router_status["message"],
+                sdk_installed=router_status["sdk_installed"],
+                api_key_present=router_status["api_key_present"],
+                model_id=router_status["model_id"],
+                env_file=router_status["env_file"],
                 customization_validation_rejection_count=self._customization_validation_rejection_count,
                 last_customization_validation_error=self._last_customization_validation_error,
             )
-        if not api_key_present:
-            return TaskAgentAuthoringStatus(
-                available=False,
-                source=TaskAgentAuthoringSource.deterministic_fallback,
-                message="OPENAI_API_KEY is not configured, so course authoring will use the deterministic scaffold.",
-                sdk_installed=True,
-                api_key_present=False,
-                model_id=model_id,
-                env_file=self.env_file,
-                customization_validation_rejection_count=self._customization_validation_rejection_count,
-                last_customization_validation_error=self._last_customization_validation_error,
-            )
+        provider_value = router_status["provider"]
+        live_source = (
+            TaskAgentAuthoringSource.anthropic_live
+            if provider_value == "anthropic"
+            else TaskAgentAuthoringSource.openai_live
+        )
         return TaskAgentAuthoringStatus(
+            provider=provider_value,
             available=True,
-            source=TaskAgentAuthoringSource.openai_live,
-            message="OpenAI authoring is ready to customize the learner-facing bundle.",
+            source=live_source,
+            message=router_status["message"],
             sdk_installed=True,
             api_key_present=True,
-            model_id=model_id,
-            env_file=self.env_file,
+            model_id=router_status["model_id"],
+            env_file=router_status["env_file"],
             customization_validation_rejection_count=self._customization_validation_rejection_count,
             last_customization_validation_error=self._last_customization_validation_error,
         )
@@ -637,13 +641,24 @@ class OpenAITaskAgentAuthoringService:
                         text_format=text_format,
                         timeout=self.request_timeout_s,
                     )
-                return parse_structured_openai_response_with_hard_timeout(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    input=input,
+                # Route the structured-output call through LLMRouter. The
+                # router resolves the active provider (Anthropic default,
+                # OpenAI fallback) and the tier→model mapping.
+                from app.services.llm_router import (
+                    LLMTier,
+                    get_default_router,
+                    messages_to_system_user,
+                )
+
+                router = get_default_router()
+                system, user = messages_to_system_user(input)
+                return router.parse_structured(
+                    tier=LLMTier.sonnet,
+                    system=system,
+                    user=user,
                     text_format=text_format,
                     request_timeout_s=self.request_timeout_s,
+                    max_tokens=16_000,
                     extra_request_kwargs={"temperature": temperature},
                 )
             except Exception as exc:  # pragma: no cover

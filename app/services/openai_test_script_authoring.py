@@ -335,13 +335,21 @@ class OpenAITestScriptAuthoringService:
                         text_format=text_format,
                         timeout=self.request_timeout_s,
                     )
-                return parse_structured_openai_response_with_hard_timeout(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    input=input,
+                from app.services.llm_router import (
+                    LLMTier,
+                    get_default_router,
+                    messages_to_system_user,
+                )
+
+                router = get_default_router()
+                system, user = messages_to_system_user(input)
+                return router.parse_structured(
+                    tier=LLMTier.sonnet,
+                    system=system,
+                    user=user,
                     text_format=text_format,
                     request_timeout_s=self.request_timeout_s,
+                    max_tokens=12_000,
                     extra_request_kwargs={"temperature": temperature},
                 )
             except Exception as exc:  # pragma: no cover
