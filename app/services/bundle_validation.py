@@ -14,6 +14,12 @@ from app.services.public_surface_quality import (
     endpoint_uses_archetype_words,
     endpoint_uses_title_slug,
 )
+# Imported for monkeypatching in tests; in production the indirection
+# also lets the LLM-judge wrapper consult the default router lazily.
+from app.services.public_surface_quality_llm import (  # noqa: F401
+    DomainGroundingVerdict,
+    evaluate_domain_grounding,
+)
 from app.services.task_agent_contract_surface import learner_editable_paths_for_deliverable
 from app.services.task_agent_starter_templates import (
     HIDDEN_MANIFEST_PATH,
@@ -36,6 +42,11 @@ class BundleValidationIssue(BaseModel):
     code: str
     relative_path: str
     message: str
+    # Optional, actionable revision guidance for the repair LLM. Populated
+    # by LLM-judged rules (e.g. the domain-grounding judge) so the repair
+    # node sees concrete copy-pasteable phrases instead of having to
+    # guess from the message alone.
+    hint: str | None = None
 
 
 class BundleValidationResult(BaseModel):
@@ -170,6 +181,7 @@ def _add_issue(
     code: str,
     relative_path: str,
     message: str,
+    hint: str | None = None,
 ) -> None:
     issues.append(
         BundleValidationIssue(
@@ -177,8 +189,72 @@ def _add_issue(
             code=code,
             relative_path=relative_path,
             message=message,
+            hint=hint,
         )
     )
+
+
+def _judge_domain_grounding(
+    *, content: str, spec: TaskAgentServiceSpec
+) -> tuple[bool, str | None]:
+    """Decide whether README content lacks domain grounding for ``spec``.
+
+    Returns ``(lacks_grounding, hint)``. ``hint`` is populated with
+    concrete revision guidance for the repair LLM when:
+    - the LLM judge fires and returns ``is_grounded=False`` (uses its
+      ``suggested_revisions``); or
+    - the substring fallback fires (synthesizes a generic hint that at
+      least names the missing canonical entities).
+    Returns ``(False, None)`` when the content is judged grounded.
+
+    The LLM judge is the primary path; the substring rule is the
+    deterministic fallback for offline / no-API-key environments and
+    for transient LLM failures.
+    """
+    entities = list(spec.project_contract.core_entities or [])
+    system_kind = getattr(spec.project_contract, "system_kind", None)
+    router = _default_router_or_none()
+    verdict = evaluate_domain_grounding(
+        content=content,
+        entities=entities,
+        system_kind=system_kind,
+        router=router,
+    )
+    if verdict is not None:
+        if verdict.is_grounded:
+            return (False, None)
+        hint = "; ".join(verdict.suggested_revisions) or verdict.rationale
+        return (True, hint or None)
+    # Judge unavailable → fall back to the deterministic substring rule.
+    lacks = content_lacks_domain_grounding(content, entities=entities)
+    if not lacks:
+        return (False, None)
+    if entities:
+        hint = (
+            "Mention at least one of these canonical domain entities verbatim "
+            f"in the README intro: {', '.join(repr(e) for e in entities)}."
+        )
+    else:
+        hint = None
+    return (True, hint)
+
+
+def _default_router_or_none():
+    """Return the process-wide LLMRouter, or None if it can't be
+    constructed (no API key wired, import error, etc.). Failing closed
+    keeps validation usable in dev / CI without surfacing as an artificial
+    domain-grounding rejection."""
+    try:
+        from app.services.llm_router import get_default_router
+
+        router = get_default_router()
+        # The router itself is fine; gate on whether a key is actually
+        # present so we don't pay for a guaranteed-401 call.
+        if not router.api_key_for_active_provider():
+            return None
+        return router
+    except Exception:
+        return None
 
 
 def _read_text(bundle: MaterializedBundle, relative_path: str) -> str:
@@ -281,13 +357,17 @@ def _validate_starter_readme(
                     "published public surface."
                 ),
             )
-    if content_lacks_domain_grounding(content, entities=spec.project_contract.core_entities):
+    lacks_grounding, grounding_hint = _judge_domain_grounding(
+        content=content, spec=spec
+    )
+    if lacks_grounding:
         _add_issue(
             issues,
             level=BundleValidationLevel.error,
             code="starter_readme_lacks_domain_grounding",
             relative_path=relative_path,
             message="Starter README should use concrete domain entities from the project brief instead of generic service wording.",
+            hint=grounding_hint,
         )
 
 
@@ -333,12 +413,16 @@ def _validate_course_readme(
             relative_path=relative_path,
             message="Course README mentions trace semantics that are not part of this project contract.",
         )
-    if content_lacks_domain_grounding(content, entities=spec.project_contract.core_entities):
+    lacks_grounding, grounding_hint = _judge_domain_grounding(
+        content=content, spec=spec
+    )
+    if lacks_grounding:
         _add_issue(
             issues,
             level=BundleValidationLevel.error,
             code="course_readme_lacks_domain_grounding",
             relative_path=relative_path,
+            hint=grounding_hint,
             message="Course README should describe the project using concrete domain entities, not only generic backend wording.",
         )
     for method, path in _iter_endpoint_references(content):
