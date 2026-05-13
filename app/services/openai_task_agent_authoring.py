@@ -174,7 +174,11 @@ class OpenAITaskAgentAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 240.0,
+        # Bumped from 240s — Anthropic Sonnet 4.6 on the deep
+        # TaskAgentServiceSpec schema with max_tokens=16000 routinely
+        # hits ~5 min wall-clock. Keep ample headroom; subprocess hard-
+        # kill remains the authoritative deadline.
+        request_timeout_s: float = 600.0,
         max_request_retries: int = 2,
         max_customization_validation_retries: int = 2,
     ) -> None:
@@ -612,7 +616,9 @@ class OpenAITaskAgentAuthoringService:
         customization = response.output_parsed
         if customization is None:
             raise ValueError("OpenAI authoring returned no parsed customization.")
-        return customization, extract_openai_usage(response, model_id)
+        from app.services.llm_router import usage_summary_from_response
+
+        return customization, usage_summary_from_response(response, model_id=model_id)
 
     def _create_response_with_retries(
         self,

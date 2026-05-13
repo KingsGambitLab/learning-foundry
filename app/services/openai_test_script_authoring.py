@@ -57,7 +57,9 @@ class OpenAITestScriptAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 240.0,
+        # Bumped from 240s for Anthropic Sonnet 4.6 headroom on the
+        # per-deliverable test-script generation.
+        request_timeout_s: float = 480.0,
         max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
@@ -302,7 +304,9 @@ class OpenAITestScriptAuthoringService:
             deliverable_id=deliverable_id,
             model_id=model_id,
         )
-        return scripts, extract_openai_usage(response, model_id)
+        from app.services.llm_router import usage_summary_from_response
+
+        return scripts, usage_summary_from_response(response, model_id=model_id)
 
     def _create_response_with_retries(
         self,

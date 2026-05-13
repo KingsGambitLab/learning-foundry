@@ -108,7 +108,10 @@ class OpenAIStarterRepoAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 300.0,
+        # Bumped from 300s — repo authoring on Anthropic Sonnet 4.6 with
+        # max_tokens=16000 (Dockerfile + install.sh + full app source +
+        # dependency contract) can exceed 5 min wall-clock on cold paths.
+        request_timeout_s: float = 600.0,
         max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
@@ -578,7 +581,9 @@ class OpenAIStarterRepoAuthoringService:
             repo_file_count=len(bundle.files),
             runtime_file_count=len(bundle.runtime_protocol_files),
         )
-        return bundle, extract_openai_usage(response, model_id)
+        from app.services.llm_router import usage_summary_from_response
+
+        return bundle, usage_summary_from_response(response, model_id=model_id)
 
     def _apply_progressive_bundle(
         self,
@@ -824,7 +829,9 @@ class OpenAIStarterRepoAuthoringService:
             model_id=model_id,
             file_count=len(bundle.files),
         )
-        return bundle, extract_openai_usage(response, model_id)
+        from app.services.llm_router import usage_summary_from_response
+
+        return bundle, usage_summary_from_response(response, model_id=model_id)
 
     def _normalize_repo_files(self, files: list[_RepoFile]) -> dict[str, str]:
         normalized: dict[str, str] = {}

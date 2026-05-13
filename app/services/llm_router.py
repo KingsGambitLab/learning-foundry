@@ -25,14 +25,17 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.domain.ai import AIUsageSummary
 from app.services.anthropic_runtime_support import (
     DEFAULT_HAIKU_MODEL_ID,
     DEFAULT_SONNET_MODEL_ID,
+    extract_anthropic_usage,
     load_anthropic_env_file,
     parse_structured_anthropic_response_with_hard_timeout,
     resolve_anthropic_env_file,
 )
 from app.services.openai_runtime_support import (
+    extract_openai_usage,
     load_openai_env_file,
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
@@ -56,9 +59,21 @@ class LLMRouterConfigError(RuntimeError):
 
 @dataclass
 class ParsedResult:
-    """Provider-agnostic result of a structured-output call."""
+    """Provider-agnostic result of a structured-output call.
+
+    ``usage`` is the raw provider-shaped namespace (Anthropic-style or
+    OpenAI-style) and is kept around mostly for backward compatibility.
+    ``usage_summary`` is the AIUsageSummary that should be merged into
+    per-course / per-workflow cost tracking — it carries the correct
+    ``provider``, model id, and pricing-table-derived cost for whichever
+    provider actually serviced this call. Callsites that previously did
+    ``extract_openai_usage(response, model_id)`` should now read
+    ``usage_summary`` directly (or go through
+    :func:`usage_summary_from_response` for transparent fallback when
+    the test-mode client_factory branch returns a raw SDK response)."""
     parsed: BaseModel
     usage: Any  # SimpleNamespace with input_tokens / output_tokens / cache_* fields
+    usage_summary: AIUsageSummary | None = None
 
     @property
     def output_parsed(self) -> BaseModel:
@@ -186,7 +201,11 @@ class LLMRouter:
                 max_tokens=max_tokens,
                 extra_request_kwargs=extra_request_kwargs,
             )
-            return ParsedResult(parsed=response.output_parsed, usage=response.usage)
+            return ParsedResult(
+                parsed=response.output_parsed,
+                usage=response.usage,
+                usage_summary=extract_anthropic_usage(response, model_id=model),
+            )
 
         # OpenAI fallback. The OpenAI Responses API takes an ``input`` list of
         # role/content dicts; build one from the system + user strings so the
@@ -204,7 +223,11 @@ class LLMRouter:
             request_timeout_s=request_timeout_s,
             extra_request_kwargs=extra_request_kwargs,
         )
-        return ParsedResult(parsed=response.output_parsed, usage=response.usage)
+        return ParsedResult(
+            parsed=response.output_parsed,
+            usage=response.usage,
+            usage_summary=extract_openai_usage(response, model_id=model),
+        )
 
     # ----- status (compat with /v1/task-agent-authoring/status) -----
 
@@ -277,6 +300,20 @@ def reset_default_router() -> None:
     re-resolve provider + env files."""
     global _default_router
     _default_router = None
+
+
+def usage_summary_from_response(response: Any, *, model_id: str | None) -> AIUsageSummary | None:
+    """Return the per-course AIUsageSummary for a structured-output call,
+    preferring the router-attached summary (correct provider + pricing)
+    over the legacy ``extract_openai_usage`` fallback.
+
+    The fallback path exists for the in-test ``client_factory`` branch
+    that bypasses the router and hands back a raw OpenAI SDK response —
+    that case must continue to work without touching every test."""
+    pre = getattr(response, "usage_summary", None)
+    if pre is not None:
+        return pre
+    return extract_openai_usage(response, model_id=model_id)
 
 
 def messages_to_system_user(input_list: Any) -> tuple[str, str]:

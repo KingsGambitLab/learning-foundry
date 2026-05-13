@@ -170,7 +170,9 @@ class OpenAICoursePlanner:
             if raw_plan is None:
                 raise ValueError("OpenAI course planner returned no parsed course plan.")
             plan = self._normalize_raw_plan(request, raw_plan.model_dump(mode="json"))
-            usage = extract_openai_usage(response, status.model_id)
+            from app.services.llm_router import usage_summary_from_response
+
+            usage = usage_summary_from_response(response, model_id=status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
             log_coursegen_event(
                 "course_planner_request_failed",
@@ -258,7 +260,9 @@ class OpenAICoursePlanner:
             ][:6]
             if not outcomes:
                 raise ValueError("The OpenAI response did not contain any learning outcomes.")
-            usage = extract_openai_usage(response, status.model_id)
+            from app.services.llm_router import usage_summary_from_response
+
+            usage = usage_summary_from_response(response, model_id=status.model_id)
         except Exception as exc:  # pragma: no cover - network and SDK failures vary
             log_coursegen_event(
                 "course_planner_request_failed",
