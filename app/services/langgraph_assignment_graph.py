@@ -20,7 +20,12 @@ from app.domain.workflow import (
     WorkflowRun,
 )
 from app.services.coursegen_logging import log_coursegen_event
-from app.services.bundle_validation import inspect_materialized_starter_surface, validate_materialized_bundle
+from app.services.bundle_validation import (
+    BundleValidationIssue,
+    BundleValidationLevel,
+    inspect_materialized_starter_surface,
+    validate_materialized_bundle,
+)
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.failure_context_builder import build_failure_context
 from app.services.generated_test_harness import BaselineSuiteOutcome, GeneratedTestBaselineVerifier
@@ -48,6 +53,39 @@ AuthoringRoute = Literal["authoring_repair", "authoring_tests", "reviewer_runtim
 ReviewerRoute = Literal["reviewer_repair", "reviewer_code", "reviewer_pedagogy", "reviewer_tests", "end"]
 RetryRoute = Literal["authoring_runtime", "authoring_tests", "reviewer_tests", "end"]
 _UNSET = object()
+
+
+_BUNDLE_LEVEL_TO_SEVERITY: dict[BundleValidationLevel, ReviewerFindingSeverity] = {
+    BundleValidationLevel.error: ReviewerFindingSeverity.error,
+    BundleValidationLevel.warning: ReviewerFindingSeverity.warning,
+}
+
+
+def _bundle_issue_to_reviewer_finding(
+    issue: BundleValidationIssue,
+    *,
+    category: str,
+) -> ReviewerFinding:
+    """Convert a ``BundleValidationIssue`` into a ``ReviewerFinding``,
+    preserving the ``hint`` field.
+
+    The bundle validator may attach actionable revision guidance to an
+    issue (e.g. from the LLM-judge domain-grounding check). Earlier
+    inline conversions in ``_reviewer_code_node`` and
+    ``_reviewer_pedagogy_node`` silently dropped this hint, which left
+    the repair LLM without a concrete signal and forced a full
+    re-author cycle even for tiny README-content fixes. Routing every
+    conversion through this helper keeps the hint attached.
+    """
+    return ReviewerFinding(
+        category=category,
+        severity=_BUNDLE_LEVEL_TO_SEVERITY[issue.level],
+        title=issue.code,
+        detail=issue.message,
+        code=issue.code,
+        location=issue.relative_path,
+        hint=issue.hint,
+    )
 
 
 class AssignmentGraphState(TypedDict):
@@ -97,13 +135,44 @@ class LangGraphAssignmentGraph:
             max_reviewer_attempts=self.max_reviewer_attempts,
         )
 
+    # Names registered in ``_build_graph`` — the only valid ``start_node``
+    # values callers can pass. Keeping this here (rather than computed
+    # from ``self.graph.nodes``) lets us validate the param before the
+    # state dict is built.
+    _REGISTERED_NODE_NAMES: tuple[str, ...] = (
+        "authoring_runtime",
+        "authoring_tests",
+        "authoring_repair",
+        "reviewer_runtime",
+        "reviewer_repair",
+        "reviewer_code",
+        "reviewer_pedagogy",
+        "reviewer_tests",
+    )
+
     def execute(
         self,
         run: WorkflowRun,
         *,
         on_node_started: Callable[[WorkflowRun, WorkflowNodeKind, int], None] | None = None,
         on_node_finished: Callable[[WorkflowRun, WorkflowNodeExecution], None] | None = None,
+        start_node: str | None = None,
     ) -> WorkflowRun:
+        """Walk the assignment graph from ``start_node`` to END.
+
+        ``start_node`` defaults to ``"authoring_runtime"`` (the graph's
+        START edge target) so the default behavior is unchanged. Passing
+        an explicit value lets callers resume a blocked run from a
+        specific node — e.g. ``"reviewer_code"`` after a fix that
+        previously caused that node to fail. The prior run's
+        ``node_executions`` are preserved in state so the conditional
+        edges still see the lane's history.
+        """
+        if start_node is not None and start_node not in self._REGISTERED_NODE_NAMES:
+            raise ValueError(
+                f"start_node={start_node!r} is not a registered LangGraph node. "
+                f"Valid: {list(self._REGISTERED_NODE_NAMES)}"
+            )
         if run.artifacts.task_agent_spec is None:
             return run
         existing_executions = [
@@ -124,7 +193,7 @@ class LangGraphAssignmentGraph:
             "next_retry_node": None,
             "skip_workspace_authoring": False,
         }
-        current_node = "authoring_runtime"
+        current_node = start_node or "authoring_runtime"
         while current_node is not None:
             kind = self._kind_for_node_name(current_node)
             attempt = self._planned_attempt(current_node, state)
@@ -1047,27 +1116,9 @@ class LangGraphAssignmentGraph:
                 )
             starter_surface_review = inspect_materialized_starter_surface(spec, state["run"].artifacts.workspace_snapshot)
             for issue in starter_surface_review.errors:
-                findings.append(
-                    ReviewerFinding(
-                        category="code_review",
-                        severity=ReviewerFindingSeverity.error,
-                        title=issue.code,
-                        detail=issue.message,
-                        code=issue.code,
-                        location=issue.relative_path,
-                    )
-                )
+                findings.append(_bundle_issue_to_reviewer_finding(issue, category="code_review"))
             for issue in starter_surface_review.warnings:
-                findings.append(
-                    ReviewerFinding(
-                        category="code_review",
-                        severity=ReviewerFindingSeverity.warning,
-                        title=issue.code,
-                        detail=issue.message,
-                        code=issue.code,
-                        location=issue.relative_path,
-                    )
-                )
+                findings.append(_bundle_issue_to_reviewer_finding(issue, category="code_review"))
         findings.append(
             ReviewerFinding(
                 category="code_review",
@@ -1278,27 +1329,9 @@ class LangGraphAssignmentGraph:
         else:
             bundle_validation = validate_materialized_bundle(spec, workspace)
             for issue in bundle_validation.errors:
-                findings.append(
-                    ReviewerFinding(
-                        category="pedagogy_review",
-                        severity=ReviewerFindingSeverity.error,
-                        title=issue.code,
-                        detail=issue.message,
-                        code=issue.code,
-                        location=issue.relative_path,
-                    )
-                )
+                findings.append(_bundle_issue_to_reviewer_finding(issue, category="pedagogy_review"))
             for issue in bundle_validation.warnings:
-                findings.append(
-                    ReviewerFinding(
-                        category="pedagogy_review",
-                        severity=ReviewerFindingSeverity.warning,
-                        title=issue.code,
-                        detail=issue.message,
-                        code=issue.code,
-                        location=issue.relative_path,
-                    )
-                )
+                findings.append(_bundle_issue_to_reviewer_finding(issue, category="pedagogy_review"))
 
         status = WorkflowNodeStatus.passed
         if sandbox_result.status != SandboxExecutionStatus.passed or any(
