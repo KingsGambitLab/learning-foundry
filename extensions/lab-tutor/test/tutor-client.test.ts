@@ -17,7 +17,14 @@ describe("TutorClient", () => {
         captured.url = req.url;
         captured.body = body;
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ reply: "hi back", hint_tier: null }));
+        if (req.url === "/v1/tutor/submit") {
+          res.end(JSON.stringify({
+            test_results: { passed: true, details: "all green" },
+            viva_questions: [{ prompt: "Q1" }, { prompt: "Q2" }],
+          }));
+        } else {
+          res.end(JSON.stringify({ reply: "hi back", hint_tier: null }));
+        }
       });
     });
     await new Promise<void>((r) => server.listen(0, r));
@@ -46,8 +53,9 @@ describe("TutorClient", () => {
       session_id: "sess-123",
       code_snapshot: "code goes here",
     });
-    // Server above returns the same body for every call; the test verifies plumbing,
-    // not response shape — that's covered by the integration test in Task 11.
-    assert.equal(typeof result, "object");
+    assert.equal(result.test_results.passed, true);
+    assert.equal(result.test_results.details, "all green");
+    assert.equal(result.viva_questions.length, 2);
+    assert.equal(result.viva_questions[0].prompt, "Q1");
   });
 });

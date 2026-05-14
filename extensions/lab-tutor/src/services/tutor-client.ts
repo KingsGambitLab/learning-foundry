@@ -1,12 +1,4 @@
-export interface ChatReply {
-  reply: string;
-  hint_tier: number | null;
-}
-
-export interface SubmitReply {
-  test_results: { passed: boolean; details: string };
-  viva_questions: { prompt: string }[];
-}
+import { ChatReply, SubmitResult } from "../types";
 
 export class TutorClient {
   constructor(
@@ -22,8 +14,8 @@ export class TutorClient {
     return data.reply;
   }
 
-  async submit(codeSnapshot: string): Promise<SubmitReply> {
-    return this.post<SubmitReply>("/v1/tutor/submit", {
+  async submit(codeSnapshot: string): Promise<SubmitResult> {
+    return this.post<SubmitResult>("/v1/tutor/submit", {
       session_id: this.sessionId,
       code_snapshot: codeSnapshot,
     });

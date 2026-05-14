@@ -1,8 +1,5 @@
 import * as vscode from "vscode";
-
-export interface VivaQuestion {
-  prompt: string;
-}
+import { VivaQuestion } from "./types";
 
 export function showVivaPopup(questions: VivaQuestion[]): void {
   const panel = vscode.window.createWebviewPanel(

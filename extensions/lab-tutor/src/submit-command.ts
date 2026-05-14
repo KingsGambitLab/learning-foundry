@@ -1,10 +1,6 @@
 import * as vscode from "vscode";
-import { showVivaPopup, VivaQuestion } from "./popup";
-
-export interface SubmitResult {
-  test_results: { passed: boolean; details: string };
-  viva_questions: VivaQuestion[];
-}
+import { showVivaPopup } from "./popup";
+import { SubmitResult } from "./types";
 
 export function registerSubmitCommand(
   context: vscode.ExtensionContext,
