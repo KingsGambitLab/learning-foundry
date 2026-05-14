@@ -116,9 +116,27 @@ class OracleValidationReport(BaseModel):
 
 
 # Rubrics that are structural / pattern-only. A scenario whose ONLY
-# rubrics fall in this set is too easy to satisfy with a stub.
+# rubrics fall in this set is too easy to satisfy with a stub UNLESS
+# its category is one that legitimately only needs structural checks
+# (malformed_input → asserting 4xx, idempotency → literal equality of
+# two response bodies, etc. — see ``_TRIVIAL_RUBRIC_EXEMPT_CATEGORIES``).
 _TRIVIAL_RUBRIC_KINDS: frozenset[str] = frozenset(
-    {"schema_match", "literal_match", "regex_match"}
+    {"schema_match", "literal_match", "regex_match", "numeric_range"}
+)
+
+# Categories where a structural-only rubric set is acceptable.
+#
+# Rationale per category:
+# - ``malformed_input``: the entire point is asserting a 4xx response
+#   on a bad request. A ``numeric_range`` on ``response.status`` IS
+#   the test; adding a semantic rubric on an error body would be
+#   noise.
+# - ``idempotency``: ``behavioral_equivalence(target_a, target_b)``
+#   is technically structural-set, but is the canonical idempotency
+#   check. Until BehavioralEquivalence is extended to path-vs-path
+#   (Bug 19), authors fall back to literal_match for idempotency.
+_TRIVIAL_RUBRIC_EXEMPT_CATEGORIES: frozenset[str] = frozenset(
+    {"malformed_input", "idempotency"}
 )
 
 
@@ -222,8 +240,18 @@ def _scenario_passed(output: OracleScenarioOutput) -> bool:
 
 
 def _scenario_only_trivial_rubrics(scenario: Scenario) -> bool:
-    """``True`` iff every rubric on this scenario is in the trivial set."""
+    """``True`` iff every rubric on this scenario is in the trivial set
+    AND the scenario's category does NOT exempt it.
+
+    Bug 22: previously this flagged ANY scenario with only structural
+    rubrics — but ``malformed_input`` scenarios asserting on a 4xx
+    status code don't need semantic rubrics, and ``idempotency``
+    scenarios using ``literal_match`` between two captures don't
+    either. Both legitimately use structural-only rubrics.
+    """
     if not scenario.rubrics:
+        return False
+    if scenario.category in _TRIVIAL_RUBRIC_EXEMPT_CATEGORIES:
         return False
     return all(r.kind in _TRIVIAL_RUBRIC_KINDS for r in scenario.rubrics)
 
