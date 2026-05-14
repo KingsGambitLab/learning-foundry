@@ -94,6 +94,46 @@ def main() -> int:
         f"(stripped {csp_count} CSP meta; base_url={base_url}; title={title!r})",
         flush=True,
     )
+
+    # The CSP that actually blocks our cross-origin script is set as an HTTP
+    # response header from server-main.js, not the workbench.html meta tag.
+    # Rename the header key so the browser ignores it. Targeted to one file
+    # (server-main.js) so extension-side CSP handling stays intact.
+    server_main_candidates = [
+        Path("/usr/lib/code-server/lib/vscode/out/server-main.js"),
+        Path("/usr/lib/code-server/out/server-main.js"),
+    ]
+    server_main = next((p for p in server_main_candidates if p.is_file()), None)
+    if server_main is None:
+        for p in Path("/usr/lib/code-server").rglob("server-main.js"):
+            if p.is_file():
+                server_main = p
+                break
+    if server_main is not None:
+        smcontent = server_main.read_text(encoding="utf-8")
+        if '"X-Lt-Disabled-Csp"' in smcontent:
+            print(f"[lab-tutor-inject] server-main.js already patched: {server_main}", flush=True)
+        else:
+            patched, n = re.subn(
+                r'"Content-Security-Policy"',
+                '"X-Lt-Disabled-Csp"',
+                smcontent,
+            )
+            if n > 0:
+                server_main.write_text(patched, encoding="utf-8")
+                print(
+                    f"[lab-tutor-inject] renamed {n} CSP header occurrences in {server_main}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[lab-tutor-inject] no CSP header occurrences found in {server_main}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    else:
+        print("[lab-tutor-inject] server-main.js not found; CSP header NOT patched", file=sys.stderr, flush=True)
+
     return 0
 
 
