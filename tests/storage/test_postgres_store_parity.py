@@ -221,3 +221,232 @@ def test_save_and_list_workspace_sessions(store: PostgresWorkflowStore) -> None:
     assert len(sessions) == 1 and sessions[0].id == "ws_1"
     all_sessions = store.list_all_learner_workspace_sessions()
     assert len(all_sessions) == 1 and all_sessions[0].id == "ws_1"
+
+
+# ------------------------------------------------------------------ publish snapshots
+
+
+from app.domain.publish import PublishSnapshot, PublishSnapshotProvenance  # noqa: E402
+from app.domain.testing import (  # noqa: E402
+    CreatorFeedbackRecord,
+    LearnerCourseEvaluationReport,
+    LearnerFeedbackRecord,
+)
+from app.domain.assets import CreatorAssetRecord  # noqa: E402
+from app.domain.task_agent import DataSourceSpec, DataSourceKind, DataSourcePurpose  # noqa: E402
+
+
+def _make_publish_snapshot(
+    snapshot_id: str = "snap_test",
+    course_run_id: str = "course_test",
+    version: int = 1,
+) -> PublishSnapshot:
+    """Minimal valid PublishSnapshot (no learner_package, no task_agent_spec)."""
+    now = datetime.now(UTC)
+    return PublishSnapshot(
+        id=snapshot_id,
+        course_run_id=course_run_id,
+        course_family_id=course_run_id,
+        created_at=now,
+        version=version,
+        source_hash="abc123",
+        provenance=PublishSnapshotProvenance(
+            generator_version="0.1.0",
+            course_run_hash="hash_x",
+        ),
+    )
+
+
+def test_save_and_get_publish_snapshot(store: PostgresWorkflowStore) -> None:
+    snapshot = _make_publish_snapshot()
+    store.save_publish_snapshot(snapshot)
+    fetched = store.get_publish_snapshot("snap_test")
+    assert fetched is not None
+    assert fetched.id == "snap_test"
+    assert fetched.course_run_id == "course_test"
+
+
+def test_get_latest_publish_snapshot_by_course_run(store: PostgresWorkflowStore) -> None:
+    snap1 = _make_publish_snapshot("snap1", course_run_id="course_x", version=1)
+    snap2 = _make_publish_snapshot("snap2", course_run_id="course_x", version=2)
+    store.save_publish_snapshot(snap1)
+    store.save_publish_snapshot(snap2)
+    latest = store.get_latest_publish_snapshot(course_run_id="course_x")
+    assert latest is not None
+    assert latest.id == "snap2"
+
+
+def test_list_publish_snapshots_filters_by_course_run(store: PostgresWorkflowStore) -> None:
+    store.save_publish_snapshot(_make_publish_snapshot("snapA", course_run_id="cr_a"))
+    store.save_publish_snapshot(_make_publish_snapshot("snapB", course_run_id="cr_b"))
+    summaries = store.list_publish_snapshots(course_run_id="cr_a")
+    assert len(summaries) == 1
+    assert summaries[0].id == "snapA"
+
+
+def test_list_publish_snapshots_filters_by_course_family(store: PostgresWorkflowStore) -> None:
+    store.save_publish_snapshot(_make_publish_snapshot("snapC", course_run_id="cr_fam"))
+    summaries = store.list_publish_snapshots(course_family_id="cr_fam")
+    assert len(summaries) == 1
+    assert summaries[0].id == "snapC"
+
+
+# ------------------------------------------------------------------ creator feedback
+
+
+def _make_creator_feedback(
+    feedback_id: str = "cf_test",
+    course_run_id: str = "course_test",
+) -> CreatorFeedbackRecord:
+    now = datetime.now(UTC)
+    return CreatorFeedbackRecord(
+        id=feedback_id,
+        course_run_id=course_run_id,
+        created_at=now,
+        category="general",
+        summary="Test feedback",
+    )
+
+
+def test_save_and_list_creator_feedback(store: PostgresWorkflowStore) -> None:
+    fb = _make_creator_feedback()
+    store.save_creator_feedback(fb)
+    results = store.list_creator_feedback("course_test")
+    assert len(results) == 1
+    assert results[0].id == "cf_test"
+
+
+def test_list_creator_feedback_filters_by_course_run(store: PostgresWorkflowStore) -> None:
+    store.save_creator_feedback(_make_creator_feedback("cf1", course_run_id="cr_1"))
+    store.save_creator_feedback(_make_creator_feedback("cf2", course_run_id="cr_2"))
+    results = store.list_creator_feedback("cr_1")
+    assert len(results) == 1 and results[0].id == "cf1"
+
+
+# ------------------------------------------------------------------ learner feedback
+
+
+def _make_learner_feedback(
+    feedback_id: str = "lf_test",
+    enrollment_id: str = "enr_test",
+    course_run_id: str = "course_test",
+) -> LearnerFeedbackRecord:
+    now = datetime.now(UTC)
+    return LearnerFeedbackRecord(
+        id=feedback_id,
+        enrollment_id=enrollment_id,
+        course_run_id=course_run_id,
+        publish_snapshot_id="snap_1",
+        learner_id="learner_1",
+        created_at=now,
+        summary="Nice course",
+    )
+
+
+def test_save_and_list_learner_feedback(store: PostgresWorkflowStore) -> None:
+    fb = _make_learner_feedback()
+    store.save_learner_feedback(fb)
+    results = store.list_learner_feedback("enr_test")
+    assert len(results) == 1
+    assert results[0].id == "lf_test"
+
+
+def test_list_learner_feedback_filters_by_enrollment(store: PostgresWorkflowStore) -> None:
+    store.save_learner_feedback(_make_learner_feedback("lf1", enrollment_id="enr_a"))
+    store.save_learner_feedback(_make_learner_feedback("lf2", enrollment_id="enr_b"))
+    results = store.list_learner_feedback("enr_a")
+    assert len(results) == 1 and results[0].id == "lf1"
+
+
+# ------------------------------------------------------------------ learner eval reports
+
+
+def _make_eval_report(
+    report_id: str = "rpt_test",
+    course_run_id: str = "course_test",
+) -> LearnerCourseEvaluationReport:
+    now = datetime.now(UTC)
+    return LearnerCourseEvaluationReport(
+        id=report_id,
+        course_run_id=course_run_id,
+        publish_snapshot_id="snap_1",
+        created_at=now,
+        overall_status="passed",
+        deliverable_results=[],
+    )
+
+
+def test_save_and_list_learner_eval_reports(store: PostgresWorkflowStore) -> None:
+    report = _make_eval_report()
+    store.save_learner_eval_report(report)
+    results = store.list_learner_eval_reports(course_run_id="course_test")
+    assert len(results) == 1
+    assert results[0].id == "rpt_test"
+
+
+def test_get_latest_learner_eval_report(store: PostgresWorkflowStore) -> None:
+    r1 = _make_eval_report("rpt1", course_run_id="cr_eval")
+    r2 = _make_eval_report("rpt2", course_run_id="cr_eval")
+    store.save_learner_eval_report(r1)
+    store.save_learner_eval_report(r2)
+    latest = store.get_latest_learner_eval_report("cr_eval")
+    # Should return one of the two (latest by created_at DESC)
+    assert latest is not None
+    assert latest.id in {"rpt1", "rpt2"}
+
+
+def test_list_learner_eval_reports_by_snapshot(store: PostgresWorkflowStore) -> None:
+    rpt = _make_eval_report("rpt_snap", course_run_id="cr_s")
+    store.save_learner_eval_report(rpt)
+    results = store.list_learner_eval_reports(publish_snapshot_id="snap_1")
+    assert any(r.id == "rpt_snap" for r in results)
+
+
+# ------------------------------------------------------------------ creator assets
+
+
+def _make_creator_asset(asset_id: str = "asset_test") -> CreatorAssetRecord:
+    now = datetime.now(UTC)
+    return CreatorAssetRecord(
+        id=asset_id,
+        file_name="test.csv",
+        title="Test Asset",
+        size_bytes=42,
+        workspace_path="/data/test.csv",
+        created_at=now,
+        data_source=DataSourceSpec(
+            id="ds_1",
+            kind=DataSourceKind.uploaded_file,
+            title="Test DS",
+            purpose=DataSourcePurpose.reference_data,
+        ),
+    )
+
+
+def test_save_and_get_creator_asset(store: PostgresWorkflowStore) -> None:
+    asset = _make_creator_asset()
+    store.save_creator_asset(asset)
+    fetched = store.get_creator_asset("asset_test")
+    assert fetched is not None
+    assert fetched.id == "asset_test"
+    assert fetched.file_name == "test.csv"
+
+
+def test_list_creator_assets(store: PostgresWorkflowStore) -> None:
+    store.save_creator_asset(_make_creator_asset("asset1"))
+    store.save_creator_asset(_make_creator_asset("asset2"))
+    assets = store.list_creator_assets()
+    ids = {a.id for a in assets}
+    assert {"asset1", "asset2"}.issubset(ids)
+
+
+def test_delete_creator_asset(store: PostgresWorkflowStore) -> None:
+    store.save_creator_asset(_make_creator_asset("asset_del"))
+    deleted = store.delete_creator_asset("asset_del")
+    assert deleted is True
+    assert store.get_creator_asset("asset_del") is None
+
+
+def test_delete_creator_asset_missing_returns_false(store: PostgresWorkflowStore) -> None:
+    result = store.delete_creator_asset("nonexistent_asset")
+    assert result is False
