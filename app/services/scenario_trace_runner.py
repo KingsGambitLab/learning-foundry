@@ -406,15 +406,122 @@ def _execute_step(
     )
 
 
+# Observed-in-the-wild kwarg drift between LLM-emitted rubric configs and
+# the rubric class signatures, harvested from /tmp/coursegen-*.log:
+#
+#   56× SchemaMatch.schema      -> must_have_fields (extracted from JSON Schema)
+#   28× LiteralMatch.value      -> expected
+#   26× OracleSetOverlap.oracle_set -> inline list, would need a path
+#   26× LLMJudgeSemanticEq.gold -> inline, would need a path
+#   22× NumericRange.min        -> min_value
+#   22× SchemaMatch.value       -> must_have_fields (same as .schema)
+#   14× LLMJudgeCoverage.question -> drop (not a kwarg)
+#   12× SubsetMatch.value       -> inline list, would need acceptable_source path
+#   12× LLMJudgeCoverage.reference -> drop
+#   10× OracleSetOverlap.reference_set -> inline, would need a path
+#   10× OracleSetOverlap.gold_path -> gold_set_path
+#    ...
+#
+# The simple renames (LiteralMatch.value, NumericRange.min, etc.) we can
+# handle without any data shuffling. For inline-data cases (oracle_set,
+# gold, schema), the rubric expects a path into ctx.setup_data; we
+# either translate when feasible (JSON Schema -> required field list)
+# or drop the kwarg so the rubric fails predictably with a missing-arg
+# TypeError that surfaces in the diagnostics, instead of a confusing
+# "unexpected keyword argument" exception.
+
+# Simple rename map: (rubric_kind, llm_kwarg) -> canonical_kwarg.
+_RUBRIC_KWARG_ALIASES: dict[tuple[str, str], str] = {
+    ("literal_match", "value"): "expected",
+    ("numeric_range", "min"): "min_value",
+    ("numeric_range", "max"): "max_value",
+    ("oracle_set_overlap", "gold_path"): "gold_set_path",
+    ("oracle_set_overlap", "min_overlap"): "min_recall",
+    ("behavioral_equivalence", "value"): "expected",
+    ("behavioral_equivalence", "reference_target"): "expected",
+    ("behavioral_equivalence", "target_a"): "target",
+    ("behavioral_equivalence", "target_b"): "expected",
+    ("behavioral_equivalence", "reference_trace"): "expected",
+    ("subset_match", "value"): "acceptable_source",
+    ("subset_match", "subset_of"): "acceptable_source",
+    ("llm_judge_semantic_eq", "gold"): "gold_path",
+    ("llm_judge_coverage", "answer_target"): "target",
+    ("llm_judge_coverage", "facts"): "must_contain_facts",
+}
+
+# Kwargs the LLM keeps emitting that have no rubric counterpart and
+# should just be dropped (rather than rejected as "unexpected").
+_RUBRIC_KWARGS_TO_DROP: dict[str, set[str]] = {
+    "llm_judge_coverage": {"question", "reference", "citations_target", "evidence"},
+    "llm_judge_false_premise": {"question", "evidence"},
+    "oracle_set_overlap": {"reference", "selection_mode"},
+    "schema_match": {"value"},
+}
+
+
+def _extract_must_have_fields_from_schema(schema: Any) -> list[str]:
+    """Pull the field list out of a JSON Schema object the LLM emitted
+    under ``schema_match.schema``. Conservative: only honor an explicit
+    top-level ``required`` array; otherwise fall back to the keys of
+    ``properties``."""
+    if not isinstance(schema, dict):
+        return []
+    required = schema.get("required")
+    if isinstance(required, list) and all(isinstance(x, str) for x in required):
+        return list(required)
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        return list(properties.keys())
+    return []
+
+
+def _normalize_rubric_kwargs(spec_kind: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Translate observed-in-the-wild LLM-emitted rubric kwargs to the
+    canonical rubric-class kwargs.
+
+    This is intentionally LOSSY: kwargs without a known canonical name
+    are dropped (per ``_RUBRIC_KWARGS_TO_DROP``) or left alone so the
+    downstream ``inspect.signature`` filter trims them.
+    """
+    out: dict[str, Any] = {}
+    drop_set = _RUBRIC_KWARGS_TO_DROP.get(spec_kind, set())
+    for key, value in kwargs.items():
+        if key in drop_set:
+            continue
+        canonical = _RUBRIC_KWARG_ALIASES.get((spec_kind, key), key)
+        out[canonical] = value
+    # Special: ``schema_match.schema`` (a JSON Schema dict) → derive
+    # ``must_have_fields`` from ``schema.required`` or
+    # ``schema.properties.keys()``.
+    if spec_kind == "schema_match" and "schema" in out:
+        schema_obj = out.pop("schema")
+        if "must_have_fields" not in out:
+            out["must_have_fields"] = _extract_must_have_fields_from_schema(
+                schema_obj
+            )
+    # Special: ``oracle_set_overlap.value`` (inline list) appears in
+    # ``_RUBRIC_KWARGS_TO_DROP`` for schema_match but not for oracle_set
+    # — at this layer we leave inline-set handling to the rubric (it
+    # will raise a missing-arg TypeError, which our outer try/except in
+    # run_scenario converts to a fail Verdict with a clear message).
+    return out
+
+
 def _build_rubric(spec_kind: str, spec_config: dict[str, Any], router: Any) -> Any:
     """Instantiate one rubric, injecting ``router`` only when the class
     accepts it.
 
-    Uses :func:`inspect.signature` so the runner doesn't need to know
-    which rubrics are LLM-backed.
+    Applies an LLM-kwarg normalization pass first (rename / drop)
+    because the scenario-author LLM persistently emits names like
+    ``literal_match.value`` (canonical: ``expected``) and
+    ``numeric_range.min`` (canonical: ``min_value``). Without this
+    layer every scenario fails to even construct its rubrics and the
+    trace runner converts each ``TypeError`` into a fail Verdict —
+    which is what happened on the live RAG/CRAG smoke (see
+    /tmp/coursegen-resume-*.log for the full kwarg-drift tally).
     """
     cls = RUBRIC_REGISTRY[spec_kind]
-    kwargs = dict(spec_config)
+    kwargs = _normalize_rubric_kwargs(spec_kind, dict(spec_config))
     try:
         sig = inspect.signature(cls.__init__)
         accepts_router = "router" in sig.parameters
