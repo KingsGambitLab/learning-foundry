@@ -1103,3 +1103,125 @@ class PostgresWorkflowStore:
             limit=1,
         )
         return reports[0] if reports else None
+
+    # ============================================================ Users
+
+    def create_user(self, *, email: str, password_hash: str, role, display_name: str | None = None):
+        from sqlalchemy.exc import IntegrityError
+        from app.domain.auth import Role, User
+
+        role_value = role.value if isinstance(role, Role) else role
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO users (email, password_hash, role, display_name)
+                        VALUES (:email, :pw, :role, :display_name)
+                        RETURNING id, email, role, display_name, created_at, updated_at
+                        """
+                    ),
+                    {"email": email, "pw": password_hash, "role": role_value, "display_name": display_name},
+                ).first()
+        except IntegrityError as exc:
+            raise ValueError(f"User with email {email!r} already exists") from exc
+        if row is None:
+            raise RuntimeError("INSERT returned no row")
+        return User(
+            id=row.id,
+            email=row.email,
+            role=Role(row.role),
+            display_name=row.display_name,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def get_user_by_email(self, email: str):
+        from app.domain.auth import Role, User
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT id, email, role, display_name, created_at, updated_at FROM users WHERE email = :email"),
+                {"email": email},
+            ).first()
+        if row is None:
+            return None
+        return User(
+            id=row.id, email=row.email, role=Role(row.role),
+            display_name=row.display_name,
+            created_at=row.created_at, updated_at=row.updated_at,
+        )
+
+    def get_user_password_hash(self, email: str) -> str | None:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT password_hash FROM users WHERE email = :email"),
+                {"email": email},
+            ).first()
+        return row.password_hash if row else None
+
+    def get_user_by_id(self, user_id):
+        from uuid import UUID
+        from app.domain.auth import Role, User
+        uid = user_id if isinstance(user_id, UUID) else UUID(str(user_id))
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT id, email, role, display_name, created_at, updated_at FROM users WHERE id = :id"),
+                {"id": uid},
+            ).first()
+        if row is None:
+            return None
+        return User(
+            id=row.id, email=row.email, role=Role(row.role),
+            display_name=row.display_name,
+            created_at=row.created_at, updated_at=row.updated_at,
+        )
+
+    # ============================================================ User sessions
+
+    def create_user_session(self, *, user_id, expires_at, ip, user_agent):
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO user_sessions (user_id, expires_at, ip, user_agent)
+                    VALUES (:uid, :exp, :ip, :ua)
+                    RETURNING id
+                    """
+                ),
+                {"uid": user_id, "exp": expires_at, "ip": ip, "ua": user_agent},
+            ).first()
+        return row.id
+
+    def load_user_session(self, session_id):
+        from app.domain.auth import UserSession
+        from uuid import UUID
+        sid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, user_id, created_at, expires_at, last_seen_at,
+                           host(ip) AS ip, user_agent
+                    FROM user_sessions
+                    WHERE id = :id AND expires_at > now()
+                    """
+                ),
+                {"id": sid},
+            ).first()
+            if row is None:
+                return None
+            conn.execute(
+                text("UPDATE user_sessions SET last_seen_at = now() WHERE id = :id"),
+                {"id": sid},
+            )
+        return UserSession(
+            id=row.id, user_id=row.user_id,
+            created_at=row.created_at, expires_at=row.expires_at, last_seen_at=row.last_seen_at,
+            ip=row.ip, user_agent=row.user_agent,
+        )
+
+    def revoke_user_session(self, session_id) -> None:
+        from uuid import UUID
+        sid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM user_sessions WHERE id = :id"), {"id": sid})

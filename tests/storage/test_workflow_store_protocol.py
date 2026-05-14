@@ -6,7 +6,7 @@ from app.storage.sqlite_store import SQLiteWorkflowStore
 from app.storage.workflow_store import WorkflowStore
 
 
-PUBLIC_METHOD_NAMES = {
+LEGACY_PUBLIC_METHOD_NAMES = {
     "utcnow",
     "save_run", "get_run", "list_runs",
     "append_event", "list_events",
@@ -23,16 +23,21 @@ PUBLIC_METHOD_NAMES = {
     "save_learner_eval_report", "list_learner_eval_reports", "get_latest_learner_eval_report",
 }
 
+AUTH_METHOD_NAMES = {
+    "create_user", "get_user_by_email", "get_user_password_hash", "get_user_by_id",
+    "create_user_session", "load_user_session", "revoke_user_session",
+}
 
-def test_protocol_lists_every_public_sqlite_method() -> None:
+
+def test_protocol_lists_every_legacy_sqlite_method() -> None:
     protocol_methods = {
         name for name, member in inspect.getmembers(WorkflowStore, predicate=inspect.isfunction)
         if not name.startswith("_")
     }
-    assert protocol_methods == PUBLIC_METHOD_NAMES
+    assert protocol_methods == LEGACY_PUBLIC_METHOD_NAMES | AUTH_METHOD_NAMES
 
 
-def test_sqlite_store_satisfies_protocol() -> None:
+def test_sqlite_store_satisfies_legacy_protocol() -> None:
     store: WorkflowStore = SQLiteWorkflowStore.__new__(SQLiteWorkflowStore)
-    for method in PUBLIC_METHOD_NAMES:
+    for method in LEGACY_PUBLIC_METHOD_NAMES:
         assert callable(getattr(store, method, None)), f"{method} missing"
