@@ -543,33 +543,92 @@
       clearPrompt(input);
     }
 
+    // Track the currently-hooked agent input so the document/window-level
+    // listeners know which element they're guarding.
+    let hookedInput = null;
+
+    function isInsideAgent(target) {
+      if (!hookedInput || !target) return false;
+      if (target === hookedInput) return true;
+      if (typeof target.contains === "function" && hookedInput.contains(target)) return true;
+      // contenteditable / Monaco sometimes routes events to an inner node;
+      // walk the path upward.
+      let n = target;
+      while (n) {
+        if (n === hookedInput) return true;
+        n = n.parentElement;
+      }
+      return false;
+    }
+
+    function maybeIntercept(reason) {
+      if (replaying || !hookedInput) return false;
+      const prompt = readPrompt(hookedInput).trim();
+      if (prompt.length < 1) return false;
+      console.info("[lab-tutor] intercepting via", reason, "— prompt:", prompt.slice(0, 60));
+      intercept(prompt, hookedInput);
+      return true;
+    }
+
     function hookInput(input, selector) {
       if (input.__labTutorHooked) return;
       input.__labTutorHooked = true;
+      hookedInput = input;
       console.info("[lab-tutor] hooked agent input via", selector);
-      const sendBtn = findSendButton(input);
 
-      input.addEventListener("keydown", (e) => {
+      // Capture-phase keydown at the document level — fires BEFORE any
+      // handler bound inside the editor (Monaco/CodeMirror typically bind
+      // on their own root or on window without capture).
+      document.addEventListener("keydown", (e) => {
         if (replaying) return;
-        if (e.key !== "Enter" || e.shiftKey) return;
-        const prompt = readPrompt(input).trim();
-        if (prompt.length < 1) return;
+        if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+        if (!isInsideAgent(e.target)) return;
+        console.info("[lab-tutor] caught Enter on agent input");
         e.preventDefault();
         e.stopImmediatePropagation();
-        intercept(prompt, input);
+        e.stopPropagation();
+        maybeIntercept("Enter");
       }, true);
 
-      if (sendBtn && !sendBtn.__labTutorHooked) {
-        sendBtn.__labTutorHooked = true;
-        sendBtn.addEventListener("click", (e) => {
-          if (replaying) return;
-          const prompt = readPrompt(input).trim();
-          if (prompt.length < 1) return;
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          intercept(prompt, input);
-        }, true);
-      }
+      // contenteditable editors fire `beforeinput` with insertParagraph
+      // for the Enter key. Catch that too — some implementations swallow
+      // the keydown.
+      document.addEventListener("beforeinput", (e) => {
+        if (replaying) return;
+        if (e.inputType !== "insertParagraph" && e.inputType !== "insertLineBreak") return;
+        if (!isInsideAgent(e.target)) return;
+        console.info("[lab-tutor] caught beforeinput", e.inputType);
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        maybeIntercept("beforeinput");
+      }, true);
+
+      // Send-button click — broad search at intercept time so we tolerate
+      // the button being re-rendered or appearing later.
+      document.addEventListener("click", (e) => {
+        if (replaying) return;
+        const btn = e.target && e.target.closest && e.target.closest("button");
+        if (!btn) return;
+        const label = (btn.getAttribute("aria-label") || btn.getAttribute("title") || btn.textContent || "").toLowerCase();
+        if (!/send|submit|build/.test(label)) return;
+        // Only intercept if the click is near (or inside) the agent input's container.
+        const root = hookedInput && hookedInput.closest('[role="textbox"], form, .chat-input-container');
+        if (root && root.contains(btn)) {
+          // ok, this is the agent's send button
+        } else if (hookedInput && hookedInput.parentElement && hookedInput.parentElement.parentElement && hookedInput.parentElement.parentElement.contains(btn)) {
+          // ok
+        } else {
+          return;
+        }
+        const prompt = readPrompt(hookedInput).trim();
+        if (prompt.length < 1) return;
+        console.info("[lab-tutor] caught send-button click — label:", label);
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        maybeIntercept("click");
+      }, true);
     }
 
     function tryHook() {
