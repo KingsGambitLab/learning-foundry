@@ -32,6 +32,7 @@ from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringSer
 from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringService
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
+from app.services.tutor_service import TutorService
 from app.services.workflow_service import WorkflowService
 from app.storage.sqlite_store import SQLiteWorkflowStore
 
@@ -178,6 +179,8 @@ async def lifespan(app: FastAPI):
             learner_studio_service=app.state.learner_studio_service,
             learner_feedback_service=app.state.learner_feedback_service,
         )
+    if not hasattr(app.state, "tutor_service"):
+        app.state.tutor_service = TutorService()
     yield
 
 app = FastAPI(

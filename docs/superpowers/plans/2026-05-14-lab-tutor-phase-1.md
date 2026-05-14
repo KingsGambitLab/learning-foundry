@@ -1125,30 +1125,36 @@ git commit -m "feat(tutor): domain types + stub service"
 **Files:**
 - Create: `app/api/tutor.py`
 - Create: `tests/test_tutor_routes.py`
-- Modify: `app/main.py` (register router — confirm exact mount point in step 1)
+- Modify: `app/main.py` (register router + add `tutor_service` to lifespan)
+- Modify: `app/domain/tutor.py` (add `Field(min_length=1)` constraints to request types)
 
-- [ ] **Step 1: Confirm where routers are mounted**
+**Pattern used:** request-scoped DI via `app.state`; no parallel `*Schema` layer — domain types are Pydantic `BaseModel`s and are used directly as request/response types (same pattern as `app/api/routes.py`).
 
-Run: `grep -n "include_router\|router" app/main.py app/api/routes.py | head -40`
-Expected: locate the existing `include_router` calls or `APIRouter` registrations. The new tutor router must be mounted alongside them. If `app/main.py` is the mount point, the modification lives there; if `app/api/routes.py` re-exports a parent router, mount inside that.
+- [x] **Step 1: Confirm where routers are mounted**
 
-(If neither shows, fall back to mounting in `app/main.py` after the FastAPI app is created.)
+`app/main.py` is the mount point. Existing services are initialized in the `@asynccontextmanager async def lifespan(app)` function via `if not hasattr(app.state, ...)` guards, then assigned to `app.state.*`. Routes access them via request-scoped getters like:
+```python
+def _workflow_service(request: Request) -> WorkflowService:
+    return request.app.state.workflow_service
+```
 
-- [ ] **Step 2: Write failing test for the routes**
+- [x] **Step 2: Write failing test for the routes**
 
-Create `tests/test_tutor_routes.py`:
+Create `tests/test_tutor_routes.py`. Since `TestClient` does not trigger lifespan, tests set `app.state.tutor_service` directly in `setUp` (same pattern used by `test_api.py`, `test_draft_timeline.py`):
 
 ```python
 import unittest
 
 from fastapi.testclient import TestClient
 
-from app.main import create_app  # If `create_app` is not present, see step 2a.
+from app.main import app
+from app.services.tutor_service import TutorService
 
 
 class TutorRoutesTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = TestClient(create_app())
+        app.state.tutor_service = TutorService()
+        self.client = TestClient(app)
 
     def test_chat_returns_canned_reply(self) -> None:
         resp = self.client.post(
@@ -1157,7 +1163,7 @@ class TutorRoutesTest(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
-        self.assertIn("hello", body["reply"])
+        self.assertEqual(body["reply"], "(stub) Got: hello")
         self.assertIsNone(body["hint_tier"])
 
     def test_submit_returns_two_viva_questions(self) -> None:
@@ -1169,9 +1175,18 @@ class TutorRoutesTest(unittest.TestCase):
         body = resp.json()
         self.assertTrue(body["test_results"]["passed"])
         self.assertEqual(len(body["viva_questions"]), 2)
+        for q in body["viva_questions"]:
+            self.assertTrue(q["prompt"])
 
     def test_chat_rejects_missing_session_id(self) -> None:
         resp = self.client.post("/v1/tutor/chat", json={"message": "hi"})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_chat_rejects_empty_session_id(self) -> None:
+        resp = self.client.post(
+            "/v1/tutor/chat",
+            json={"session_id": "", "message": "hello"},
+        )
         self.assertEqual(resp.status_code, 422)
 
 
@@ -1179,118 +1194,91 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-**Step 2a (only if `app.main.create_app` doesn't exist):** Open `app/main.py`, locate where the `FastAPI()` instance is constructed in the module body, and refactor minimally to expose a `create_app() -> FastAPI` factory that returns the same configured app. Existing module-level `app` should remain (e.g., `app = create_app()`), so production callers don't change. Run all existing tests after to confirm no regressions: `python -m unittest discover -s tests -v 2>&1 | tail -20`.
+- [x] **Step 4: Implement the router**
 
-- [ ] **Step 3: Run the new test, verify it fails**
+`app/domain/tutor.py` — add `Field(min_length=1)` constraints to request types (validation lives on the domain type, not a parallel schema):
 
-Run: `python -m unittest tests.test_tutor_routes -v`
-Expected: FAIL — 404 on `/v1/tutor/chat` (route not yet registered).
+```python
+class TutorChatRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
 
-- [ ] **Step 4: Implement the router**
+class TutorSubmitRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    code_snapshot: str
+```
 
-Create `app/api/tutor.py`:
+`app/api/tutor.py` — request-scoped DI, domain types used directly, no parallel `*Schema` layer:
 
 ```python
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Request
 
 from app.domain.tutor import (
     TutorChatRequest,
+    TutorChatResponse,
     TutorSubmitRequest,
+    TutorSubmitResponse,
 )
 from app.services.tutor_service import TutorService
 
 
-class ChatRequestSchema(BaseModel):
-    session_id: str = Field(min_length=1)
-    message: str = Field(min_length=1)
-
-
-class ChatResponseSchema(BaseModel):
-    reply: str
-    hint_tier: int | None
-
-
-class SubmitRequestSchema(BaseModel):
-    session_id: str = Field(min_length=1)
-    code_snapshot: str
-
-
-class VivaQuestionSchema(BaseModel):
-    prompt: str
-
-
-class SubmitResponseSchema(BaseModel):
-    test_results: dict
-    viva_questions: list[VivaQuestionSchema]
-
-
-_service = TutorService()
-
-
-def get_tutor_service() -> TutorService:
-    return _service
+def _tutor_service(request: Request) -> TutorService:
+    return request.app.state.tutor_service
 
 
 router = APIRouter(prefix="/v1/tutor", tags=["tutor"])
 
 
-@router.post("/chat", response_model=ChatResponseSchema)
+@router.post("/chat", response_model=TutorChatResponse)
 def chat(
-    req: ChatRequestSchema,
-    svc: TutorService = Depends(get_tutor_service),
-) -> ChatResponseSchema:
-    reply = svc.chat(
-        TutorChatRequest(session_id=req.session_id, message=req.message)
-    )
-    return ChatResponseSchema(reply=reply.reply, hint_tier=reply.hint_tier)
+    req: TutorChatRequest,
+    svc: TutorService = Depends(_tutor_service),
+) -> TutorChatResponse:
+    return svc.chat(req)
 
 
-@router.post("/submit", response_model=SubmitResponseSchema)
+@router.post("/submit", response_model=TutorSubmitResponse)
 def submit(
-    req: SubmitRequestSchema,
-    svc: TutorService = Depends(get_tutor_service),
-) -> SubmitResponseSchema:
-    result = svc.submit(
-        TutorSubmitRequest(
-            session_id=req.session_id,
-            code_snapshot=req.code_snapshot,
-        )
-    )
-    return SubmitResponseSchema(
-        test_results=result.test_results,
-        viva_questions=[VivaQuestionSchema(prompt=q.prompt) for q in result.viva_questions],
-    )
+    req: TutorSubmitRequest,
+    svc: TutorService = Depends(_tutor_service),
+) -> TutorSubmitResponse:
+    return svc.submit(req)
 ```
 
-- [ ] **Step 5: Register the router**
+- [x] **Step 5: Register the router + initialize service in lifespan**
 
-In `app/main.py` (or wherever step 1 identified — match the existing pattern), add the import and `include_router` call. Example:
-
+`app/main.py`:
 ```python
+from app.services.tutor_service import TutorService
+# ...
 from app.api.tutor import router as tutor_router
+# ...
 
-# inside create_app() / app construction, alongside the other include_router calls:
+# In lifespan, before yield:
+if not hasattr(app.state, "tutor_service"):
+    app.state.tutor_service = TutorService()
+
+# After app = FastAPI(...):
 app.include_router(tutor_router)
 ```
 
-- [ ] **Step 6: Run the new test, verify it passes**
+- [x] **Step 6: Run the new test, verify it passes**
 
 Run: `python -m unittest tests.test_tutor_routes -v`
-Expected: 3 tests pass.
+Expected: 4 tests pass.
 
-- [ ] **Step 7: Re-run the full backend test suite to catch regressions**
+- [x] **Step 7: Re-run the full backend test suite to catch regressions**
 
 Run: `python -m unittest discover -s tests 2>&1 | tail -5`
-Expected: existing pass count + 3 new passes; no new failures.
+Expected: existing pass count + 4 new passes; no new failures.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
-git add app/api/tutor.py app/main.py tests/test_tutor_routes.py
-git commit -m "feat(tutor): /v1/tutor/chat and /v1/tutor/submit routes"
+git add app/api/tutor.py app/main.py app/domain/tutor.py tests/test_tutor_routes.py docs/superpowers/plans/2026-05-14-lab-tutor-phase-1.md
+git commit -m "refactor(tutor): align router with codebase DI + drop parallel schemas"
 ```
 
 ---

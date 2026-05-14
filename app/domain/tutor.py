@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 
 class TutorChatRequest(BaseModel):
-    session_id: str
-    message: str
+    session_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
 
 
 class TutorChatResponse(BaseModel):
@@ -16,7 +16,7 @@ class TutorChatResponse(BaseModel):
 
 
 class TutorSubmitRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(min_length=1)
     code_snapshot: str
 
 
