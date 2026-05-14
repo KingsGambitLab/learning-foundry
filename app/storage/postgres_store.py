@@ -409,25 +409,160 @@ class PostgresWorkflowStore:
             return [self._coerce_starter_type_recursively(item) for item in payload]
         return payload
 
-    # ------------------------------------------------------------------ stubs (filled in subsequent tasks)
+    # ------------------------------------------------------------------ course_runs / course_events / reset_all
 
     def save_course_run(self, run: CourseRun) -> CourseRun:
-        raise NotImplementedError
+        payload = json.dumps(run.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO course_runs (
+                        course_run_id, title, package_type, stage, status, created_at, updated_at, payload
+                    ) VALUES (
+                        :course_run_id, :title, :package_type, :stage, :status, :created_at, :updated_at, CAST(:payload AS JSONB)
+                    )
+                    ON CONFLICT (course_run_id) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        package_type = EXCLUDED.package_type,
+                        stage = EXCLUDED.stage,
+                        status = EXCLUDED.status,
+                        created_at = EXCLUDED.created_at,
+                        updated_at = EXCLUDED.updated_at,
+                        payload = EXCLUDED.payload
+                    """
+                ),
+                {
+                    "course_run_id": run.id,
+                    "title": run.title,
+                    "package_type": run.package_type.value,
+                    "stage": run.stage.value,
+                    "status": run.status.value,
+                    "created_at": run.created_at.isoformat(),
+                    "updated_at": run.updated_at.isoformat(),
+                    "payload": payload,
+                },
+            )
+        return run
 
     def get_course_run(self, course_run_id: str) -> CourseRun | None:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT payload FROM course_runs WHERE course_run_id = :course_run_id"),
+                {"course_run_id": course_run_id},
+            ).fetchone()
+        if row is None:
+            return None
+        return CourseRun.model_validate(self._normalize_course_run_payload(row.payload))
 
     def list_course_runs(self, limit: int = 50) -> list[CourseRunSummary]:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM course_runs
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            ).fetchall()
+        return [
+            CourseRunSummary.from_run(
+                CourseRun.model_validate(self._normalize_course_run_payload(row.payload))
+            )
+            for row in rows
+        ]
 
     def append_course_event(self, course_run_id: str, event_type: str, payload: dict) -> CourseEvent:
-        raise NotImplementedError
+        run = self.get_course_run(course_run_id)
+        if run is None:
+            raise KeyError(course_run_id)
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT COALESCE(MAX(sequence_no), 0) AS max_sequence FROM course_events WHERE course_run_id = :course_run_id"
+                ),
+                {"course_run_id": course_run_id},
+            ).fetchone()
+            sequence_no = int(row.max_sequence) + 1
+            event = CourseEvent(
+                course_run_id=course_run_id,
+                sequence_no=sequence_no,
+                event_type=event_type,
+                created_at=run.updated_at,
+                payload=payload,
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO course_events (course_run_id, sequence_no, event_type, created_at, payload)
+                    VALUES (:course_run_id, :sequence_no, :event_type, :created_at, CAST(:payload AS JSONB))
+                    """
+                ),
+                {
+                    "course_run_id": event.course_run_id,
+                    "sequence_no": event.sequence_no,
+                    "event_type": event.event_type,
+                    "created_at": event.created_at.isoformat(),
+                    "payload": json.dumps(event.model_dump(mode="json")),
+                },
+            )
+        return event
 
     def list_course_events(self, course_run_id: str) -> list[CourseEvent]:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM course_events
+                    WHERE course_run_id = :course_run_id
+                    ORDER BY sequence_no ASC
+                    """
+                ),
+                {"course_run_id": course_run_id},
+            ).fetchall()
+        return [CourseEvent.model_validate(row.payload) for row in rows]
 
     def reset_all(self) -> dict[str, int]:
-        raise NotImplementedError
+        tables = [
+            "workflow_runs",
+            "workflow_events",
+            "course_runs",
+            "course_events",
+            "publish_snapshots",
+            "learner_enrollments",
+            "learner_submissions",
+            "learner_workspace_sessions",
+            "creator_feedback",
+            "learner_feedback",
+            "learner_eval_reports",
+            "creator_assets",
+        ]
+        with self.engine.begin() as conn:
+            counts = {}
+            for table in tables:
+                row = conn.execute(text(f"SELECT COUNT(*) AS count FROM {table}")).fetchone()
+                counts[table] = int(row.count)
+            conn.execute(
+                text(
+                    "TRUNCATE TABLE "
+                    + ", ".join(tables)
+                    + " RESTART IDENTITY CASCADE"
+                )
+            )
+        return counts
+
+    def _normalize_course_run_payload(self, payload: dict) -> dict:
+        if "course_family_id" not in payload:
+            payload = {
+                **payload,
+                "course_family_id": payload.get("id"),
+            }
+        return self._coerce_starter_type_recursively(payload)
 
     def save_creator_asset(self, asset: CreatorAssetRecord) -> CreatorAssetRecord:
         raise NotImplementedError

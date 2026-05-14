@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine
 
+from app.domain.course import CourseRun, CourseRunStage, CourseRunStatus
+from app.domain.registry import PackageType
 from app.domain.workflow import DraftKind, WorkflowArtifacts, WorkflowRun
 from app.services.assignment_design_inference import GenerationIntake
 from app.storage.postgres_store import PostgresWorkflowStore
@@ -85,3 +87,65 @@ def test_list_events_returns_in_sequence_order(store: PostgresWorkflowStore) -> 
     store.append_event("run_for_listing", "b", {"i": 2})
     events = store.list_events("run_for_listing")
     assert [e.event_type for e in events] == ["a", "b"]
+
+
+def _make_course_run(course_run_id: str = "course_test") -> CourseRun:
+    """Build a minimal valid CourseRun."""
+    now = datetime.now(UTC)
+    return CourseRun(
+        id=course_run_id,
+        course_family_id=course_run_id,
+        title="Test course",
+        summary="Test summary",
+        package_type=PackageType.progressive_codebase_course,
+        stage=CourseRunStage.drafting,
+        status=CourseRunStatus.active,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_save_and_get_course_run_roundtrip(store: PostgresWorkflowStore) -> None:
+    course = _make_course_run()
+    store.save_course_run(course)
+    fetched = store.get_course_run("course_test")
+    assert fetched is not None
+    assert fetched.title == "Test course"
+
+
+def test_list_course_runs_orders_by_created_at_desc(store: PostgresWorkflowStore) -> None:
+    older = _make_course_run("course_older")
+    newer = _make_course_run("course_newer")
+    older.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    newer.created_at = datetime(2026, 5, 1, tzinfo=UTC)
+    store.save_course_run(older)
+    store.save_course_run(newer)
+    summaries = store.list_course_runs(limit=10)
+    assert [s.id for s in summaries][:2] == ["course_newer", "course_older"]
+
+
+def test_append_course_event_monotonic(store: PostgresWorkflowStore) -> None:
+    store.save_course_run(_make_course_run("course_with_events"))
+    a = store.append_course_event("course_with_events", "draft_created", {"a": 1})
+    b = store.append_course_event("course_with_events", "draft_updated", {"b": 2})
+    assert (a.sequence_no, b.sequence_no) == (1, 2)
+
+
+def test_list_course_events_in_order(store: PostgresWorkflowStore) -> None:
+    store.save_course_run(_make_course_run("course_for_events"))
+    store.append_course_event("course_for_events", "a", {"i": 1})
+    store.append_course_event("course_for_events", "b", {"i": 2})
+    events = store.list_course_events("course_for_events")
+    assert [e.event_type for e in events] == ["a", "b"]
+
+
+def test_reset_all_clears_every_table(store: PostgresWorkflowStore) -> None:
+    store.save_run(_make_workflow_run("run_reset"))
+    store.save_course_run(_make_course_run("course_reset"))
+    counts = store.reset_all()
+    # Counts dict should include every truncated table with its pre-reset row count.
+    assert counts["workflow_runs"] == 1
+    assert counts["course_runs"] == 1
+    # After reset, queries return empty.
+    assert store.get_run("run_reset") is None
+    assert store.get_course_run("course_reset") is None
