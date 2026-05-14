@@ -10,6 +10,13 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.domain.course import CourseRun, CourseRunStage, CourseRunStatus
+from app.domain.learner import (
+    LearnerEnrollment,
+    LearnerEnrollmentStatus,
+    LearnerWorkspaceScope,
+    LearnerWorkspaceSession,
+    LearnerWorkspaceSessionStatus,
+)
 from app.domain.registry import PackageType
 from app.domain.workflow import DraftKind, WorkflowArtifacts, WorkflowRun
 from app.services.assignment_design_inference import GenerationIntake
@@ -149,3 +156,68 @@ def test_reset_all_clears_every_table(store: PostgresWorkflowStore) -> None:
     # After reset, queries return empty.
     assert store.get_run("run_reset") is None
     assert store.get_course_run("course_reset") is None
+
+
+# ------------------------------------------------------------------ learner enrollments / submissions / sessions
+
+
+def _make_enrollment(enrollment_id: str = "enr_test", learner_id: str = "learner_1") -> LearnerEnrollment:
+    """Build a minimal valid LearnerEnrollment."""
+    now = datetime.now(UTC)
+    return LearnerEnrollment(
+        id=enrollment_id,
+        learner_id=learner_id,
+        course_run_id="course_1",
+        publish_snapshot_id="snap_1",
+        course_title="Title",
+        course_summary="Summary",
+        package_type=PackageType.progressive_codebase_course,
+        shared_workflow_run_id="wf_1",
+        created_at=now,
+        updated_at=now,
+        status=LearnerEnrollmentStatus.active,
+        workspace_scope=LearnerWorkspaceScope.shared_course,
+        deliverables=[],
+    )
+
+
+def test_save_and_get_enrollment(store: PostgresWorkflowStore) -> None:
+    enrollment = _make_enrollment()
+    store.save_learner_enrollment(enrollment)
+    fetched = store.get_learner_enrollment("enr_test")
+    assert fetched is not None
+    assert fetched.learner_id == "learner_1"
+
+
+def test_find_enrollment_by_learner_and_course(store: PostgresWorkflowStore) -> None:
+    store.save_learner_enrollment(_make_enrollment("enr_find", learner_id="learner_2"))
+    found = store.find_learner_enrollment("learner_2", "course_1")
+    assert found is not None
+    assert found.id == "enr_find"
+
+
+def test_list_enrollments_filters_by_learner(store: PostgresWorkflowStore) -> None:
+    store.save_learner_enrollment(_make_enrollment("e1", learner_id="alpha"))
+    store.save_learner_enrollment(_make_enrollment("e2", learner_id="beta"))
+    alpha = store.list_learner_enrollments(learner_id="alpha")
+    assert len(alpha) == 1 and alpha[0].id == "e1"
+
+
+def test_save_and_list_workspace_sessions(store: PostgresWorkflowStore) -> None:
+    store.save_learner_enrollment(_make_enrollment("enr_ws"))
+    now = datetime.now(UTC)
+    session = LearnerWorkspaceSession(
+        id="ws_1",
+        enrollment_id="enr_ws",
+        deliverable_id="deliv_1",
+        scope=LearnerWorkspaceScope.shared_course,
+        created_at=now,
+        updated_at=now,
+        status=LearnerWorkspaceSessionStatus.running,
+        workspace_root="/tmp/ws",
+    )
+    store.save_learner_workspace_session(session)
+    sessions = store.list_learner_workspace_sessions("enr_ws")
+    assert len(sessions) == 1 and sessions[0].id == "ws_1"
+    all_sessions = store.list_all_learner_workspace_sessions()
+    assert len(all_sessions) == 1 and all_sessions[0].id == "ws_1"

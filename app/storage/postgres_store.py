@@ -576,36 +576,238 @@ class PostgresWorkflowStore:
     def delete_creator_asset(self, asset_id: str) -> bool:
         raise NotImplementedError
 
+    def _normalize_learner_enrollment_payload(self, payload: dict) -> dict:
+        deliverables = payload.get("deliverables")
+        if not isinstance(deliverables, list):
+            return payload
+
+        normalized_deliverables = []
+        for deliverable in deliverables:
+            if not isinstance(deliverable, dict):
+                normalized_deliverables.append(deliverable)
+                continue
+            status = deliverable.get("status")
+            normalized_deliverables.append(
+                {
+                    **deliverable,
+                    "status": "available" if status == "locked" else status,
+                }
+            )
+
+        return {
+            **payload,
+            "deliverables": normalized_deliverables,
+        }
+
     def save_learner_enrollment(self, enrollment: LearnerEnrollment) -> LearnerEnrollment:
-        raise NotImplementedError
+        payload = json.dumps(enrollment.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO learner_enrollments (
+                        enrollment_id, learner_id, course_run_id, status, created_at, updated_at, payload
+                    ) VALUES (
+                        :enrollment_id, :learner_id, :course_run_id, :status, :created_at, :updated_at, CAST(:payload AS JSONB)
+                    )
+                    ON CONFLICT (enrollment_id) DO UPDATE SET
+                        learner_id = EXCLUDED.learner_id,
+                        course_run_id = EXCLUDED.course_run_id,
+                        status = EXCLUDED.status,
+                        created_at = EXCLUDED.created_at,
+                        updated_at = EXCLUDED.updated_at,
+                        payload = EXCLUDED.payload
+                    """
+                ),
+                {
+                    "enrollment_id": enrollment.id,
+                    "learner_id": enrollment.learner_id,
+                    "course_run_id": enrollment.course_run_id,
+                    "status": enrollment.status.value,
+                    "created_at": enrollment.created_at.isoformat(),
+                    "updated_at": enrollment.updated_at.isoformat(),
+                    "payload": payload,
+                },
+            )
+        return enrollment
 
     def get_learner_enrollment(self, enrollment_id: str) -> LearnerEnrollment | None:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT payload FROM learner_enrollments WHERE enrollment_id = :enrollment_id"),
+                {"enrollment_id": enrollment_id},
+            ).fetchone()
+        if row is None:
+            return None
+        return LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(row.payload))
 
     def find_learner_enrollment(self, learner_id: str, course_run_id: str) -> LearnerEnrollment | None:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM learner_enrollments
+                    WHERE learner_id = :learner_id AND course_run_id = :course_run_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"learner_id": learner_id, "course_run_id": course_run_id},
+            ).fetchone()
+        if row is None:
+            return None
+        return LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(row.payload))
 
     def list_learner_enrollments(
         self, learner_id: str | None = None, limit: int = 50
     ) -> list[LearnerEnrollmentSummary]:
-        raise NotImplementedError
+        if learner_id is not None:
+            query = text(
+                """
+                SELECT payload
+                FROM learner_enrollments
+                WHERE learner_id = :learner_id
+                ORDER BY updated_at DESC
+                LIMIT :limit
+                """
+            )
+            params = {"learner_id": learner_id, "limit": limit}
+        else:
+            query = text(
+                """
+                SELECT payload
+                FROM learner_enrollments
+                ORDER BY updated_at DESC
+                LIMIT :limit
+                """
+            )
+            params = {"limit": limit}
+        with self.engine.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            LearnerEnrollmentSummary.from_enrollment(
+                LearnerEnrollment.model_validate(self._normalize_learner_enrollment_payload(row.payload))
+            )
+            for row in rows
+        ]
 
     def save_learner_submission(self, submission: LearnerSubmissionRecord) -> LearnerSubmissionRecord:
-        raise NotImplementedError
+        payload = json.dumps(submission.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO learner_submissions (
+                        submission_id, enrollment_id, deliverable_id, created_at, payload
+                    ) VALUES (
+                        :submission_id, :enrollment_id, :deliverable_id, :created_at, CAST(:payload AS JSONB)
+                    )
+                    ON CONFLICT (submission_id) DO UPDATE SET
+                        enrollment_id = EXCLUDED.enrollment_id,
+                        deliverable_id = EXCLUDED.deliverable_id,
+                        created_at = EXCLUDED.created_at,
+                        payload = EXCLUDED.payload
+                    """
+                ),
+                {
+                    "submission_id": submission.id,
+                    "enrollment_id": submission.enrollment_id,
+                    "deliverable_id": submission.deliverable_id,
+                    "created_at": submission.created_at.isoformat(),
+                    "payload": payload,
+                },
+            )
+        return submission
 
     def list_learner_submissions(
         self, enrollment_id: str, deliverable_id: str | None = None
     ) -> list[LearnerSubmissionRecord]:
-        raise NotImplementedError
+        if deliverable_id is not None:
+            query = text(
+                """
+                SELECT payload
+                FROM learner_submissions
+                WHERE enrollment_id = :enrollment_id AND deliverable_id = :deliverable_id
+                ORDER BY created_at DESC
+                """
+            )
+            params = {"enrollment_id": enrollment_id, "deliverable_id": deliverable_id}
+        else:
+            query = text(
+                """
+                SELECT payload
+                FROM learner_submissions
+                WHERE enrollment_id = :enrollment_id
+                ORDER BY created_at DESC
+                """
+            )
+            params = {"enrollment_id": enrollment_id}
+        with self.engine.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [LearnerSubmissionRecord.model_validate(row.payload) for row in rows]
 
     def save_learner_workspace_session(self, session: LearnerWorkspaceSession) -> LearnerWorkspaceSession:
-        raise NotImplementedError
+        payload = json.dumps(session.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO learner_workspace_sessions (
+                        session_id, enrollment_id, deliverable_id, updated_at, payload
+                    ) VALUES (
+                        :session_id, :enrollment_id, :deliverable_id, :updated_at, CAST(:payload AS JSONB)
+                    )
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        enrollment_id = EXCLUDED.enrollment_id,
+                        deliverable_id = EXCLUDED.deliverable_id,
+                        updated_at = EXCLUDED.updated_at,
+                        payload = EXCLUDED.payload
+                    """
+                ),
+                {
+                    "session_id": session.id,
+                    "enrollment_id": session.enrollment_id,
+                    "deliverable_id": session.deliverable_id,
+                    "updated_at": session.updated_at.isoformat(),
+                    "payload": payload,
+                },
+            )
+        return session
 
     def list_learner_workspace_sessions(self, enrollment_id: str) -> list[LearnerWorkspaceSession]:
-        raise NotImplementedError
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM learner_workspace_sessions
+                    WHERE enrollment_id = :enrollment_id
+                    ORDER BY updated_at DESC
+                    """
+                ),
+                {"enrollment_id": enrollment_id},
+            ).fetchall()
+        return [LearnerWorkspaceSession.model_validate(row.payload) for row in rows]
 
     def list_all_learner_workspace_sessions(self) -> list[LearnerWorkspaceSession]:
-        raise NotImplementedError
+        """Return every workspace session across all enrollments.
+
+        Used by `LearnerStudioService.reconcile_stale_sessions` on
+        server startup to find sessions whose backing container no
+        longer exists after a process restart.
+        """
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM learner_workspace_sessions
+                    ORDER BY updated_at DESC
+                    """
+                ),
+            ).fetchall()
+        return [LearnerWorkspaceSession.model_validate(row.payload) for row in rows]
 
     def save_publish_snapshot(self, snapshot: PublishSnapshot) -> PublishSnapshot:
         raise NotImplementedError
