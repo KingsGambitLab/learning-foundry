@@ -10,7 +10,7 @@ from app.services.learner_studio_service import LearnerStudioService
 
 
 class LearnerStudioWidgetEnvsTest(unittest.TestCase):
-    def _run_launch(self, *, lab_tutor_enabled: bool, assignment_title: str | None = None):
+    def _run_launch(self, *, lab_tutor_enabled: bool, assignment_title: str | None = None, enrollment_id: str = "enr-1"):
         captured: dict[str, object] = {}
 
         def fake_run(cmd, *args, **kwargs):
@@ -33,7 +33,7 @@ class LearnerStudioWidgetEnvsTest(unittest.TestCase):
                  patch.object(svc, "_wait_for_http"), \
                  patch("app.services.learner_studio_service.subprocess.run", side_effect=fake_run):
                 svc.launch_editor(
-                    enrollment_id="enr-1",
+                    enrollment_id=enrollment_id,
                     deliverable_id="del-1",
                     workspace_root=workspace,
                     scope=LearnerWorkspaceScope.shared_course,
@@ -62,6 +62,14 @@ class LearnerStudioWidgetEnvsTest(unittest.TestCase):
         cmd = self._run_launch(lab_tutor_enabled=False, assignment_title="Build a thing")
         assert isinstance(cmd, list)
         self.assertFalse(any(c.startswith("LAB_TUTOR_") for c in cmd))
+
+    def test_enrollment_id_env_var_passes_when_enabled(self) -> None:
+        cmd = self._run_launch(lab_tutor_enabled=True, assignment_title="Build a thing", enrollment_id="enr-test")
+        self.assertIsNotNone(cmd)
+        assert isinstance(cmd, list)
+        enrollment_value = "LAB_TUTOR_ENROLLMENT_ID=enr-test"
+        self.assertIn(enrollment_value, cmd)
+        self.assertEqual(cmd[cmd.index(enrollment_value) - 1], "-e")
 
 
 if __name__ == "__main__":

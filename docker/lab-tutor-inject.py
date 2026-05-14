@@ -49,6 +49,7 @@ def main() -> int:
 
     title = (os.environ.get("LAB_TUTOR_ASSIGNMENT_TITLE") or "").strip()
     session_id = (os.environ.get("LAB_TUTOR_SESSION_ID") or "").strip()
+    enrollment_id = (os.environ.get("LAB_TUTOR_ENROLLMENT_ID") or "").strip()
 
     workbench = find_workbench()
     if workbench is None:
@@ -73,6 +74,7 @@ def main() -> int:
     base_url_attr = html.escape(base_url, quote=True)
     title_attr = html.escape(title, quote=True)
     session_attr = html.escape(session_id, quote=True)
+    enrollment_attr = html.escape(enrollment_id, quote=True)
     injection = (
         f'\n  {SENTINEL}\n'
         f'  <link rel="stylesheet" href="{base_url_attr}/static/lab-tutor.css">\n'
@@ -81,6 +83,7 @@ def main() -> int:
         f'    data-base-url="{base_url_attr}"\n'
         f'    data-assignment-title="{title_attr}"\n'
         f'    data-session-id="{session_attr}"\n'
+        f'    data-enrollment-id="{enrollment_attr}"\n'
         f'    defer\n'
         f'  ></script>\n'
     )
@@ -94,7 +97,7 @@ def main() -> int:
     workbench.write_text(new_content, encoding="utf-8")
     print(
         f"[lab-tutor-inject] patched {workbench} "
-        f"(stripped {csp_count} CSP meta; base_url={base_url}; title={title!r})",
+        f"(stripped {csp_count} CSP meta; base_url={base_url}; title={title!r}; enrollment_id={enrollment_id!r})",
         flush=True,
     )
 

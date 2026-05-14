@@ -1320,11 +1320,13 @@
       script.src = "/static/lab-tutor.js";
       script.dataset.sessionId = "lms-" + enrollmentId;
       script.dataset.assignmentTitle = courseTitle;
+      script.dataset.enrollmentId = enrollmentId;
       script.addEventListener("load", () => {
         if (typeof window.__labTutorMount === "function") {
           window.__labTutorMount({
             sessionId: "lms-" + enrollmentId,
             assignmentTitle: courseTitle,
+            enrollmentId: enrollmentId,
           });
         }
       });
@@ -1333,6 +1335,7 @@
       window.__labTutorMount({
         sessionId: "lms-" + enrollmentId,
         assignmentTitle: courseTitle,
+        enrollmentId: enrollmentId,
       });
     }
   }

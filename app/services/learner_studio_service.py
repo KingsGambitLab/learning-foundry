@@ -94,6 +94,7 @@ class LearnerStudioService:
         self,
         session_id: str,
         assignment_title: str | None,
+        enrollment_id: str | None = None,
     ) -> dict[str, str]:
         env: dict[str, str] = {
             "LAB_TUTOR_BASE_URL": self._tutor_base_url,
@@ -101,6 +102,8 @@ class LearnerStudioService:
         }
         if assignment_title:
             env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
+        if enrollment_id:
+            env["LAB_TUTOR_ENROLLMENT_ID"] = enrollment_id
         return env
 
     def launch_editor(
@@ -167,7 +170,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-            *(self._docker_env_args(self._tutor_environment(session_id, assignment_title)) if lab_tutor_enabled else []),
+            *(self._docker_env_args(self._tutor_environment(session_id, assignment_title, enrollment_id)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",

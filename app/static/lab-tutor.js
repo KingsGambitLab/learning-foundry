@@ -20,7 +20,40 @@
     sessionId:
       (me && me.dataset.sessionId) ||
       ("lms-" + Math.random().toString(36).slice(2)),
+    enrollmentId: (me && me.dataset.enrollmentId) || "",
   };
+
+  // ── Persistence ───────────────────────────────────────────────────────────
+  const STORAGE_VERSION = 1;
+  const HISTORY_MAX = 50;
+
+  function storageKey(cfg) {
+    const id = cfg.enrollmentId || cfg.sessionId || "anon";
+    return `lab_tutor_history.v${STORAGE_VERSION}.${id}`;
+  }
+
+  function loadHistory(cfg) {
+    try {
+      const raw = localStorage.getItem(storageKey(cfg));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (m) => m && (m.role === "user" || m.role === "tutor") && typeof m.text === "string"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  function saveHistory(cfg, history) {
+    try {
+      const trimmed = history.slice(-HISTORY_MAX);
+      localStorage.setItem(storageKey(cfg), JSON.stringify(trimmed));
+    } catch {
+      /* quota or disabled — silent */
+    }
+  }
 
   // ── Inject stylesheet once ────────────────────────────────────────────────
   if (!document.querySelector('link[href*="lab-tutor.css"]')) {
@@ -56,6 +89,7 @@
     let panelOpen = false;
     let welcomeShown = false;
     let thinking = false;
+    let history = [];
 
     // Root container
     const root = document.createElement("div");
@@ -181,7 +215,7 @@
       log.scrollTop = log.scrollHeight;
     }
 
-    function appendUser(text) {
+    function appendUser(text, { persist = true } = {}) {
       const wrap = document.createElement("div");
       wrap.className = "lt-msg lt-msg--user";
       const bub = document.createElement("div");
@@ -190,9 +224,13 @@
       wrap.appendChild(bub);
       log.appendChild(wrap);
       scrollToBottom();
+      if (persist) {
+        history.push({ role: "user", text });
+        saveHistory(cfg, history);
+      }
     }
 
-    function appendTutor(text) {
+    function appendTutor(text, { persist = true } = {}) {
       const wrap = document.createElement("div");
       wrap.className = "lt-msg lt-msg--tutor";
       const bub = document.createElement("div");
@@ -211,6 +249,10 @@
       wrap.appendChild(bub);
       log.appendChild(wrap);
       scrollToBottom();
+      if (persist) {
+        history.push({ role: "tutor", text });
+        saveHistory(cfg, history);
+      }
     }
 
     let thinkingEl = null;
@@ -246,8 +288,22 @@
 
       if (!welcomeShown) {
         welcomeShown = true;
-        log.appendChild(buildWelcomeCard());
-        scrollToBottom();
+        // Hydrate from localStorage on first open
+        const saved = loadHistory(cfg);
+        if (saved.length > 0) {
+          history = saved;
+          for (const msg of saved) {
+            if (msg.role === "user") {
+              appendUser(msg.text, { persist: false });
+            } else {
+              appendTutor(msg.text, { persist: false });
+            }
+          }
+          // Returning learner — skip the welcome card and chips
+        } else {
+          log.appendChild(buildWelcomeCard());
+          scrollToBottom();
+        }
       }
 
       input.focus();
@@ -296,7 +352,7 @@
           } catch (_) {
             // keep default
           }
-          appendTutor("⚠️ " + detail);
+          appendTutor("⚠️ " + detail, { persist: false });
         } else {
           const data = await res.json();
           appendTutor(data.reply || "(no reply)");
@@ -304,7 +360,8 @@
       } catch (_err) {
         removeThinking();
         appendTutor(
-          "⚠️ Couldn’t reach the tutor. Check your connection and try again."
+          "⚠️ Couldn’t reach the tutor. Check your connection and try again.",
+          { persist: false }
         );
       } finally {
         thinking = false;
@@ -341,6 +398,7 @@
           document.body.appendChild(root);
         }
         root.style.display = "";
+        console.info("[lab-tutor] persistence key:", storageKey(cfg));
       },
       unmount() {
         closePanel();
@@ -356,6 +414,9 @@
         }
         if (newCfg.baseUrl !== undefined) {
           cfg.baseUrl = newCfg.baseUrl;
+        }
+        if (newCfg.enrollmentId !== undefined) {
+          cfg.enrollmentId = newCfg.enrollmentId;
         }
       },
       destroy() {
