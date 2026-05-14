@@ -492,10 +492,21 @@ def _execute_step(
 
     expect_passed, diagnostic = _expect_diagnostic(step.expect, status)
 
+    # Bug 18: include the resolved request shape in the capture entry
+    # so rubrics can compute things like "every cited passage_id was in
+    # the request's search_results" (subset_match) without inlining the
+    # request body twice.
     capture_entry = {
         "status": status,
         "headers": resp_headers,
         "body": resp_body,
+        "request": {
+            "method": step.method,
+            "path": step.path,
+            "headers": headers,
+            "body": body,
+            "url": url,
+        },
     }
     captures[step.id] = capture_entry
     if step.capture and step.capture != step.id:

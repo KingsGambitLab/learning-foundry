@@ -153,10 +153,17 @@ def _hash_scenario_set(scenarios: list[Scenario]) -> str:
 
 
 def _load_setup_data(setup_data_dir: Path | None) -> dict[str, Any]:
-    """Walk a setup-data directory: JSON files parsed, everything else raw.
+    """Walk a setup-data directory: JSON / JSONL parsed, everything else raw.
 
     Keys are file *stems* so ``gold.json`` and ``gold.txt`` would
     collide on purpose (authors should keep stems unique).
+
+    JSONL handling (Bug 26): each line is parsed as a separate JSON
+    object. The result is a LIST of those objects keyed by file stem
+    — matching how callers index CRAG-shaped data
+    (``setup_data.queries[0].query``). If any line fails to parse,
+    the whole file falls back to raw text (so the operator can see
+    what went wrong instead of a silent empty list).
     """
     if setup_data_dir is None:
         return {}
@@ -164,11 +171,24 @@ def _load_setup_data(setup_data_dir: Path | None) -> dict[str, Any]:
     for f in sorted(Path(setup_data_dir).iterdir()):
         if not f.is_file():
             continue
-        if f.suffix.lower() == ".json":
+        suffix = f.suffix.lower()
+        if suffix == ".json":
             try:
                 result[f.stem] = json.loads(f.read_text())
             except (ValueError, json.JSONDecodeError):
                 result[f.stem] = f.read_text()
+        elif suffix == ".jsonl":
+            raw_text = f.read_text()
+            try:
+                lines = [
+                    json.loads(line)
+                    for line in raw_text.splitlines()
+                    if line.strip()
+                ]
+            except (ValueError, json.JSONDecodeError):
+                result[f.stem] = raw_text
+            else:
+                result[f.stem] = lines
         else:
             result[f.stem] = f.read_text()
     return result
