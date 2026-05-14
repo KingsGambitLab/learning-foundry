@@ -316,8 +316,10 @@
     }
 
     // ── Send message ──────────────────────────────────────────────────────────
-    async function sendMessage() {
-      const text = input.value.trim();
+    // When called with no argument, reads from the input field (normal user flow).
+    // When called with a string, uses that text directly (programmatic / intercept flow).
+    async function sendMessage(externalText) {
+      const text = (externalText !== undefined ? externalText : input.value).trim();
       if (!text || thinking) return;
 
       input.value = "";
@@ -404,6 +406,8 @@
         closePanel();
         root.style.display = "none";
       },
+      open: openPanel,
+      ask: sendMessage,
       update(newCfg) {
         if (newCfg.assignmentTitle !== undefined) {
           cfg.assignmentTitle = newCfg.assignmentTitle;
@@ -467,4 +471,114 @@
   window.__labTutorUpdate = function (cfg) {
     if (widget) widget.update(cfg);
   };
+
+  // Open the tutor panel (mount first if needed). Safe to call repeatedly.
+  window.__labTutorOpen = function () {
+    const w = ensureWidget();
+    w.mount();
+    w.open();
+  };
+
+  // Programmatically submit a message as if the learner typed it and pressed Enter.
+  // The text is persisted to history and the /v1/tutor/chat flow fires normally.
+  window.__labTutorAskAs = function (prompt) {
+    const w = ensureWidget();
+    w.mount();
+    w.open();
+    w.ask(prompt);
+  };
+
+  // ── Agent panel intercept ─────────────────────────────────────────────────
+  // Hooks code-server's "Build with Agent" input so every submit is routed to
+  // the tutor instead of the agent. No judge, no verdict, unconditional.
+  (function setupAgentIntercept() {
+    let replaying = false; // unused now, reserved for future send-to-agent passthrough
+
+    const SELECTORS = [
+      'textarea[placeholder*="Describe what to build" i]',
+      '[contenteditable="true"][placeholder*="Describe what to build" i]',
+      '[aria-label*="Describe what to build" i]',
+      '[aria-label*="agent" i][role="textbox"]',
+      '.chat-input-container textarea',
+    ];
+
+    function findAgentInput() {
+      for (const sel of SELECTORS) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) return { el, sel };
+      }
+      return null;
+    }
+
+    function readPrompt(input) {
+      if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") return input.value || "";
+      return input.innerText || input.textContent || "";
+    }
+
+    function clearPrompt(input) {
+      if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      } else {
+        input.textContent = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+
+    function findSendButton(input) {
+      return (
+        input.closest("form")?.querySelector('button[type="submit"]')
+        || input.parentElement?.querySelector('button[aria-label*="send" i]')
+        || input.parentElement?.querySelector('button[title*="send" i]')
+        || input.parentElement?.parentElement?.querySelector('button[aria-label*="send" i]')
+        || null
+      );
+    }
+
+    function intercept(prompt, input) {
+      // Always route the captured text to the tutor — no judge, no verdict.
+      if (typeof window.__labTutorOpen === "function") window.__labTutorOpen();
+      if (typeof window.__labTutorAskAs === "function") window.__labTutorAskAs(prompt);
+      // Clear the agent input so the learner doesn't have to delete it manually.
+      clearPrompt(input);
+    }
+
+    function hookInput(input, selector) {
+      if (input.__labTutorHooked) return;
+      input.__labTutorHooked = true;
+      console.info("[lab-tutor] hooked agent input via", selector);
+      const sendBtn = findSendButton(input);
+
+      input.addEventListener("keydown", (e) => {
+        if (replaying) return;
+        if (e.key !== "Enter" || e.shiftKey) return;
+        const prompt = readPrompt(input).trim();
+        if (prompt.length < 1) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        intercept(prompt, input);
+      }, true);
+
+      if (sendBtn && !sendBtn.__labTutorHooked) {
+        sendBtn.__labTutorHooked = true;
+        sendBtn.addEventListener("click", (e) => {
+          if (replaying) return;
+          const prompt = readPrompt(input).trim();
+          if (prompt.length < 1) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          intercept(prompt, input);
+        }, true);
+      }
+    }
+
+    function tryHook() {
+      const m = findAgentInput();
+      if (m) hookInput(m.el, m.sel);
+    }
+
+    tryHook();
+    const observer = new MutationObserver(() => tryHook());
+    observer.observe(document.body, { childList: true, subtree: true });
+  })();
 })();
