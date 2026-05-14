@@ -638,6 +638,20 @@ class SQLiteWorkflowStore:
             connection.commit()
         return session
 
+    def get_learner_workspace_session(self, session_id: str) -> LearnerWorkspaceSession | None:
+        with self._session() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM learner_workspace_sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return LearnerWorkspaceSession.model_validate(json.loads(row["payload_json"]))
+
     def list_learner_workspace_sessions(self, enrollment_id: str) -> list[LearnerWorkspaceSession]:
         with self._session() as connection:
             rows = connection.execute(

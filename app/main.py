@@ -183,6 +183,7 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "tutor_service"):
         app.state.tutor_service = TutorService(
             anthropic_env_file=os.environ.get("COURSE_GEN_ANTHROPIC_ENV_FILE"),
+            store=app.state.workflow_service.store,
         )
     yield
 
