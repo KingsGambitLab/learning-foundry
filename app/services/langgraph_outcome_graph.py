@@ -410,6 +410,13 @@ def node_starter_repair(
         ],
         "boot_result": state.starter_boot_result,
     }
+    log_coursegen_event(
+        "node_starter_repair_invoked",
+        starter_attempt=state.starter_attempt,
+        findings_count=len(failure_context["findings"]),
+        boot_stage=(state.starter_boot_result or {}).get("stage"),
+        boot_error_excerpt=((state.starter_boot_result or {}).get("error") or "")[:200],
+    )
     files = deps.repo_author.generate_bundle(
         spec=state.spec, failure_context=failure_context
     )
@@ -541,14 +548,16 @@ def node_oracle_curated_validation(
 def node_grader_repair(
     state: OutcomeWorkflowState, *, deps: OutcomeGraphDeps
 ) -> OutcomeWorkflowState:
-    """Re-run oracle authoring after a failed validation pass.
+    """Re-run oracle authoring with prior-attempt findings as repair context.
 
-    Findings from the validation report are forwarded to oracle_author
-    via the spec — for Wave 4 we simply rerun authoring; a follow-up
-    can pipe ``validation_failures_to_findings`` through the prompt as
-    repair guidance.
-
-    TODO(wave 5): pass validation findings into oracle_author for repair.
+    The blocking reasons from ``oracle_validation_report`` (post-oracle-pass)
+    and ``curated_validation_report`` are forwarded to
+    ``OracleAuthoring.author_oracle`` via the ``failure_context`` kwarg —
+    without this, every grader_repair was a re-roll of the dice and the
+    harness "never repaired" in the live RAG smoke even after exhausting
+    the 3-attempt budget (logs/course_generation.log shows zero
+    ``grader_repair`` events because the prior implementation didn't
+    emit any).
     """
     state.stage = "grader_repair"
     assert state.spec is not None
@@ -557,7 +566,51 @@ def node_grader_repair(
     # Mark the retry attempt before rerunning so retry-budget logic can read
     # the attempt counter accurately if oracle_author raises.
     state.grader_attempt += 1
-    result = deps.oracle_author.author_oracle(state.spec)
+
+    # Build the repair context from whichever validators produced a report.
+    blocking_reasons: list[str] = []
+    run_report = state.oracle_validation_report
+    curated_report = state.curated_validation_report
+    if run_report is not None:
+        blocking_reasons.extend(run_report.blocking_reasons or [])
+    if curated_report is not None:
+        blocking_reasons.extend(curated_report.blocking_reasons or [])
+    pass_result = state.oracle_pass_result
+    failure_context: dict[str, Any] = {
+        "prior_blocking_reasons": blocking_reasons,
+    }
+    if pass_result is not None:
+        # ``OraclePassResult`` carries the totals + hashes we feed to
+        # the LLM so it can see how much it broke / passed last time.
+        for key in (
+            "passed_scenarios",
+            "failed_scenarios",
+            "abstained_scenarios",
+            "total_scenarios",
+            "scenario_set_hash",
+            "reference_impl_hash",
+        ):
+            if hasattr(pass_result, key):
+                failure_context[key] = getattr(pass_result, key)
+
+    log_coursegen_event(
+        "node_grader_repair_invoked",
+        grader_attempt=state.grader_attempt,
+        blocking_reasons_count=len(blocking_reasons),
+        passed_scenarios=failure_context.get("passed_scenarios"),
+        failed_scenarios=failure_context.get("failed_scenarios"),
+    )
+
+    # ``author_oracle`` accepts ``failure_context`` as a keyword arg; test
+    # doubles that haven't grown the parameter fall back to the legacy
+    # signature transparently.
+    try:
+        result = deps.oracle_author.author_oracle(
+            state.spec, failure_context=failure_context
+        )
+    except TypeError:
+        result = deps.oracle_author.author_oracle(state.spec)
+
     state.oracle_authoring_result = result
     state.cost_usd += float(getattr(result, "cost_usd", 0.0) or 0.0)
     materialize_oracle_bundle(state.workspace_root, result)

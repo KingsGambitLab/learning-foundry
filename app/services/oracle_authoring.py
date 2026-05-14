@@ -456,13 +456,37 @@ class OracleAuthor:
 
     # ----- public API -----
 
-    def author_oracle(self, spec: CourseOutcomeSpec) -> OracleAuthoringResult:
+    def author_oracle(
+        self,
+        spec: CourseOutcomeSpec,
+        *,
+        failure_context: dict | None = None,
+    ) -> OracleAuthoringResult:
         """Produce scenarios + reference impl + setup data for the spec.
 
         Retries up to 3 times. Each retry appends the accumulated
         validation failures to the user prompt so Sonnet can repair the
         bundle without re-deriving everything from scratch. Raises
         :class:`OracleAuthoringError` on unrecoverable failure.
+
+        ``failure_context`` carries findings from a PRIOR ``author_oracle``
+        call that produced a bundle which then failed validation
+        downstream (oracle_pass or curated_validation). The grader-repair
+        node passes this in so the first attempt of the new call already
+        has the previous failures in its repair section — without it,
+        every grader-repair call is a re-roll. Shape::
+
+            {
+                "prior_blocking_reasons": [str, ...],
+                "scenario_set_hash": str,
+                "reference_impl_hash": str,
+                "passed_scenarios": int,
+                "failed_scenarios": int,
+                "abstained_scenarios": int,
+            }
+
+        All keys are optional; the prompt is built from whichever keys
+        are present.
 
         When ``spec.benchmark`` is set, the setup data step is taken over
         by the benchmark loader: the corpus, queries and qrels are pulled
@@ -561,6 +585,39 @@ class OracleAuthor:
 
         total_cost = 0.0
         attempt_diagnostics: list[str] = []
+
+        # Seed repair context from a prior author_oracle call (grader-repair
+        # path). Without this, every retry call from node_grader_repair
+        # starts attempt 1 with no failure history — which is just a
+        # re-roll and explains why the harness "never repaired" in the
+        # live RAG smoke even after 3 grader-repair budget cycles.
+        if failure_context:
+            prior_lines: list[str] = []
+            blocking = failure_context.get("prior_blocking_reasons") or []
+            if blocking:
+                prior_lines.append("- Validators flagged these blocking issues:")
+                for reason in blocking[:25]:
+                    prior_lines.append(f"  * {reason}")
+                if len(blocking) > 25:
+                    prior_lines.append(f"  * ... and {len(blocking) - 25} more")
+            for key in (
+                "passed_scenarios",
+                "failed_scenarios",
+                "abstained_scenarios",
+            ):
+                if key in failure_context:
+                    prior_lines.append(f"- {key}: {failure_context[key]}")
+            if prior_lines:
+                attempt_diagnostics.append(
+                    "Prior author_oracle call produced a bundle that failed "
+                    "downstream validation:\n" + "\n".join(prior_lines)
+                )
+                log_coursegen_event(
+                    "oracle_authoring_repair_context_seeded",
+                    blocking_count=len(blocking),
+                    passed=failure_context.get("passed_scenarios"),
+                    failed=failure_context.get("failed_scenarios"),
+                )
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             user_prompt = base_user_prompt
