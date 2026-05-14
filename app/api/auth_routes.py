@@ -71,10 +71,9 @@ def register(payload: RegisterRequest, request: Request, response: Response) -> 
 def login(payload: LoginRequest, request: Request, response: Response) -> AuthResponse:
     store = _store(request)
     stored_hash = store.get_user_password_hash(payload.email)
-    if stored_hash is None or not verify_password(payload.password, stored_hash):
+    user = store.get_user_by_email(payload.email) if stored_hash is not None else None
+    if stored_hash is None or user is None or not verify_password(payload.password, stored_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    user = store.get_user_by_email(payload.email)
-    assert user is not None
     session_id = _session_service(request).create(
         user_id=user.id,
         ip=_safe_ip(request.client.host if request.client else None),
