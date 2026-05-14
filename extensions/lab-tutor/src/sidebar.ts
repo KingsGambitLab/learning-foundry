@@ -1,8 +1,9 @@
+import * as fs from "fs";
 import * as vscode from "vscode";
 
 export class TutorSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = "labTutor.chat";
-  private view?: vscode.WebviewView;
+  private cachedTemplate?: string;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -10,7 +11,6 @@ export class TutorSidebarProvider implements vscode.WebviewViewProvider {
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
@@ -34,11 +34,13 @@ export class TutorSidebarProvider implements vscode.WebviewViewProvider {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.js"),
     );
-    const tpl = require("fs").readFileSync(
-      vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.html").fsPath,
-      "utf8",
-    );
-    return tpl
+    if (this.cachedTemplate === undefined) {
+      this.cachedTemplate = fs.readFileSync(
+        vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.html").fsPath,
+        "utf8",
+      );
+    }
+    return this.cachedTemplate
       .replaceAll("${nonce}", nonce)
       .replaceAll("${scriptUri}", scriptUri.toString());
   }
