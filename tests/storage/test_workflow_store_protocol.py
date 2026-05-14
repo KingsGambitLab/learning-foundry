@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.postgres_store import PostgresWorkflowStore
 from app.storage.workflow_store import WorkflowStore
 
 
@@ -37,7 +37,7 @@ def test_protocol_lists_every_legacy_sqlite_method() -> None:
     assert protocol_methods == LEGACY_PUBLIC_METHOD_NAMES | AUTH_METHOD_NAMES
 
 
-def test_sqlite_store_satisfies_legacy_protocol() -> None:
-    store: WorkflowStore = SQLiteWorkflowStore.__new__(SQLiteWorkflowStore)
+def test_postgres_store_satisfies_legacy_protocol() -> None:
+    store: WorkflowStore = PostgresWorkflowStore.__new__(PostgresWorkflowStore)
     for method in LEGACY_PUBLIC_METHOD_NAMES:
         assert callable(getattr(store, method, None)), f"{method} missing"
