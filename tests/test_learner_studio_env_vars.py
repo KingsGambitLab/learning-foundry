@@ -59,6 +59,85 @@ class LearnerStudioEnvVarsTest(unittest.TestCase):
             self.assertEqual(cmd[ext_dir_idx + 1], "/opt/lab-tutor/extensions")
 
 
+    def test_launch_passes_assignment_title_env_var(self) -> None:
+        with TemporaryDirectory() as td:
+            workspace = Path(td) / "ws"
+            workspace.mkdir()
+            svc = LearnerStudioService(tutor_base_url="http://lab-tutor.svc:8000")
+
+            captured: dict[str, object] = {}
+
+            def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+                if "run" in cmd and "-d" in cmd:
+                    captured["cmd"] = cmd
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = ""
+                result.stderr = ""
+                return result
+
+            with patch.object(svc, "_allocate_port", return_value=8765), \
+                 patch.object(svc, "_ensure_image"), \
+                 patch.object(svc, "_remove_runtime_support"), \
+                 patch.object(svc, "_dependency_services", return_value=[]), \
+                 patch.object(svc, "_wait_for_http"), \
+                 patch("app.services.learner_studio_service.subprocess.run", side_effect=fake_run):
+                svc.launch_editor(
+                    enrollment_id="enr-1",
+                    deliverable_id="del-1",
+                    workspace_root=workspace,
+                    scope=LearnerWorkspaceScope.shared_course,
+                    lab_tutor_enabled=True,
+                    lab_tutor_assignment_title="Build a REST API",
+                )
+
+            cmd = captured.get("cmd")
+            self.assertIsNotNone(cmd, "docker run command must be captured")
+            assert isinstance(cmd, list)
+
+            title_env = [c for c in cmd if c.startswith("LAB_TUTOR_ASSIGNMENT_TITLE=")]
+            self.assertEqual(len(title_env), 1)
+            self.assertEqual(title_env[0], "LAB_TUTOR_ASSIGNMENT_TITLE=Build a REST API")
+            self.assertEqual(cmd[cmd.index(title_env[0]) - 1], "-e")
+
+    def test_launch_omits_assignment_title_when_not_provided(self) -> None:
+        with TemporaryDirectory() as td:
+            workspace = Path(td) / "ws"
+            workspace.mkdir()
+            svc = LearnerStudioService(tutor_base_url="http://lab-tutor.svc:8000")
+
+            captured: dict[str, object] = {}
+
+            def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+                if "run" in cmd and "-d" in cmd:
+                    captured["cmd"] = cmd
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = ""
+                result.stderr = ""
+                return result
+
+            with patch.object(svc, "_allocate_port", return_value=8765), \
+                 patch.object(svc, "_ensure_image"), \
+                 patch.object(svc, "_remove_runtime_support"), \
+                 patch.object(svc, "_dependency_services", return_value=[]), \
+                 patch.object(svc, "_wait_for_http"), \
+                 patch("app.services.learner_studio_service.subprocess.run", side_effect=fake_run):
+                svc.launch_editor(
+                    enrollment_id="enr-1",
+                    deliverable_id="del-1",
+                    workspace_root=workspace,
+                    scope=LearnerWorkspaceScope.shared_course,
+                    lab_tutor_enabled=True,
+                )
+
+            cmd = captured.get("cmd")
+            self.assertIsNotNone(cmd, "docker run command must be captured")
+            assert isinstance(cmd, list)
+
+            cmd_str = " ".join(cmd)
+            self.assertNotIn("LAB_TUTOR_ASSIGNMENT_TITLE", cmd_str)
+
     def test_launch_skips_lab_tutor_when_disabled(self) -> None:
         with TemporaryDirectory() as td:
             workspace = Path(td) / "ws"

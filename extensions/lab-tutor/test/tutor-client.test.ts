@@ -34,13 +34,26 @@ describe("TutorClient", () => {
 
   after(() => server.close());
 
-  it("POSTs to /v1/tutor/chat with session id and message", async () => {
+  it("POSTs to /v1/tutor/chat with session id and message (no title)", async () => {
     const client = new TutorClient(baseUrl, "sess-123");
     const reply = await client.chat("hello");
     assert.equal(captured.url, "/v1/tutor/chat");
+    // assignment_title is undefined → JSON.stringify omits the key entirely.
     assert.deepEqual(JSON.parse(captured.body!), {
       session_id: "sess-123",
       message: "hello",
+    });
+    assert.equal(reply, "hi back");
+  });
+
+  it("POSTs assignment_title when client is constructed with a title", async () => {
+    const client = new TutorClient(baseUrl, "sess-456", "Build a REST API");
+    const reply = await client.chat("stuck on routing");
+    assert.equal(captured.url, "/v1/tutor/chat");
+    assert.deepEqual(JSON.parse(captured.body!), {
+      session_id: "sess-456",
+      message: "stuck on routing",
+      assignment_title: "Build a REST API",
     });
     assert.equal(reply, "hi back");
   });

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { VivaQuestion } from "./types";
+import { escapeHtml } from "./util/html";
 
 export function showVivaPopup(questions: VivaQuestion[]): void {
   const panel = vscode.window.createWebviewPanel(
@@ -22,12 +23,3 @@ export function showVivaPopup(questions: VivaQuestion[]): void {
 </body></html>`;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[c]!);
-}

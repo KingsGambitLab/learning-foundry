@@ -4,13 +4,16 @@ export class TutorClient {
   constructor(
     private readonly baseUrl: string,
     private readonly sessionId: string,
+    private readonly assignmentTitle?: string,
   ) {}
 
   async chat(message: string): Promise<string> {
-    const data = await this.post<ChatReply>("/v1/tutor/chat", {
+    const body: Record<string, string | undefined> = {
       session_id: this.sessionId,
       message,
-    });
+      assignment_title: this.assignmentTitle,
+    };
+    const data = await this.post<ChatReply>("/v1/tutor/chat", body);
     return data.reply;
   }
 

@@ -190,10 +190,12 @@ class PublishLearnerCertificationService:
 
             primary_deliverable_id = learner_package.deliverables[0].deliverable_id
             lab_tutor_enabled = False
+            lab_tutor_assignment_title: str | None = None
             if self.store is not None and snapshot.course_run_id:
                 source_run = self.store.get_course_run(snapshot.course_run_id)
                 if source_run is not None:
                     lab_tutor_enabled = source_run.lab_tutor_enabled
+                    lab_tutor_assignment_title = source_run.title
             try:
                 workspace_session = self.learner_studio_service.launch_editor(
                     enrollment_id=f"publish_cert_{snapshot.id}",
@@ -202,6 +204,7 @@ class PublishLearnerCertificationService:
                     scope=learner_package.workspace_scope,
                     start_support_services=False,
                     lab_tutor_enabled=lab_tutor_enabled,
+                    lab_tutor_assignment_title=lab_tutor_assignment_title,
                 )
             except LearnerStudioError as exc:
                 return self._failed_report(

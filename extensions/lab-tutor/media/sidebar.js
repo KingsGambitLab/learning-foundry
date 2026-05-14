@@ -4,10 +4,24 @@
   const input = document.getElementById("input");
   const send = document.getElementById("send");
 
-  function append(role, text) {
+  function append(role, text, parseBold = false) {
     const el = document.createElement("div");
     el.className = "msg " + role;
-    el.textContent = text;
+    if (parseBold) {
+      // Render **bold** without using innerHTML.
+      const parts = text.split(/(\*\*[^*]+\*\*)/g);
+      for (const part of parts) {
+        if (part.startsWith("**") && part.endsWith("**")) {
+          const strong = document.createElement("strong");
+          strong.textContent = part.slice(2, -2);
+          el.appendChild(strong);
+        } else {
+          el.appendChild(document.createTextNode(part));
+        }
+      }
+    } else {
+      el.textContent = text;
+    }
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
   }
@@ -25,7 +39,8 @@
 
   window.addEventListener("message", (event) => {
     const m = event.data;
-    if (m.type === "reply") append("tutor", m.text);
-    if (m.type === "error") append("tutor", "Error: " + m.text);
+    if (m.type === "welcome") append("tutor", m.text, true);
+    else if (m.type === "reply") append("tutor", m.text);
+    else if (m.type === "error") append("tutor", "Error: " + m.text);
   });
 })();

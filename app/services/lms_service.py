@@ -255,6 +255,7 @@ class LMSService:
             scope=enrollment.workspace_scope,
             existing_session=latest_session,
             lab_tutor_enabled=lab_tutor_enabled,
+            lab_tutor_assignment_title=course_run.title if course_run is not None else None,
         )
         self.store.save_learner_workspace_session(session)
         if enrollment.current_deliverable_id != deliverable.deliverable_id:

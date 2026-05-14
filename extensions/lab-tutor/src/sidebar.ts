@@ -8,6 +8,7 @@ export class TutorSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly onUserMessage: (text: string) => Promise<string>,
+    private readonly assignmentTitle?: string,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -27,6 +28,12 @@ export class TutorSidebarProvider implements vscode.WebviewViewProvider {
         view.webview.postMessage({ type: "error", text });
       }
     });
+
+    const welcome = this.assignmentTitle
+      ? `Working on **${this.assignmentTitle}**. Tell me where you're stuck — design, code, or testing.`
+      : `Ready when you are. What part are you on?`;
+    // Post after a tick so the webview script is listening.
+    setTimeout(() => view.webview.postMessage({ type: "welcome", text: welcome }), 0);
   }
 
   private html(webview: vscode.Webview): string {

@@ -15,7 +15,11 @@ export function activate(context: vscode.ExtensionContext): void {
     process.env.LAB_TUTOR_SESSION_ID ||
     cfg.get<string>("sessionId") ||
     "dev-session";
-  const client = new TutorClient(baseUrl, sessionId);
+  const assignmentTitle =
+    process.env.LAB_TUTOR_ASSIGNMENT_TITLE ||
+    cfg.get<string>("assignmentTitle") ||
+    undefined;
+  const client = new TutorClient(baseUrl, sessionId, assignmentTitle);
 
   const budget = new HintBudget(4);
   const statusBar = new TutorStatusBar(budget);
@@ -24,6 +28,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebar = new TutorSidebarProvider(
     context.extensionUri,
     (text) => client.chat(text),
+    assignmentTitle,
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

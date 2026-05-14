@@ -128,6 +128,7 @@ class LearnerStudioService:
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
         lab_tutor_enabled: bool = False,
+        lab_tutor_assignment_title: str | None = None,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -189,7 +190,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-            *(self._docker_env_args(self._tutor_environment(session_id)) if lab_tutor_enabled else []),
+            *(self._docker_env_args(self._tutor_environment(session_id, lab_tutor_assignment_title)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
@@ -521,11 +522,14 @@ class LearnerStudioService:
             if str(service.get("service_id")) != "app" and service.get("container_image")
         ]
 
-    def _tutor_environment(self, session_id: str) -> dict[str, str]:
-        return {
+    def _tutor_environment(self, session_id: str, assignment_title: str | None = None) -> dict[str, str]:
+        env = {
             "LAB_TUTOR_BASE_URL": self._tutor_base_url,
             "LAB_TUTOR_SESSION_ID": session_id,
         }
+        if assignment_title:
+            env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
+        return env
 
     def _app_runtime_environment(self, workspace_path: Path) -> dict[str, str]:
         environment: dict[str, str] = {}

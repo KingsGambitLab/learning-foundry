@@ -206,6 +206,33 @@ class PublishCertLabTutorStoreResolutionTests(unittest.TestCase):
             f"Expected lab_tutor_enabled=False when store returns None, got kwargs={kwargs}",
         )
 
+    def test_store_is_queried_and_assignment_title_forwarded(self) -> None:
+        """When the store returns a course run, certify_snapshot must pass
+        lab_tutor_assignment_title=course_run.title to launch_editor.
+        """
+        course_run = _make_course_run("course_tutor_on", lab_tutor_enabled=True)
+        mock_store = MagicMock()
+        mock_store.get_course_run.return_value = course_run
+
+        kwargs = self._run_certify_with_store(course_run=course_run, store=mock_store)
+
+        self.assertEqual(
+            kwargs.get("lab_tutor_assignment_title"),
+            "Test Course",
+            f"Expected lab_tutor_assignment_title='Test Course', got kwargs={kwargs}",
+        )
+
+    def test_no_store_defaults_assignment_title_to_none(self) -> None:
+        """Without a store, certify_snapshot should pass None as lab_tutor_assignment_title."""
+        course_run = _make_course_run("course_tutor_off", lab_tutor_enabled=False)
+
+        kwargs = self._run_certify_with_store(course_run=course_run, store=None)
+
+        self.assertIsNone(
+            kwargs.get("lab_tutor_assignment_title"),
+            f"Expected lab_tutor_assignment_title=None with no store, got kwargs={kwargs}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

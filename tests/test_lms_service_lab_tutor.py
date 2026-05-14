@@ -162,6 +162,20 @@ class LMSServiceLabTutorTests(unittest.TestCase):
             "Expected lab_tutor_enabled=False for a disabled course run",
         )
 
+    def test_launch_workspace_passes_assignment_title(self) -> None:
+        course_run = _make_course_run("course_with_title", lab_tutor_enabled=True)
+        enrollment = _make_enrollment("enrollment_c", "course_with_title")
+
+        mock_studio = self._run_launch_workspace(course_run=course_run, enrollment=enrollment)
+
+        mock_studio.launch_editor.assert_called_once()
+        call_kwargs = mock_studio.launch_editor.call_args.kwargs
+        self.assertEqual(
+            call_kwargs.get("lab_tutor_assignment_title"),
+            "Test Course",
+            "Expected assignment title to be passed from CourseRun.title",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
