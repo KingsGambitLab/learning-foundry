@@ -240,5 +240,108 @@ class BuildRubricEndToEndTests(unittest.TestCase):
         self.assertEqual(rubric.min_recall, 0.6)
 
 
+class PathPrefixUnificationTests(unittest.TestCase):
+    """Bug 16: unify the two path-prefix conventions.
+
+    Before this fix, ``oracle_set_overlap.gold_set_path`` walked
+    ``ctx.setup_data`` directly (NO prefix), but ``llm_judge_*`` paths
+    used the merged context (REQUIRED prefix). The LLM kept emitting
+    one form into the other's kwarg.
+
+    After this fix:
+    - ``oracle_set_overlap.gold_set_path`` accepts either form (strips
+      a leading ``setup_data.`` if present).
+    - ``llm_judge_*`` paths get auto-prefixed in ``_normalize_rubric_kwargs``
+      when the LLM emits a bare path that obviously addresses setup_data.
+    """
+
+    def test_oracle_set_overlap_accepts_prefixed_path(self) -> None:
+        from app.services.scenario_rubrics_base import RubricContext
+
+        rubric = _build_rubric(
+            "oracle_set_overlap",
+            {
+                "target": "call.body.citations",
+                "gold_set_path": "setup_data.gold_supports.q1",
+            },
+            router=None,
+        )
+        ctx = RubricContext(
+            captures={
+                "call": {"body": {"citations": ["acme_q3_24_rev"]}, "status": 200, "headers": {}}
+            },
+            setup_data={"gold_supports": {"q1": ["acme_q3_24_rev"]}},
+        )
+        verdict = rubric.judge(ctx)
+        self.assertEqual(verdict.status, "pass")
+
+    def test_oracle_set_overlap_accepts_bare_path(self) -> None:
+        """Original convention still works."""
+        from app.services.scenario_rubrics_base import RubricContext
+
+        rubric = _build_rubric(
+            "oracle_set_overlap",
+            {
+                "target": "call.body.citations",
+                "gold_set_path": "gold_supports.q1",
+            },
+            router=None,
+        )
+        ctx = RubricContext(
+            captures={
+                "call": {"body": {"citations": ["acme_q3_24_rev"]}, "status": 200, "headers": {}}
+            },
+            setup_data={"gold_supports": {"q1": ["acme_q3_24_rev"]}},
+        )
+        verdict = rubric.judge(ctx)
+        self.assertEqual(verdict.status, "pass")
+
+    def test_llm_judge_semantic_eq_bare_path_gets_prefixed(self) -> None:
+        """LLM emits ``gold_answers.q1.answer`` (no prefix) → normalizer
+        auto-prefixes to ``setup_data.gold_answers.q1.answer`` so the
+        merged-context resolver can reach it.
+        """
+        out = _normalize_rubric_kwargs(
+            "llm_judge_semantic_eq",
+            {
+                "target": "call.body.answer",
+                "gold_path": "gold_answers.q1.answer",
+                "alt_path": "gold_answers.q1.alt_ans",
+            },
+        )
+        self.assertEqual(out["gold_path"], "setup_data.gold_answers.q1.answer")
+        self.assertEqual(out["alt_path"], "setup_data.gold_answers.q1.alt_ans")
+
+    def test_llm_judge_prefixed_path_left_alone(self) -> None:
+        """Already-prefixed paths shouldn't get a double prefix."""
+        out = _normalize_rubric_kwargs(
+            "llm_judge_semantic_eq",
+            {
+                "target": "call.body.answer",
+                "gold_path": "setup_data.gold_answers.q1.answer",
+            },
+        )
+        self.assertEqual(out["gold_path"], "setup_data.gold_answers.q1.answer")
+
+    def test_llm_judge_capture_path_not_prefixed(self) -> None:
+        """Paths that obviously address captures (start with $., contain
+        ``response`` / ``call_``) must NOT get a setup_data prefix.
+        """
+        for capture_path in (
+            "$.call.body.answer",
+            "call_q1.response.body.answer",
+            "response.body",
+        ):
+            out = _normalize_rubric_kwargs(
+                "llm_judge_semantic_eq",
+                {"target": "x", "gold_path": capture_path},
+            )
+            self.assertEqual(
+                out["gold_path"],
+                capture_path,
+                f"normalizer mis-prefixed capture path {capture_path!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

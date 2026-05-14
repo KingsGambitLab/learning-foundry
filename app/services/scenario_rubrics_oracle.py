@@ -88,10 +88,20 @@ class OracleSetOverlap(Rubric):
         self.top_k = top_k
 
     def judge(self, ctx: RubricContext) -> Verdict:
-        # Resolve the gold set first: if it's missing or empty, the
-        # rubric can't render a verdict on the learner.
+        # Resolve the gold set. We accept BOTH path conventions:
+        #   - bare path (``"gold_supports.q1"``) — walks ctx.setup_data
+        #     directly (the original convention of this rubric).
+        #   - prefixed path (``"setup_data.gold_supports.q1"``) — matches
+        #     the merged-context convention used by ``llm_judge_*``
+        #     rubrics. The LLM tends to emit the prefixed form, so we
+        #     accept it here for cross-rubric consistency.
+        # If the gold set is missing or empty, the rubric can't render a
+        # verdict on the learner.
+        gold_path = self.gold_set_path
+        if gold_path.startswith("setup_data."):
+            gold_path = gold_path[len("setup_data.") :]
         try:
-            gold_raw = resolve_path(ctx.setup_data, self.gold_set_path)
+            gold_raw = resolve_path(ctx.setup_data, gold_path)
         except (KeyError, IndexError):
             return Verdict(
                 status="abstain",

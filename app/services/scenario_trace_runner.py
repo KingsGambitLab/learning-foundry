@@ -475,6 +475,50 @@ def _extract_must_have_fields_from_schema(schema: Any) -> list[str]:
     return []
 
 
+# Rubrics whose path kwargs resolve in the MERGED context (captures +
+# setup_data + course_meta) — these require a ``setup_data.`` prefix
+# when the path points into ``ctx.setup_data``. If the LLM emits a
+# bare path (no prefix) and the path looks like it's trying to address
+# setup_data, we auto-prefix it here so the rubric can resolve it.
+_MERGED_CONTEXT_PATH_KWARGS: dict[str, tuple[str, ...]] = {
+    "llm_judge_semantic_eq": ("gold_path", "alt_path"),
+    "llm_judge_false_premise": ("expected_falsity_path",),
+    "llm_judge_coverage": ("judge_context_path",),
+}
+
+
+def _looks_like_setup_data_path(path: str) -> bool:
+    """Heuristic: does ``path`` address a key under setup_data without
+    the ``setup_data.`` prefix?
+
+    The bare convention is ``<file_stem>.<key>...`` where ``<file_stem>``
+    matches a setup_data file (e.g. ``gold_answers``, ``gold_supports``,
+    ``queries``). We don't have ctx.setup_data at normalize time, so
+    use a deny-list: paths that obviously address captures (start with
+    ``$.``, contain ``response.body``, start with a trace-step-id
+    prefix like ``call_``, ``answer_``) are left alone.
+    """
+    if path.startswith("setup_data.") or path.startswith("course_meta."):
+        return False  # already correctly prefixed
+    if path.startswith("$.") or path.startswith("captures."):
+        return False  # captures path
+    if "." not in path:
+        return False  # single segment is ambiguous; leave it
+    first = path.split(".", 1)[0]
+    capture_like = (
+        "response",
+        "call",
+        "trace",
+        "request",
+    )
+    if any(first.startswith(p) for p in capture_like):
+        return False
+    if first in {"setup_data", "course_meta", "captures"}:
+        return False
+    # Bare path with a multi-segment file-stem look: prefix it.
+    return True
+
+
 def _normalize_rubric_kwargs(spec_kind: str, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Translate observed-in-the-wild LLM-emitted rubric kwargs to the
     canonical rubric-class kwargs.
@@ -482,6 +526,10 @@ def _normalize_rubric_kwargs(spec_kind: str, kwargs: dict[str, Any]) -> dict[str
     This is intentionally LOSSY: kwargs without a known canonical name
     are dropped (per ``_RUBRIC_KWARGS_TO_DROP``) or left alone so the
     downstream ``inspect.signature`` filter trims them.
+
+    Also normalizes path values for the merged-context rubrics so the
+    LLM can emit either ``setup_data.X.Y`` or ``X.Y`` and both resolve
+    correctly (Bug 16 in the autonomous-fix loop tracker).
     """
     out: dict[str, Any] = {}
     drop_set = _RUBRIC_KWARGS_TO_DROP.get(spec_kind, set())
@@ -504,6 +552,20 @@ def _normalize_rubric_kwargs(spec_kind: str, kwargs: dict[str, Any]) -> dict[str
     # — at this layer we leave inline-set handling to the rubric (it
     # will raise a missing-arg TypeError, which our outer try/except in
     # run_scenario converts to a fail Verdict with a clear message).
+
+    # Path-prefix normalization for merged-context rubrics. The LLM
+    # tends to emit bare paths into setup_data (``"gold_answers.q1"``)
+    # which the merged-context resolver can't reach — that resolver
+    # walks ``{**captures, "setup_data": setup_data}`` so paths into
+    # setup_data MUST start with ``setup_data.``. Auto-prefix when we
+    # can detect the LLM forgot.
+    merged_kwargs = _MERGED_CONTEXT_PATH_KWARGS.get(spec_kind, ())
+    for kw in merged_kwargs:
+        if kw not in out:
+            continue
+        val = out[kw]
+        if isinstance(val, str) and _looks_like_setup_data_path(val):
+            out[kw] = f"setup_data.{val}"
     return out
 
 
