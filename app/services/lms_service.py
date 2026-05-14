@@ -384,7 +384,12 @@ class LMSService:
         return self.get_deliverable_experience(refreshed.id, deliverable.deliverable_id)
 
     def _workspace_root(self, enrollment: LearnerEnrollment) -> Path:
-        return self.base_dir / enrollment.id / "workspace"
+        return (
+            self.base_dir
+            / enrollment.learner_id
+            / enrollment.shared_workflow_run_id
+            / "workspace"
+        )
 
     def _workspace_context(
         self,
