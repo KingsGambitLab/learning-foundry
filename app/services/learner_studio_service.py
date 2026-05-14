@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import functools
 import hashlib
 import json
 import os
@@ -76,7 +77,7 @@ def _learner_studio_image_inputs() -> list[Path]:
 
 
 def _hash_learner_studio_inputs() -> str:
-    digest = hashlib.sha1()
+    digest = hashlib.sha1(usedforsecurity=False)
     for path in _learner_studio_image_inputs():
         digest.update(str(path).encode("utf-8"))
         digest.update(b"\0")
@@ -85,6 +86,7 @@ def _hash_learner_studio_inputs() -> str:
     return digest.hexdigest()[:12]
 
 
+@functools.lru_cache(maxsize=1)
 def default_learner_studio_image() -> str:
     return f"course-gen-learner-studio:{_hash_learner_studio_inputs()}"
 
