@@ -48,6 +48,12 @@ class _CoursePlanPayload(BaseModel):
     package_type: str | None = None
     deliverables: list[_PlannerDeliverablePayload] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # The LLM authors the project's domain identity. Defaults are empty
+    # so legacy fixtures and any cached LLM response that pre-dates
+    # this field still parse. When non-empty, these override the
+    # regex-extracted defaults from ``assignment_design_inference``.
+    system_kind: str = ""
+    core_entities: list[str] = Field(default_factory=list)
 
 
 class _LearningOutcomePayload(BaseModel):
@@ -159,14 +165,16 @@ class OpenAICoursePlanner:
                             "Use the inferred project contract, runtime binding, and runtime plan as the source of truth. "
                             "Each deliverable must represent a real engineering concern or subsystem, not a maturity stage. "
                             "Avoid generic sequences like 'run contract', 'tooling', or 'approvals' unless the project contract explicitly requires them. "
-                            "The course's domain identity MUST be specific to the brief: derive a project_contract whose system_kind and "
-                            "core_entities are real, recognizable noun phrases drawn from the user's goal and the runtime plan — not "
-                            "placeholders. NEVER emit core_entities like 'a small', 'the X', 'an item', 'thing', 'object', 'service request', "
-                            "or any single common noun. NEVER emit system_kind as a templated '<entity> service' pattern. A learner reading "
-                            "just the system_kind should immediately recognize what THIS project is for. If the brief mentions a specific "
-                            "tool (e.g. 'promptfoo', 'FAISS', 'BM25'), name domain entities the learner will actually manipulate (e.g. "
-                            "'prompt template', 'eval test case', 'retrieval corpus', 'grounded response'). If the brief is too vague to "
-                            "pick concrete entities, escalate via a deliverable that names the gap — do not invent placeholder nouns."
+                            "The course's domain identity MUST be specific to the brief. Populate the top-level "
+                            "`system_kind` and `core_entities` fields in your response: "
+                            "`system_kind` is a 3-6 word phrase a learner reads and immediately recognizes what THIS project is for (NOT a templated '<entity> service' pattern). "
+                            "`core_entities` is a list of 2-5 real, multi-word noun phrases naming the actual concepts the learner will manipulate. "
+                            "NEVER emit core_entities like 'a small', 'the X', 'an item', 'thing', 'object', 'service request', 'service response', "
+                            "or any single common noun. Always pick concepts drawn from the user's goal and the runtime plan. "
+                            "Examples: for a promptfoo course, use 'prompt template', 'promptfoo eval suite', 'prompt test case'; "
+                            "for a RAG course, use 'retrieval corpus', 'grounded response', 'document chunk'; "
+                            "for an inventory course, use 'inventory reservation', 'stock transfer', 'audit event'. "
+                            "If the brief is too vague to pick concrete entities, escalate via a deliverable that names the gap — do not invent placeholder nouns."
                         ),
                     },
                     {"role": "user", "content": json.dumps(prompt, indent=2)},
@@ -335,6 +343,22 @@ class OpenAICoursePlanner:
         if shared_design_spec is None:
             raise ValueError("This brief is outside the current learner-ready generation scope.")
 
+        # LLM-authored domain identity overrides regex-derived defaults.
+        # The course planner sees the full brief and is in a better
+        # position than ``extract_project_entities`` to identify real
+        # domain concepts. Empty / whitespace entries get filtered so a
+        # malformed model response doesn't blank the regex fallback.
+        llm_system_kind = str(raw_plan.get("system_kind") or "").strip()
+        if llm_system_kind:
+            shared_design_spec.project_contract.system_kind = llm_system_kind
+        llm_core_entities = [
+            str(entity).strip()
+            for entity in raw_plan.get("core_entities") or []
+            if isinstance(entity, str) and str(entity).strip()
+        ]
+        if llm_core_entities:
+            shared_design_spec.project_contract.core_entities = llm_core_entities
+
         deliverable_items = raw_plan.get("deliverables")
         if not isinstance(deliverable_items, list):
             deliverable_items = raw_plan.get("deliverables", [])
@@ -369,6 +393,16 @@ class OpenAICoursePlanner:
                 tech_stack=list(request.creator_setup.tech_stack),
                 data_sources=list(request.creator_setup.data_sources),
             ).design_spec or shared_design_spec
+            # Propagate the LLM-authored domain identity so every
+            # per-deliverable design spec uses the same canonical
+            # entities. Without this, the deliverable's freshly-
+            # inferred design (regex-driven) would override the
+            # course-level LLM choice for downstream callers that
+            # read the deliverable's design_spec.
+            if llm_system_kind:
+                deliverable_design_spec.project_contract.system_kind = llm_system_kind
+            if llm_core_entities:
+                deliverable_design_spec.project_contract.core_entities = llm_core_entities
             deliverables.append(
                 CreateCourseDeliverableRequest(
                     deliverable_slug=raw_deliverable.get("deliverable_slug") or raw_deliverable.get("deliverable_slug"),
