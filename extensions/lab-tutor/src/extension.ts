@@ -1,7 +1,17 @@
 import * as vscode from "vscode";
+import { HintBudget } from "./state/hint-budget";
+import { TutorStatusBar } from "./status-bar";
 
-export function activate(_context: vscode.ExtensionContext): void {
-  // Real activation wired in Task 2.
+export function activate(context: vscode.ExtensionContext): void {
+  const budget = new HintBudget(4);
+  const statusBar = new TutorStatusBar(budget);
+  context.subscriptions.push(statusBar);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("lab.openTutor", async () => {
+      await vscode.commands.executeCommand("workbench.view.extension.labTutor");
+    }),
+  );
 }
 
 export function deactivate(): void {
