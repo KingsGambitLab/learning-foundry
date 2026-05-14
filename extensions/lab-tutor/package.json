@@ -10,7 +10,7 @@
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "auxiliarybar": [
         { "id": "labTutor", "title": "Lab tutor", "icon": "media/icon.svg" }
       ]
     },

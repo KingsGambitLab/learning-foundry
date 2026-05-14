@@ -39,6 +39,18 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   registerSubmitCommand(context, () => client.submit(currentEditorContent()));
+
+  // Open the tutor pane immediately so the learner doesn't have to discover it.
+  // The setTimeout ensures the view provider is registered before the focus command fires.
+  setTimeout(() => {
+    vscode.commands.executeCommand("labTutor.chat.focus").then(
+      undefined,
+      () => {
+        // Fallback for older VS Code/code-server versions
+        vscode.commands.executeCommand("workbench.view.extension.labTutor");
+      },
+    );
+  }, 500);
 }
 
 function currentEditorContent(): string {
