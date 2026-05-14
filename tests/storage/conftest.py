@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 
 
@@ -26,7 +27,7 @@ def postgres_url(postgres_container: PostgresContainer) -> str:
 @pytest.fixture(autouse=True)
 def _reset_tables(postgres_url: str) -> Iterator[None]:
     yield
-    engine = create_engine(postgres_url)
+    engine = create_engine(postgres_url, poolclass=NullPool)
     with engine.begin() as conn:
         tables = conn.execute(
             text(

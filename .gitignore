@@ -15,3 +15,5 @@ tmp/
 course_gen_codex.egg-info/
 logs/
 uv.lock
+.env
+.env.local
