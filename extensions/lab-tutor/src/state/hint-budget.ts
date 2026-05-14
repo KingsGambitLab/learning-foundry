@@ -3,11 +3,11 @@ export class HintBudget {
   constructor(private readonly capacity: number) {}
 
   get remaining(): number {
-    return Math.max(0, this.capacity - this._consumed);
+    return this.capacity - this._consumed;
   }
 
   get consumed(): number {
-    return Math.min(this.capacity, this._consumed);
+    return this._consumed;
   }
 
   get exhausted(): boolean {
@@ -19,6 +19,8 @@ export class HintBudget {
   }
 
   consume(): void {
-    this._consumed += 1;
+    if (this._consumed < this.capacity) {
+      this._consumed += 1;
+    }
   }
 }

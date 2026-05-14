@@ -29,4 +29,12 @@ describe("HintBudget", () => {
     b.consume();
     assert.equal(b.label, "Hints: 3/4");
   });
+
+  it("formats the label when exhausted", () => {
+    const b = new HintBudget(2);
+    b.consume();
+    b.consume();
+    assert.equal(b.exhausted, true);
+    assert.equal(b.label, "Hints: 0/2");
+  });
 });
