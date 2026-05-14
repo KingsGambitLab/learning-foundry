@@ -158,7 +158,15 @@ class OpenAICoursePlanner:
                             "Return JSON only. Propose a clear course title, summary, package type, and deliverable plan. "
                             "Use the inferred project contract, runtime binding, and runtime plan as the source of truth. "
                             "Each deliverable must represent a real engineering concern or subsystem, not a maturity stage. "
-                            "Avoid generic sequences like 'run contract', 'tooling', or 'approvals' unless the project contract explicitly requires them."
+                            "Avoid generic sequences like 'run contract', 'tooling', or 'approvals' unless the project contract explicitly requires them. "
+                            "The course's domain identity MUST be specific to the brief: derive a project_contract whose system_kind and "
+                            "core_entities are real, recognizable noun phrases drawn from the user's goal and the runtime plan — not "
+                            "placeholders. NEVER emit core_entities like 'a small', 'the X', 'an item', 'thing', 'object', 'service request', "
+                            "or any single common noun. NEVER emit system_kind as a templated '<entity> service' pattern. A learner reading "
+                            "just the system_kind should immediately recognize what THIS project is for. If the brief mentions a specific "
+                            "tool (e.g. 'promptfoo', 'FAISS', 'BM25'), name domain entities the learner will actually manipulate (e.g. "
+                            "'prompt template', 'eval test case', 'retrieval corpus', 'grounded response'). If the brief is too vague to "
+                            "pick concrete entities, escalate via a deliverable that names the gap — do not invent placeholder nouns."
                         ),
                     },
                     {"role": "user", "content": json.dumps(prompt, indent=2)},
