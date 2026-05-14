@@ -1552,10 +1552,25 @@ git commit -m "feat(learner-studio): seed tutor URL into workspace + load extens
 
 ---
 
-## Task 10: Bake the extension into the Docker image
+## Task 10: Bake the extension into the Docker image — REVISED 2026-05-14
+
+> **Revised design** (after `/codex:adversarial-review`). Two blockers in the original plan:
+> 1. `LearnerStudioService._ensure_image()` only builds when the tag is absent. With a static `course-gen-learner-studio:latest` tag, every change to the Dockerfile or `extensions/lab-tutor/**` is silently ignored after the first build. Learners would run stale extension code with no warning.
+> 2. The build context is the repo root with no `.dockerignore`, so Docker tars ~161MB (incl. ~155MB of `extensions/lab-tutor/node_modules`) on every build. Performance and a trust-boundary concern: local learner data under `learner_workspaces/`, secrets in `.claude/`, etc., would be sent to the daemon.
+>
+> **Revised approach:**
+> - Add a repo-root `.dockerignore` excluding `.git`, `.claude`, `logs/`, `tmp/`, `learner_workspaces/`, `workspaces/`, `extensions/*/node_modules`, `extensions/*/dist`, `extensions/*/test-out`, `extensions/*/*.vsix`.
+> - Multi-stage Dockerfile with the build stage split into `COPY package*.json` → `npm ci` → `COPY` source so the dependency layer caches independently of source edits.
+> - Derive the image tag from a SHA-1 over the contents of `docker/learner-studio.Dockerfile` and every tracked file under `extensions/lab-tutor/` (excluding `node_modules`, `dist`, `test-out`, `*.vsix`). New helper `_compute_learner_studio_image_tag()` in `app/services/learner_studio_service.py`. Tag format: `course-gen-learner-studio:<12-char-hash>`. `_ensure_image` continues to check-then-build, but a fresh tag implies a fresh build whenever inputs change.
+> - `default_learner_studio_image()` returns the hashed tag when invoked; tests that want a deterministic image name can construct the service with `image_name=...` explicitly (existing behavior preserved).
 
 **Files:**
-- Modify: `docker/learner-studio.Dockerfile`
+- Create: `.dockerignore` at the repo root.
+- Modify: `docker/learner-studio.Dockerfile` (multi-stage with layer-cache split + extension install).
+- Modify: `app/services/learner_studio_service.py` — content-hash-based image tag + helper function.
+- Create: `tests/test_learner_studio_image_tag.py` — verifies the hash changes when a file changes.
+
+**The original Step 1+ content below remains for context but is superseded by the revised design.**
 
 - [ ] **Step 1: Read the current Dockerfile**
 
