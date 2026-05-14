@@ -127,12 +127,14 @@ class LearnerStudioService:
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
+        lab_tutor_enabled: bool = False,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
 
         if existing_session is not None and existing_session.container_name:
-            if self._can_reuse_session(
+            toggle_changed = existing_session.lab_tutor_enabled != lab_tutor_enabled
+            if not toggle_changed and self._can_reuse_session(
                 existing_session=existing_session,
                 workspace_path=workspace_path,
             ):
@@ -141,6 +143,13 @@ class LearnerStudioService:
                 refreshed.status = LearnerWorkspaceSessionStatus.running
                 refreshed.updated_at = self._now()
                 return refreshed
+            if toggle_changed:
+                # Tear down the stale container so the recreate below is not a name collision.
+                self._remove_runtime_support(
+                    workspace_path,
+                    network_name=f"{existing_session.container_name}-net",
+                    container_prefix=existing_session.container_name,
+                )
 
         host_port = self._allocate_port()
         session_id = existing_session.id if existing_session is not None else f"studio_{uuid4().hex[:12]}"
@@ -180,7 +189,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-            *self._docker_env_args(self._tutor_environment(session_id)),
+            *(self._docker_env_args(self._tutor_environment(session_id)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
@@ -189,8 +198,7 @@ class LearnerStudioService:
             "none",
             "--user-data-dir",
             "/tmp/code-server",
-            "--extensions-dir",
-            "/opt/lab-tutor/extensions",
+            *(["--extensions-dir", "/opt/lab-tutor/extensions"] if lab_tutor_enabled else []),
             "/workspace",
         ]
         session_image_name = self.image_name
@@ -225,6 +233,7 @@ class LearnerStudioService:
             host_port=host_port,
             editor_url=editor_url,
             image_name=session_image_name,
+            lab_tutor_enabled=lab_tutor_enabled,
             notes=["VS Code (code-server) session running in Docker."],
         )
 

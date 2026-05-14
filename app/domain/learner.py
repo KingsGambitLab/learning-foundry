@@ -91,6 +91,7 @@ class LearnerWorkspaceSession(BaseModel):
     host_port: int | None = None
     editor_url: str | None = None
     image_name: str | None = None
+    lab_tutor_enabled: bool = False
     notes: list[str] = Field(default_factory=list)
 
 

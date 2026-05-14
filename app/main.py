@@ -128,6 +128,7 @@ async def lifespan(app: FastAPI):
             CourseArtifactMaterializer(),
             publish_certification_service=PublishLearnerCertificationService(
                 learner_studio_service=app.state.learner_studio_service,
+                store=app.state.workflow_service.store,
                 enabled=True,
             ),
             creator_asset_service=app.state.creator_asset_service,

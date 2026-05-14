@@ -62,6 +62,7 @@ class CourseRun(BaseModel):
     notes: list[str] = Field(default_factory=list)
     goal: str | None = None
     requested_learning_outcomes: list[str] = Field(default_factory=list)
+    lab_tutor_enabled: bool = False
     generated_plan: GeneratedCoursePlan | None = None
     generation_source: CourseGenerationSource | None = None
     generation_status: CourseGenerationStatus | None = None
