@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.domain.assets import CreateCreatorAssetRequest, CreatorAssetList, CreatorAssetRecord
 from app.domain.task_agent import DataSourceKind, DataSourceSpec
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 def default_creator_assets_dir() -> Path:
@@ -16,7 +16,7 @@ def default_creator_assets_dir() -> Path:
 
 
 class CreatorAssetService:
-    def __init__(self, store: SQLiteWorkflowStore, base_dir: str | Path | None = None) -> None:
+    def __init__(self, store: WorkflowStore, base_dir: str | Path | None = None) -> None:
         self.store = store
         self.base_dir = Path(base_dir or default_creator_assets_dir())
         self.base_dir.mkdir(parents=True, exist_ok=True)

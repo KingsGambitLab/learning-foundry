@@ -73,7 +73,7 @@ from app.services.lms_service import default_learner_workspace_dir
 from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.publish_snapshot_service import PublishSnapshotService
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 class CourseWorkflowConflictError(ValueError):
@@ -111,7 +111,7 @@ def _planner_deliverables_from_course_deliverables(
 class CourseWorkflowService:
     def __init__(
         self,
-        store: SQLiteWorkflowStore,
+        store: WorkflowStore,
         workflow_service: WorkflowService,
         materializer: CourseArtifactMaterializer | None = None,
         publish_snapshot_service: PublishSnapshotService | None = None,

@@ -13,7 +13,8 @@ from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.failure_context_builder import build_failure_context
 from app.services.openai_repo_authoring import OpenAIStarterRepoAuthoringService
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.postgres_store import PostgresWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 class FailureReplaySmokeResult(BaseModel):
@@ -37,10 +38,10 @@ class FailureReplaySmokeService:
     def __init__(
         self,
         *,
-        store: SQLiteWorkflowStore | None = None,
+        store: WorkflowStore | None = None,
         workspace_authoring_service_factory: Callable[[Path], TaskAgentWorkspaceAuthoringService] | None = None,
     ) -> None:
-        self.store = store or SQLiteWorkflowStore()
+        self.store = store or PostgresWorkflowStore()
         self.workspace_authoring_service_factory = (
             workspace_authoring_service_factory or self._default_workspace_authoring_service
         )

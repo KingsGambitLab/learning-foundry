@@ -44,7 +44,7 @@ from app.services.learner_package_runtime import (
 from app.services.learner_studio_service import LearnerStudioService
 from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 def default_learner_workspace_dir() -> Path:
@@ -60,7 +60,7 @@ class LMSService:
 
     def __init__(
         self,
-        store: SQLiteWorkflowStore,
+        store: WorkflowStore,
         workflow_service: WorkflowService,
         learner_studio_service: LearnerStudioService | None = None,
         learner_feedback_service: OpenAILearnerFeedbackService | None = None,

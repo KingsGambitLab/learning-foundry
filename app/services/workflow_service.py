@@ -52,7 +52,7 @@ from app.services.openai_task_agent_authoring import (
 from app.services.spec_validation import validate_task_agent_spec
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
 from app.services.task_agent_grader import grade_task_agent_submission
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 _GRAPH_EXECUTION_NODE_KINDS = {
     WorkflowNodeKind.authoring_runtime,
@@ -111,7 +111,7 @@ def _default_planner_deliverables(design_spec: AssignmentDesignSpec) -> list[Del
 class WorkflowService:
     def __init__(
         self,
-        store: SQLiteWorkflowStore,
+        store: WorkflowStore,
         materializer: ArtifactMaterializer | None = None,
         runner: TaskAgentBlackBoxRunner | None = None,
         node_runtime: LangGraphAssignmentGraph | None = None,

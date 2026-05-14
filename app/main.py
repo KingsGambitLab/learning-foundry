@@ -32,11 +32,11 @@ from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringS
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.postgres_store import PostgresWorkflowStore
 
 
 def _ensure_lms_service(app: FastAPI) -> LMSService:
-    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or SQLiteWorkflowStore()
+    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or PostgresWorkflowStore()
     if (not hasattr(app.state, "creator_asset_service")) or app.state.creator_asset_service.store is not store:
         app.state.creator_asset_service = CreatorAssetService(store)
     if not hasattr(app.state, "learner_studio_service"):
@@ -68,7 +68,7 @@ def _ensure_lms_service(app: FastAPI) -> LMSService:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or SQLiteWorkflowStore()
+    store = getattr(getattr(app.state, "workflow_service", None), "store", None) or PostgresWorkflowStore()
     if (not hasattr(app.state, "creator_asset_service")) or app.state.creator_asset_service.store is not store:
         app.state.creator_asset_service = CreatorAssetService(store)
     if not hasattr(app.state, "assignment_workspace_manager"):

@@ -24,11 +24,11 @@ from app.services.learner_brief_builder import (
 )
 from app.services.task_agent_starter_templates import default_preview_command
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 class PublishSnapshotService:
-    def __init__(self, store: SQLiteWorkflowStore, workflow_service: WorkflowService) -> None:
+    def __init__(self, store: WorkflowStore, workflow_service: WorkflowService) -> None:
         self.store = store
         self.workflow_service = workflow_service
 
