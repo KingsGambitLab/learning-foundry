@@ -104,6 +104,7 @@ class LMSService:
                     support_reason=reason,
                     publish_snapshot_id=snapshot.id if snapshot is not None else run.latest_publish_snapshot_id,
                     published_at=snapshot.created_at if snapshot is not None else run.updated_at,
+                    lab_tutor_enabled=run.lab_tutor_enabled,
                 )
             )
         courses.sort(key=lambda item: item.published_at, reverse=True)

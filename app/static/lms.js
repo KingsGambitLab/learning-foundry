@@ -1125,6 +1125,7 @@
       await refreshEnrollments();
       await loadEnrollment(enrollment.id);
       syncUrlState();
+      syncLabTutor();
       showToast("success", "Enrollment created", "Your project workspace is ready to open.");
     } catch (error) {
       const friendly = normalizeError("enroll", error);
@@ -1269,6 +1270,7 @@
       await loadEnrollment(target.dataset.openEnrollment);
       syncUrlState();
       renderAll();
+      syncLabTutor();
       return;
     }
 
@@ -1284,11 +1286,65 @@
     }
   });
 
+  // ── Lab Tutor widget integration ──────────────────────────────────────────
+  // Dynamically injects lab-tutor.js and mounts/unmounts the floating chat
+  // widget based on the active enrollment's course lab_tutor_enabled flag.
+
+  let labTutorScriptInjected = false;
+
+  function labTutorEnabledForCurrentEnrollment() {
+    const experience = uiState.currentExperience;
+    if (!experience?.enrollment?.course_run_id) return false;
+    const courseRunId = experience.enrollment.course_run_id;
+    const catalog = state.catalog?.courses || [];
+    const course = catalog.find((c) => c.course_run_id === courseRunId);
+    return course?.lab_tutor_enabled === true;
+  }
+
+  function syncLabTutor() {
+    const enabled = labTutorEnabledForCurrentEnrollment();
+    if (!enabled) {
+      if (typeof window.__labTutorUnmount === "function") {
+        window.__labTutorUnmount();
+      }
+      return;
+    }
+
+    const experience = uiState.currentExperience;
+    const enrollmentId = experience?.enrollment?.id || "anon";
+    const courseTitle = experience?.enrollment?.course_title || "";
+
+    if (!labTutorScriptInjected) {
+      labTutorScriptInjected = true;
+      const script = document.createElement("script");
+      script.src = "/static/lab-tutor.js";
+      script.dataset.sessionId = "lms-" + enrollmentId;
+      script.dataset.assignmentTitle = courseTitle;
+      script.addEventListener("load", () => {
+        if (typeof window.__labTutorMount === "function") {
+          window.__labTutorMount({
+            sessionId: "lms-" + enrollmentId,
+            assignmentTitle: courseTitle,
+          });
+        }
+      });
+      document.head.appendChild(script);
+    } else if (typeof window.__labTutorMount === "function") {
+      window.__labTutorMount({
+        sessionId: "lms-" + enrollmentId,
+        assignmentTitle: courseTitle,
+      });
+    }
+  }
+
   renderAll();
+  syncLabTutor();
 
   const initialEnrollment = selectedEnrollmentSummary();
   if (initialEnrollment?.id) {
-    loadEnrollment(initialEnrollment.id).catch(() => {
+    loadEnrollment(initialEnrollment.id).then(() => {
+      syncLabTutor();
+    }).catch(() => {
       renderAll();
     });
   }
@@ -1307,12 +1363,14 @@
     if (nextEnrollment?.id && nextEnrollment.id !== uiState.currentEnrollmentId) {
       try {
         await loadEnrollment(nextEnrollment.id);
+        syncLabTutor();
       } catch (_error) {
         renderAll();
       }
       return;
     }
 
+    syncLabTutor();
     renderAll();
   });
 })();
