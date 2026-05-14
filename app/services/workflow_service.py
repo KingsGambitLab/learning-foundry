@@ -582,7 +582,19 @@ class WorkflowService:
         )
         return run
 
-    def execute_langgraph_nodes(self, run_id: str) -> WorkflowRun:
+    def execute_langgraph_nodes(
+        self,
+        run_id: str,
+        *,
+        start_node: str | None = None,
+    ) -> WorkflowRun:
+        """Re-execute the LangGraph node loop for ``run_id``.
+
+        ``start_node`` (optional) lets callers resume from a specific
+        node — e.g. ``"reviewer_code"`` after fixing a finding that
+        caused that node to fail. When omitted, execution starts from
+        the graph's default entry node (``authoring_runtime``).
+        """
         run = self._require_run(run_id)
         if run.stage == WorkflowStage.published or run.status == WorkflowStatus.published:
             raise WorkflowConflictError("Published workflow runs are immutable. Create a new revision before rerunning authoring or review.")
@@ -599,12 +611,14 @@ class WorkflowService:
             title=run.title,
             stage=run.stage.value,
             status=run.status.value,
+            start_node=start_node,
         )
         try:
             run = self.node_runtime.execute(
                 run,
                 on_node_started=self._record_node_started,
                 on_node_finished=self._record_node_finished,
+                start_node=start_node,
             )
         except Exception as exc:
             self.store.append_event(

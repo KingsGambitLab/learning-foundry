@@ -320,14 +320,28 @@ def get_workflow_workspace_file(
 
 
 @router.post("/v1/workflow-runs/{run_id}/nodes/execute", response_model=WorkflowRun, tags=["workflow"])
-def execute_workflow_nodes(run_id: str, request: Request) -> WorkflowRun:
+def execute_workflow_nodes(
+    run_id: str,
+    request: Request,
+    start_node: str | None = None,
+) -> WorkflowRun:
+    """Re-execute the LangGraph node loop.
+
+    Optional query param ``start_node`` (e.g. ``reviewer_code``) lets
+    callers resume from a specific node instead of restarting from
+    ``authoring_runtime``. Useful for unblocking a run that failed deep
+    in the reviewer lane after the underlying check was fixed.
+    """
     service = _workflow_service(request)
     try:
-        return service.execute_langgraph_nodes(run_id)
+        return service.execute_langgraph_nodes(run_id, start_node=start_node)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
     except WorkflowConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # LangGraph executor rejects unknown start_node values.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/v1/workflow-runs/{run_id}/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["workflow"])
