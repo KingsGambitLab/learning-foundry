@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -72,6 +73,7 @@ class LearnerStudioService:
         host: str = "127.0.0.1",
         minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
+        tutor_base_url: str | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.image_name = image_name or default_learner_studio_image()
@@ -80,6 +82,9 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
+        self._tutor_base_url = tutor_base_url or os.environ.get(
+            "LAB_TUTOR_BASE_URL", "http://localhost:8000"
+        )
 
     def launch_editor(
         self,
@@ -143,6 +148,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
+            *self._docker_env_args(self._tutor_environment(session_id)),
             self.image_name,
             "code-server",
             "--bind-addr",
@@ -151,6 +157,8 @@ class LearnerStudioService:
             "none",
             "--user-data-dir",
             "/tmp/code-server",
+            "--extensions-dir",
+            "/opt/lab-tutor/extensions",
             "/workspace",
         ]
         session_image_name = self.image_name
@@ -471,6 +479,12 @@ class LearnerStudioService:
             for service in self._runtime_services(workspace_path)
             if str(service.get("service_id")) != "app" and service.get("container_image")
         ]
+
+    def _tutor_environment(self, session_id: str) -> dict[str, str]:
+        return {
+            "LAB_TUTOR_BASE_URL": self._tutor_base_url,
+            "LAB_TUTOR_SESSION_ID": session_id,
+        }
 
     def _app_runtime_environment(self, workspace_path: Path) -> dict[str, str]:
         environment: dict[str, str] = {}
