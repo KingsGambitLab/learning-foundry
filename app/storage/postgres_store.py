@@ -554,7 +554,7 @@ class PostgresWorkflowStore:
                     + " RESTART IDENTITY CASCADE"
                 )
             )
-        return counts
+        return {f"deleted_{table}": count for table, count in counts.items()}
 
     def _normalize_course_run_payload(self, payload: dict) -> dict:
         if "course_family_id" not in payload:

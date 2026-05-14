@@ -144,8 +144,8 @@ def test_reset_all_clears_every_table(store: PostgresWorkflowStore) -> None:
     store.save_course_run(_make_course_run("course_reset"))
     counts = store.reset_all()
     # Counts dict should include every truncated table with its pre-reset row count.
-    assert counts["workflow_runs"] == 1
-    assert counts["course_runs"] == 1
+    assert counts["deleted_workflow_runs"] == 1
+    assert counts["deleted_course_runs"] == 1
     # After reset, queries return empty.
     assert store.get_run("run_reset") is None
     assert store.get_course_run("course_reset") is None
