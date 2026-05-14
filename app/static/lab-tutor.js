@@ -514,8 +514,43 @@
     }
 
     function readPrompt(input) {
-      if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") return input.value || "";
-      return input.innerText || input.textContent || "";
+      // 1. Plain form inputs
+      if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
+        return input.value || "";
+      }
+      // 2. Standard contenteditable — try the outer element's text first
+      const directText = (input.innerText || input.textContent || "").trim();
+      if (directText) return directText;
+      // 3. Monaco / VS Code editor: visible content lives in .view-lines
+      //    (each line is a .view-line element). innerText of the wrapper
+      //    is empty because Monaco renders into a virtual viewport.
+      const viewLines = input.querySelector(".view-lines");
+      if (viewLines) {
+        const lines = Array.from(viewLines.querySelectorAll(".view-line"))
+          .map((l) => l.innerText || l.textContent || "");
+        const joined = lines.join("\n").trim();
+        if (joined) return joined;
+      }
+      // 4. Any inner contenteditable
+      const editable = input.querySelector('[contenteditable="true"]');
+      if (editable) {
+        const t = (editable.innerText || editable.textContent || "").trim();
+        if (t) return t;
+      }
+      // 5. As a last resort, ask the Monaco JS API directly. We pick the
+      //    editor whose DOM node is contained by our hooked element.
+      if (typeof window.monaco !== "undefined" && window.monaco.editor && window.monaco.editor.getEditors) {
+        try {
+          for (const ed of window.monaco.editor.getEditors()) {
+            const dom = ed.getDomNode && ed.getDomNode();
+            if (dom && input.contains(dom) && ed.getValue) {
+              const v = ed.getValue();
+              if (v) return v;
+            }
+          }
+        } catch (_e) { /* ignore */ }
+      }
+      return "";
     }
 
     function clearPrompt(input) {
@@ -618,9 +653,23 @@
     }
 
     function maybeIntercept(reason) {
-      if (replaying || !hookedInput) return false;
+      if (replaying) {
+        console.info("[lab-tutor] skipping — replaying");
+        return false;
+      }
+      if (!hookedInput) {
+        console.info("[lab-tutor] skipping — no hooked input");
+        return false;
+      }
       const prompt = readPrompt(hookedInput).trim();
-      if (prompt.length < 1) return false;
+      if (prompt.length < 1) {
+        console.warn(
+          "[lab-tutor] empty prompt — readPrompt couldn't extract text from the agent input.",
+          "Element:", hookedInput,
+          "outerHTML preview:", (hookedInput.outerHTML || "").slice(0, 200)
+        );
+        return false;
+      }
       console.info("[lab-tutor] intercepting via", reason, "— prompt:", prompt.slice(0, 60));
       // intercept is async; fire-and-forget (errors are caught inside).
       intercept(prompt, hookedInput).catch((err) => {
