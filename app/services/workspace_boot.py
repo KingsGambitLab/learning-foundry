@@ -275,6 +275,7 @@ def _start_container(
     docker_binary: str,
     run_timeout_s: int,
     container_port: int = DEFAULT_CONTAINER_PORT,
+    data_volume_host_dir: Path | None = None,
 ) -> str:
     """Run ``docker run -d -p <host_port>:<container_port> <image_tag>``.
 
@@ -282,6 +283,11 @@ def _start_container(
     been updated keep the previous behavior. The outcome graph path now
     passes the workspace's actual EXPOSE'd port via
     ``_detect_container_port`` (see ``boot_and_verify``).
+
+    ``data_volume_host_dir`` is the host path to mount at ``/data`` inside
+    the container. Used to satisfy ``durable_state_required=True``
+    capability so the learner's service can persist state across the
+    boot-verify lifecycle. When ``None`` (default), no volume is mounted.
 
     Returns the container id (first line of stdout). Raises
     ``WorkspaceBootError`` on non-zero return.
@@ -293,8 +299,11 @@ def _start_container(
         "--rm",
         "-p",
         f"{host_port}:{container_port}",
-        image_tag,
     ]
+    if data_volume_host_dir is not None:
+        data_volume_host_dir.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["-v", f"{data_volume_host_dir.absolute()}:/data"])
+    cmd.append(image_tag)
     try:
         result = subprocess.run(
             cmd,
@@ -440,16 +449,12 @@ def _provision_capabilities(capabilities: "CapabilityFlags | None") -> None:
                 "deployment requirement."
             ),
         )
-    if getattr(capabilities, "durable_state_required", False):
-        raise WorkspaceBootCapabilityError(
-            capability="durable_state_required",
-            detail=(
-                "spec requests durable_state_required=True but the sandbox "
-                "does not yet mount a persistent /data volume — pre-mount "
-                "the volume via the docker run -v flag in the harness "
-                "deployment and document the requirement."
-            ),
-        )
+    # ``durable_state_required=True`` is now satisfied by ``boot_and_verify``
+    # mounting ``<workspace_dir>/.coursegen_data`` at ``/data`` inside the
+    # container (see the ``data_volume_host_dir`` arg threaded through
+    # ``_start_container``). Per-container scoping keeps state isolated
+    # between scenarios while still persisting across the build/boot
+    # lifecycle. Documented in the boot docstring.
 
 
 @contextmanager
@@ -513,12 +518,22 @@ def boot_and_verify(
     )
     host_port = _allocate_port()
     container_port = _detect_container_port(workspace_dir)
+    # Provision a per-workspace persistent ``/data`` volume when the
+    # spec requests durable state. The host path lives under the
+    # workspace dir so it gets torn down with the workspace (and
+    # survives across container restarts within a verification cycle).
+    data_volume_host_dir: Path | None = None
+    if capabilities is not None and getattr(
+        capabilities, "durable_state_required", False
+    ):
+        data_volume_host_dir = workspace_dir / ".coursegen_data"
     container_id = _start_container(
         resolved_tag,
         host_port,
         docker_binary=docker_binary,
         run_timeout_s=run_timeout_s,
         container_port=container_port,
+        data_volume_host_dir=data_volume_host_dir,
     )
     base_url = f"http://{HOST}:{host_port}"
     handle = WorkspaceBootHandle(
@@ -588,11 +603,17 @@ class WorkspaceBootSandboxAdapter:
         )
         host_port = _allocate_port()
         container_port = _detect_container_port(reference_impl_dir)
+        data_volume_host_dir: Path | None = None
+        if effective is not None and getattr(
+            effective, "durable_state_required", False
+        ):
+            data_volume_host_dir = reference_impl_dir / ".coursegen_data"
         container_id = _start_container(
             resolved_tag,
             host_port,
             docker_binary="docker",
             run_timeout_s=DEFAULT_RUN_TIMEOUT_S,
+            data_volume_host_dir=data_volume_host_dir,
             container_port=container_port,
         )
         base_url = f"http://{HOST}:{host_port}"
