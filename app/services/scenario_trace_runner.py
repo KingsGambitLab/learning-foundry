@@ -76,28 +76,61 @@ _PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 _CAPTURE_PARTS = frozenset({"status", "headers", "body"})
 
 
-def _resolve_one_placeholder(expression: str, captures: Mapping[str, Any]) -> Any:
-    """Resolve a single ``${id.dotted.path}`` body, honouring the
-    two-segment body-prefix shorthand.
+def _resolve_one_placeholder(
+    expression: str,
+    captures: Mapping[str, Any],
+    *,
+    setup_data: Mapping[str, Any] | None = None,
+    course_meta: Mapping[str, Any] | None = None,
+) -> Any:
+    """Resolve a single ``${id.dotted.path}`` placeholder.
 
-    Conventions:
+    Conventions for the leading segment:
 
-    - ``${id}`` returns the whole captured entry for ``id``.
-    - ``${id.<status|headers|body>}`` (or ``${id.<one of those>.foo}``)
-      resolves verbatim against ``captures[id]``.
-    - ``${id.<anything-else>}`` (two segments where the second is not a
-      reserved key) auto-prefixes ``body`` — so ``${created.short_code}``
-      becomes ``${created.body.short_code}``.
-    - ``${id.<anything-else>.deep.path}`` (3+ segments) is treated as
-      explicit and resolved verbatim against ``captures[id]``; this
-      avoids surprises when authors write
-      ``${created.body.short_code}`` instead of the shorthand.
+    - ``${setup_data.X.Y}`` resolves against ``setup_data`` (the grader's
+      hidden / curated data). This is the convention the LLM keeps
+      reaching for and the convention curated scenarios use to inline
+      a question + its retrieval pool from disk: e.g.
+      ``${setup_data.queries.q_0001.query}`` and
+      ``${setup_data.search_results_index.q_0001}``.
+    - ``${course_meta.X.Y}`` resolves against ``course_meta``.
+    - Otherwise the leading segment is a capture id (a previous trace
+      step's id), with the original body-prefix shorthand applied.
 
     Raises :class:`InterpolationError` on any failure (unknown id, bad
     key, out-of-range index).
     """
     segments = expression.split(".")
-    capture_id = segments[0]
+    leading = segments[0]
+
+    # ---- setup_data / course_meta routing (Bug 27) ----
+    if leading == "setup_data":
+        if setup_data is None:
+            raise InterpolationError(
+                f"Placeholder '${{{expression}}}' references setup_data but "
+                f"this trace step has no setup_data context."
+            )
+        try:
+            return resolve_path(setup_data, ".".join(segments[1:]))
+        except (KeyError, IndexError, TypeError) as exc:
+            raise InterpolationError(
+                f"Could not resolve '${{{expression}}}' against setup_data: {exc}"
+            ) from exc
+    if leading == "course_meta":
+        if course_meta is None:
+            raise InterpolationError(
+                f"Placeholder '${{{expression}}}' references course_meta but "
+                f"this trace step has no course_meta context."
+            )
+        try:
+            return resolve_path(course_meta, ".".join(segments[1:]))
+        except (KeyError, IndexError, TypeError) as exc:
+            raise InterpolationError(
+                f"Could not resolve '${{{expression}}}' against course_meta: {exc}"
+            ) from exc
+
+    # ---- captures (legacy path) ----
+    capture_id = leading
     if capture_id not in captures:
         raise InterpolationError(
             f"Unknown capture id '{capture_id}' in placeholder '${{{expression}}}'"
@@ -121,10 +154,19 @@ def _resolve_one_placeholder(expression: str, captures: Mapping[str, Any]) -> An
         ) from exc
 
 
-def interpolate(template: str, captures: Mapping[str, Any]) -> str:
-    """Resolve every ``${...}`` placeholder in ``template`` against ``captures``.
+def interpolate(
+    template: str,
+    captures: Mapping[str, Any],
+    *,
+    setup_data: Mapping[str, Any] | None = None,
+    course_meta: Mapping[str, Any] | None = None,
+) -> str:
+    """Resolve every ``${...}`` placeholder in ``template``.
 
-    The result is always a string — non-string resolved values are
+    Default context is ``captures`` (legacy behavior). Pass
+    ``setup_data`` / ``course_meta`` to enable
+    ``${setup_data.X.Y}`` / ``${course_meta.X.Y}`` placeholders. The
+    result is always a string — non-string resolved values are
     stringified via ``str()`` so a placeholder like ``${step.status}``
     can be embedded in a path. Multiple placeholders per string are
     supported.
@@ -135,25 +177,67 @@ def interpolate(template: str, captures: Mapping[str, Any]) -> str:
 
     def _sub(match: re.Match[str]) -> str:
         expression = match.group(1).strip()
-        return str(_resolve_one_placeholder(expression, captures))
+        return str(
+            _resolve_one_placeholder(
+                expression,
+                captures,
+                setup_data=setup_data,
+                course_meta=course_meta,
+            )
+        )
 
     return _PLACEHOLDER_PATTERN.sub(_sub, template)
 
 
-def _interpolate_body(body: Any, captures: Mapping[str, Any]) -> Any:
+def _interpolate_body(
+    body: Any,
+    captures: Mapping[str, Any],
+    *,
+    setup_data: Mapping[str, Any] | None = None,
+    course_meta: Mapping[str, Any] | None = None,
+) -> Any:
     """Recursively walk a request body and interpolate every string leaf.
 
     Dicts and lists are recursed into. Non-string, non-container values
-    pass through. ``None`` passes through.
+    (incl. dicts/lists that come back from a ``setup_data`` interpolation
+    like ``${setup_data.search_results_index.q1}``) pass through whole.
+
+    ``None`` passes through.
     """
     if body is None:
         return None
     if isinstance(body, str):
-        return interpolate(body, captures)
+        # Pass-through for whole-template placeholders that resolve to
+        # non-string values (e.g. ``"${setup_data.search_results_index.q1}"``
+        # must return the resolved LIST, not its string repr — the
+        # downstream service receives a JSON array, not a stringified
+        # array).
+        stripped = body.strip()
+        match = _PLACEHOLDER_PATTERN.fullmatch(stripped)
+        if match is not None:
+            return _resolve_one_placeholder(
+                match.group(1).strip(),
+                captures,
+                setup_data=setup_data,
+                course_meta=course_meta,
+            )
+        return interpolate(
+            body, captures, setup_data=setup_data, course_meta=course_meta
+        )
     if isinstance(body, dict):
-        return {k: _interpolate_body(v, captures) for k, v in body.items()}
+        return {
+            k: _interpolate_body(
+                v, captures, setup_data=setup_data, course_meta=course_meta
+            )
+            for k, v in body.items()
+        }
     if isinstance(body, list):
-        return [_interpolate_body(v, captures) for v in body]
+        return [
+            _interpolate_body(
+                v, captures, setup_data=setup_data, course_meta=course_meta
+            )
+            for v in body
+        ]
     return body
 
 
@@ -350,8 +434,17 @@ def _expect_diagnostic(
     return False, f"expected status in {expected}, got {status}"
 
 
-def _resolve_step_url(base_url: str, path_template: str, captures: Mapping[str, Any]) -> str:
-    resolved_path = interpolate(path_template, captures)
+def _resolve_step_url(
+    base_url: str,
+    path_template: str,
+    captures: Mapping[str, Any],
+    *,
+    setup_data: Mapping[str, Any] | None = None,
+    course_meta: Mapping[str, Any] | None = None,
+) -> str:
+    resolved_path = interpolate(
+        path_template, captures, setup_data=setup_data, course_meta=course_meta
+    )
     if resolved_path.startswith(("http://", "https://")):
         return resolved_path
     if not resolved_path.startswith("/"):
@@ -366,10 +459,23 @@ def _execute_step(
     captures: dict[str, Any],
     http_client: ScenarioHttpClient,
     timeout: float,
+    setup_data: Mapping[str, Any] | None = None,
+    course_meta: Mapping[str, Any] | None = None,
 ) -> TraceStepResult:
-    url = _resolve_step_url(base_url, step.path, captures)
-    headers = {k: interpolate(v, captures) for k, v in step.headers.items()}
-    body = _interpolate_body(step.body, captures)
+    url = _resolve_step_url(
+        base_url,
+        step.path,
+        captures,
+        setup_data=setup_data,
+        course_meta=course_meta,
+    )
+    headers = {
+        k: interpolate(v, captures, setup_data=setup_data, course_meta=course_meta)
+        for k, v in step.headers.items()
+    }
+    body = _interpolate_body(
+        step.body, captures, setup_data=setup_data, course_meta=course_meta
+    )
 
     import time
 
@@ -626,6 +732,8 @@ def run_scenario(
             captures=captures,
             http_client=client,
             timeout=timeout,
+            setup_data=setup_data,
+            course_meta=course_meta,
         )
         setup_results.append(result)
         if not result.expect_passed:
