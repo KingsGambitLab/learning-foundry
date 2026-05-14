@@ -29,12 +29,12 @@ export class TutorSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    const welcomeLead = this.assignmentTitle
-      ? `**Working on ${this.assignmentTitle}.**`
-      : `**Lab tutor ready.**`;
+    // Welcome card stays tight — the assignment title lives in the header subtitle,
+    // so don't repeat it here. One short bold lead + one short body line + chips.
+    const welcomeLead = `**Ask anything.**`;
     const welcomeBody = this.assignmentTitle
-      ? `Tell me where you're stuck — design, code, or testing.`
-      : `Ask anything. I won't give you the answer, but I'll help you find it.`;
+      ? `I won't give you the answer — but I'll help you find it. Tap a starter or describe where you're stuck.`
+      : `I won't give you the answer — but I'll help you find it. Tap a starter or describe where you're stuck.`;
     const welcome = `${welcomeLead}\n\n${welcomeBody}`;
     // Post after a tick so the webview script is listening.
     setTimeout(() => {

@@ -57,7 +57,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("lab.openTutor", async () => {
-      await vscode.commands.executeCommand("workbench.view.extension.labTutor");
+      await vscode.commands.executeCommand("labTutor.chat.focus");
     }),
   );
 
@@ -65,19 +65,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Open the tutor pane immediately so the learner doesn't have to discover it.
   // The setTimeout ensures the view provider is registered before the focus command fires.
+  // `<viewId>.focus` is auto-registered by VS Code and works for both activitybar and
+  // auxiliarybar containers; no fallback needed.
   setTimeout(() => {
-    vscode.commands.executeCommand("labTutor.chat.focus").then(
-      undefined,
-      () => {
-        // Fallback for older VS Code/code-server versions
-        vscode.commands.executeCommand("workbench.view.extension.labTutor");
-      },
-    );
+    vscode.commands.executeCommand("labTutor.chat.focus").then(undefined, () => {
+      // Silent — the view is still registered and the learner can click the icon.
+    });
   }, 500);
 
-  // One-time attention cue per activation — no storage gate needed.
+  // One-time attention cue per activation.
   vscode.window.showInformationMessage(
-    "Lab Tutor is open on the right — ask anything, I won't give you the answer.",
+    "Lab Tutor is here. Ask anything in the side panel — I won't give you the answer, but I'll help you find it.",
     "Got it",
   );
 }
