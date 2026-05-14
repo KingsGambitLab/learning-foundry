@@ -1,0 +1,60 @@
+{
+  "name": "lab-tutor",
+  "displayName": "Lab tutor",
+  "description": "Embedded tutor for graded coding assignments.",
+  "publisher": "scaler",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "labTutor", "title": "Lab tutor", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "labTutor": [
+        { "id": "labTutor.chat", "name": "Tutor", "type": "webview" }
+      ]
+    },
+    "commands": [
+      { "command": "lab.submitAssignment", "title": "Submit assignment", "category": "Lab tutor", "icon": "$(cloud-upload)" },
+      { "command": "lab.openTutor", "title": "Open lab tutor", "category": "Lab tutor" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "lab.submitAssignment", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "Lab tutor",
+      "properties": {
+        "labTutor.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the tutor backend service."
+        },
+        "labTutor.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "Assignment session id. Seeded by the launcher."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "npm run build && vsce package --no-dependencies -o lab-tutor.vsix",
+    "test": "tsc -p tsconfig.test.json && node --test 'test-out/**/*.test.js'"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.3.3"
+  }
+}

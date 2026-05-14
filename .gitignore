@@ -15,3 +15,9 @@ tmp/
 course_gen_codex.egg-info/
 logs/
 uv.lock
+
+extensions/*/node_modules/
+extensions/*/dist/
+extensions/*/out/
+extensions/*/test-out/
+extensions/*/*.vsix
