@@ -82,8 +82,12 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
+        # The widget runs in the learner's browser (on the host), not inside
+        # the container, so the URL must be host-reachable from the browser.
+        # `127.0.0.1` is correct for local dev; in production this should be
+        # the public hostname of the FastAPI service.
         self._tutor_base_url = tutor_base_url or os.environ.get(
-            "LAB_TUTOR_BASE_URL", "http://host.docker.internal:8012"
+            "LAB_TUTOR_BASE_URL", "http://127.0.0.1:8012"
         )
 
     def _tutor_environment(self, assignment_title: str | None) -> dict[str, str]:
