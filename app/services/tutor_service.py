@@ -410,15 +410,10 @@ class TutorService:
                     }
                 ],
                 messages=[{"role": "user", "content": user_text}],
-                betas=["output-128k-2025-02-19"],
                 output_config={
                     "format": {
                         "type": "json_schema",
-                        "json_schema": {
-                            "name": "rehearsal_verdict",
-                            "schema": _REHEARSAL_JSON_SCHEMA,
-                            "strict": True,
-                        },
+                        "schema": _REHEARSAL_JSON_SCHEMA,
                     }
                 },
             )
