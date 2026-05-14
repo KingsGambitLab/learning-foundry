@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.auth_routes import router as auth_router
 from app.api.routes import router
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
@@ -31,6 +32,7 @@ from app.services.openai_task_agent_authoring import OpenAITaskAgentAuthoringSer
 from app.services.openai_test_script_authoring import OpenAITestScriptAuthoringService
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.task_agent_workspace_authoring import TaskAgentWorkspaceAuthoringService
+from app.services.auth_session import SessionService
 from app.services.workflow_service import WorkflowService
 from app.storage.postgres_store import PostgresWorkflowStore
 
@@ -119,6 +121,8 @@ async def lifespan(app: FastAPI):
             app.state.task_agent_authoring_service,
             app.state.assignment_workspace_manager,
         )
+    if not hasattr(app.state, "session_service"):
+        app.state.session_service = SessionService(store=app.state.workflow_service.store)
     if not hasattr(app.state, "course_workflow_service"):
         app.state.course_workflow_service = CourseWorkflowService(
             app.state.workflow_service.store,
@@ -193,6 +197,7 @@ app.mount(
     name="static",
 )
 app.include_router(router)
+app.include_router(auth_router)
 
 
 @app.get("/create-course", tags=["system"], include_in_schema=False)
