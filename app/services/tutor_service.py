@@ -10,6 +10,8 @@ from anthropic import Anthropic, APIError
 from app.domain.tutor import (
     TutorChatRequest,
     TutorChatResponse,
+    TutorRehearseRequest,
+    TutorRehearseResponse,
     TutorSubmitRequest,
     TutorSubmitResponse,
     TutorVivaQuestion,
@@ -20,16 +22,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TUTOR_PERSONA = """You are a sharp, direct lab tutor sitting next to a learner working on a graded coding assignment.
+_TUTOR_PERSONA = """You are a tutor who cares about the learner's growth, sitting next to them while they work through a graded coding assignment. You're rooting for them.
 
-Your job is to make the learner think. You do not solve for them, ever. When they ask for the answer, refuse plainly and ask what they have tried.
+Your job is to help them think, not to solve the problem for them. When they ask for the full answer, gently explain they'll learn more by working through it themselves, and invite them into the next small step — what have they tried, what's the part they're stuck on, what does the spec actually say.
 
 Style:
-- Be confident and concrete. No apologies, no "Great question!", no preamble.
-- One pointed question or one specific hint per reply. Then stop.
-- Maximum 2-3 short sentences. No lists unless the learner explicitly asks for one.
-- Never write more than 3-5 lines of code, and only when illustrating a technique they could not look up.
-- Assume the learner is intelligent and capable — talk to them like a peer who has read more, not a lecturer."""
+- Warm but direct. Acknowledge the question or what they're trying, then move forward. No flattery ("Great question!"), no over-hedging.
+- One specific hint or one pointed question per reply. Don't pile on.
+- Keep replies short — usually 2-4 sentences. Bullet lists only if they ask.
+- If you write code, keep it tiny (3-5 lines max) and only to illustrate a technique they couldn't easily look up.
+- Talk to them like a peer who's worked through this kind of problem before — not like a lecturer or a drill sergeant.
+- When you have to push back (e.g. "just write it for me"), be kind about it. Explain why briefly, then offer the next thing they can try."""
 
 # Workspace files we never include (build artefacts, VCS, lockfiles, vendored deps).
 _SKIP_DIRS = {
@@ -187,6 +190,35 @@ def _format_failure(submission) -> str | None:
         return None
 
 
+_REHEARSAL_JUDGE_PROMPT = """You evaluate prompts a learner is about to send to a coding agent inside a graded coding lab. Your job is to spot when the prompt would short-circuit the learner's own thinking.
+
+A prompt is "rehearsal" (needs coaching) when it does any of:
+- Asks the agent to write the implementation (e.g. "write the route handler", "implement the escalation logic", "give me the code for X")
+- Asks for a full solution or end-to-end build ("build the service", "do the assignment")
+- Asks for a fix without showing what they tried ("fix this", "fix the test")
+- Is vague enough that the agent would have to invent the spec ("make it work", "do whatever you think is best")
+
+A prompt is "ok" when the learner is:
+- Asking a focused conceptual question (e.g. "what does this trait bound mean?", "is this the right approach for retries?")
+- Asking for a small targeted nudge after showing their work
+- Asking the agent to do something legitimately mechanical (rename, format, summarize, look up docs)
+- Pasting an error and asking what it means
+
+When you return "rehearsal", the message should be warm and short (2-3 sentences): name what the prompt is asking the agent to do, explain why doing it themselves matters here, invite them to break the task down or describe where they're actually stuck.
+
+Output strictly: {"verdict": "ok" | "rehearsal", "message": "..."}"""
+
+_REHEARSAL_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["ok", "rehearsal"]},
+        "message": {"type": "string"},
+    },
+    "required": ["verdict", "message"],
+    "additionalProperties": False,
+}
+
+
 class TutorService:
     """Phase 1 tutor backend. Reads context from disk + DB on every chat."""
 
@@ -336,4 +368,89 @@ class TutorService:
                 TutorVivaQuestion(prompt="Explain why you chose this data structure."),
                 TutorVivaQuestion(prompt="Walk through your error handling."),
             ],
+        )
+
+    def rehearse(self, req: TutorRehearseRequest) -> TutorRehearseResponse:
+        """Judge whether a prompt the learner is about to send to the coding agent
+        would short-circuit their thinking. Returns verdict 'ok' or 'rehearsal'.
+        Falls back to 'ok' on any error so the learner is never blocked by backend issues."""
+        client = self._get_client()
+        if client is None:
+            return TutorRehearseResponse(
+                verdict="ok",
+                message="",
+                original_prompt=req.prompt,
+            )
+
+        # Build the system prompt: judge persona + optional assignment context.
+        system_parts = [_REHEARSAL_JUDGE_PROMPT]
+        ctx = self._resolve_session_context(req.session_id)
+        if ctx is not None:
+            project_brief, deliverables, _code, _failure = ctx
+            if project_brief:
+                system_parts.append("\n\n<project_brief>\n" + project_brief + "\n</project_brief>")
+            if deliverables:
+                system_parts.append("\n\n<deliverables>\n" + deliverables + "\n</deliverables>")
+        elif req.assignment_title:
+            system_parts.append(f"\n\nThe learner is working on: {req.assignment_title}.")
+
+        system_text = "".join(system_parts)
+
+        user_text = f"<learner_prompt>\n{req.prompt}\n</learner_prompt>"
+
+        try:
+            response = client.with_options(timeout=15.0).messages.create(
+                model=self._model,
+                max_tokens=256,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_text}],
+                betas=["output-128k-2025-02-19"],
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "rehearsal_verdict",
+                            "schema": _REHEARSAL_JSON_SCHEMA,
+                            "strict": True,
+                        },
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.warning("[tutor] rehearse API call failed: %s", exc)
+            return TutorRehearseResponse(
+                verdict="ok",
+                message="",
+                original_prompt=req.prompt,
+            )
+
+        try:
+            import json as _json
+            raw_text = next(
+                (b.text for b in response.content if b.type == "text"),
+                "{}",
+            )
+            parsed = _json.loads(raw_text)
+            verdict = str(parsed.get("verdict", "ok"))
+            if verdict not in ("ok", "rehearsal"):
+                verdict = "ok"
+            message = str(parsed.get("message", ""))
+        except Exception as exc:
+            logger.warning("[tutor] rehearse response parse failed: %s", exc)
+            return TutorRehearseResponse(
+                verdict="ok",
+                message="",
+                original_prompt=req.prompt,
+            )
+
+        return TutorRehearseResponse(
+            verdict=verdict,
+            message=message,
+            original_prompt=req.prompt,
         )

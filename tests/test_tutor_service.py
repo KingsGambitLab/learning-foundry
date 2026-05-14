@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from app.domain.tutor import TutorChatRequest, TutorSubmitRequest
+from app.domain.tutor import TutorChatRequest, TutorRehearseRequest, TutorSubmitRequest
 from app.services.tutor_service import TutorService
 
 
@@ -14,6 +15,16 @@ def _make_fake_client(reply_text: str = "hello back") -> MagicMock:
     fake_client = MagicMock()
     fake_response = MagicMock()
     fake_response.content = [MagicMock(type="text", text=reply_text)]
+    fake_client.with_options.return_value.messages.create.return_value = fake_response
+    return fake_client
+
+
+def _make_fake_rehearsal_client(verdict: str = "ok", message: str = "") -> MagicMock:
+    """Return a fake Anthropic client whose messages.create returns a JSON rehearsal verdict."""
+    payload = json.dumps({"verdict": verdict, "message": message})
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text=payload)]
     fake_client.with_options.return_value.messages.create.return_value = fake_response
     return fake_client
 
@@ -185,6 +196,131 @@ class TutorServiceTest(unittest.TestCase):
             self.assertIn("0/3", user_content)
             # The specific test summary from our fake submission
             self.assertIn("test_routing_priority", user_content)
+
+
+class TutorRehearseServiceTest(unittest.TestCase):
+    def test_rehearse_falls_back_to_ok_when_no_api_key(self) -> None:
+        """No API key → service returns verdict 'ok' without blocking the learner."""
+        saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            svc = TutorService()
+            result = svc.rehearse(TutorRehearseRequest(session_id="s1", prompt="write the handler"))
+            self.assertEqual(result.verdict, "ok")
+            self.assertEqual(result.original_prompt, "write the handler")
+        finally:
+            if saved is not None:
+                os.environ["ANTHROPIC_API_KEY"] = saved
+
+    def test_rehearse_returns_rehearsal_verdict_from_judge(self) -> None:
+        """Fake client returns 'rehearsal' → service forwards verdict and message."""
+        svc = TutorService()
+        coaching_msg = "It looks like you're asking the agent to implement the handler for you."
+        svc._client = _make_fake_rehearsal_client(verdict="rehearsal", message=coaching_msg)
+
+        result = svc.rehearse(TutorRehearseRequest(
+            session_id="s1",
+            prompt="implement the route handler for me",
+        ))
+
+        self.assertEqual(result.verdict, "rehearsal")
+        self.assertEqual(result.message, coaching_msg)
+        self.assertEqual(result.original_prompt, "implement the route handler for me")
+
+    def test_rehearse_returns_ok_verdict_from_judge(self) -> None:
+        """Fake client returns 'ok' → service forwards verdict unchanged."""
+        svc = TutorService()
+        svc._client = _make_fake_rehearsal_client(verdict="ok", message="")
+
+        result = svc.rehearse(TutorRehearseRequest(
+            session_id="s1",
+            prompt="what does this trait bound mean?",
+        ))
+
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.original_prompt, "what does this trait bound mean?")
+
+    def test_rehearse_falls_back_to_ok_on_api_error(self) -> None:
+        """API error → service returns 'ok' so the learner is never blocked."""
+        svc = TutorService()
+        fake_client = MagicMock()
+        fake_client.with_options.return_value.messages.create.side_effect = Exception("network timeout")
+        svc._client = fake_client
+
+        result = svc.rehearse(TutorRehearseRequest(
+            session_id="s1",
+            prompt="build the whole service",
+        ))
+
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.original_prompt, "build the whole service")
+
+    def test_rehearse_falls_back_to_ok_on_malformed_response(self) -> None:
+        """Judge returns non-JSON or unexpected structure → falls back to 'ok'."""
+        svc = TutorService()
+        fake_client = MagicMock()
+        fake_response = MagicMock()
+        fake_response.content = [MagicMock(type="text", text="not valid json {{{")]
+        fake_client.with_options.return_value.messages.create.return_value = fake_response
+        svc._client = fake_client
+
+        result = svc.rehearse(TutorRehearseRequest(
+            session_id="s1",
+            prompt="write the function",
+        ))
+
+        self.assertEqual(result.verdict, "ok")
+
+    def test_rehearse_judge_call_does_not_include_code_snapshot(self) -> None:
+        """The rehearsal API call must NOT send the workspace code — only the prompt."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir)
+            (ws / "project_brief.md").write_text("# My Assignment")
+            (ws / "deliverables.md").write_text("## Deliverable 1\nBuild routing.")
+            (ws / "main.py").write_text("def handler(): pass")
+
+            session = _make_session(workspace_root=str(ws))
+            store = _make_fake_store(session=session, submissions=[])
+            svc = TutorService(store=store)
+            svc._client = _make_fake_rehearsal_client(verdict="ok", message="")
+
+            svc.rehearse(TutorRehearseRequest(
+                session_id="studio_abc123",
+                prompt="explain this error",
+            ))
+
+            call_kwargs = svc._client.with_options.return_value.messages.create.call_args[1]
+            # system may include project brief
+            system_text = call_kwargs["system"][0]["text"]
+            # user content must NOT include file tree / workspace snapshot
+            user_content = call_kwargs["messages"][0]["content"]
+            self.assertNotIn("<workspace>", user_content)
+            self.assertNotIn("File tree:", user_content)
+            self.assertNotIn("main.py", user_content)
+            # But the learner's prompt must be present
+            self.assertIn("explain this error", user_content)
+
+    def test_rehearse_includes_assignment_context_in_system(self) -> None:
+        """When the session resolves, system prompt includes project_brief."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir)
+            (ws / "project_brief.md").write_text("# Routing Service\nBuild a router.")
+            (ws / "deliverables.md").write_text("## Deliverable 1\nHandle priority routing.")
+
+            session = _make_session(workspace_root=str(ws))
+            store = _make_fake_store(session=session, submissions=[])
+            svc = TutorService(store=store)
+            svc._client = _make_fake_rehearsal_client(verdict="ok", message="")
+
+            svc.rehearse(TutorRehearseRequest(
+                session_id="studio_abc123",
+                prompt="what does trait mean?",
+            ))
+
+            call_kwargs = svc._client.with_options.return_value.messages.create.call_args[1]
+            system_text = call_kwargs["system"][0]["text"]
+            self.assertIn("<project_brief>", system_text)
+            self.assertIn("Routing Service", system_text)
+            self.assertIn("<deliverables>", system_text)
 
 
 if __name__ == "__main__":

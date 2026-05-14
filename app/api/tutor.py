@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, Request
 from app.domain.tutor import (
     TutorChatRequest,
     TutorChatResponse,
+    TutorRehearseRequest,
+    TutorRehearseResponse,
     TutorSubmitRequest,
     TutorSubmitResponse,
 )
@@ -32,3 +34,11 @@ def submit(
     svc: TutorService = Depends(_tutor_service),
 ) -> TutorSubmitResponse:
     return svc.submit(req)
+
+
+@router.post("/rehearse", response_model=TutorRehearseResponse)
+def rehearse(
+    req: TutorRehearseRequest,
+    svc: TutorService = Depends(_tutor_service),
+) -> TutorRehearseResponse:
+    return svc.rehearse(req)

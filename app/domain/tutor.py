@@ -28,3 +28,15 @@ class TutorVivaQuestion(BaseModel):
 class TutorSubmitResponse(BaseModel):
     test_results: dict[str, Any] = Field(default_factory=dict)
     viva_questions: list[TutorVivaQuestion] = Field(default_factory=list)
+
+
+class TutorRehearseRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    assignment_title: str | None = None
+
+
+class TutorRehearseResponse(BaseModel):
+    verdict: str  # "ok" | "rehearsal"
+    message: str
+    original_prompt: str
