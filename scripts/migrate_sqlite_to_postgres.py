@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+import shutil
 import sqlite3
 from pathlib import Path
 from uuid import UUID
@@ -169,6 +170,44 @@ def copy_to_postgres(*, snapshot: Path, engine: Engine, seed_learner_id: UUID) -
                 )
 
 
+def rename_workspaces(*, engine: Engine, old_base: Path, new_base: Path) -> None:
+    """Copy workspace directories from old layout to new layout.
+
+    Old layout:  <old_base>/<enrollment_id>/workspace/
+    New layout:  <new_base>/<learner_id>/<shared_workflow_run_id>/workspace/
+
+    Behavior:
+    - If the old workspace doesn't exist, skip silently.
+    - If the new workspace already exists, skip (idempotent).
+    - Uses shutil.copytree (copy, not move) so the source server's directory tree stays intact.
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT enrollment_id,
+                       learner_id,
+                       payload->>'shared_workflow_run_id' AS assignment_id
+                FROM learner_enrollments
+                """
+            )
+        ).all()
+    for row in rows:
+        assignment_id = row.assignment_id
+        if not assignment_id:
+            # No assignment id in payload — nothing to migrate for this row.
+            continue
+        old = old_base / row.enrollment_id / "workspace"
+        new = new_base / row.learner_id / assignment_id / "workspace"
+        if not old.exists():
+            continue
+        if new.exists():
+            continue
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(old, new)
+        print(f"  Copied workspace: {old} → {new}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
@@ -192,6 +231,15 @@ def main() -> int:
     print(f"Seed learner id: {seed_id}")
     copy_to_postgres(snapshot=args.snapshot, engine=engine, seed_learner_id=seed_id)
     print("Copy complete.")
+
+    # Phase 3: workspace directory rename
+    # Default old_base is <source>'s sibling learner_workspaces dir.
+    # Default new_base is this worktree's learner_workspaces dir.
+    old_workspaces = args.source.parent / "learner_workspaces"
+    new_workspaces = Path("learner_workspaces").resolve()
+    print(f"Renaming workspaces: {old_workspaces} → {new_workspaces}")
+    rename_workspaces(engine=engine, old_base=old_workspaces, new_base=new_workspaces)
+    print("Workspace rename complete.")
     return 0
 
 
