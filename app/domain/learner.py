@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.domain.course import CourseRunStatus, CourseRunSummary
 from app.domain.grading import AssignmentGradeReport, DeliverableGradeReport
@@ -203,8 +203,9 @@ class LearnerEnrollmentList(BaseModel):
 
 
 class CreateEnrollmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     course_run_id: str
-    learner_id: str = "local-learner"
 
 
 class LaunchWorkspaceRequest(BaseModel):

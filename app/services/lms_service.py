@@ -109,11 +109,11 @@ class LMSService:
         courses.sort(key=lambda item: item.published_at, reverse=True)
         return PublishedCourseCatalog(courses=courses)
 
-    def list_enrollments(self, learner_id: str = "local-learner") -> LearnerEnrollmentList:
+    def list_enrollments(self, learner_id: str) -> LearnerEnrollmentList:
         return LearnerEnrollmentList(enrollments=self.store.list_learner_enrollments(learner_id=learner_id))
 
-    def enroll(self, request: CreateEnrollmentRequest) -> LearnerEnrollment:
-        existing = self.store.find_learner_enrollment(request.learner_id, request.course_run_id)
+    def enroll(self, request: CreateEnrollmentRequest, *, learner_id: str) -> LearnerEnrollment:
+        existing = self.store.find_learner_enrollment(learner_id, request.course_run_id)
         if existing is not None:
             return self.get_enrollment(existing.id)
 
@@ -127,7 +127,7 @@ class LMSService:
 
         enrollment = LearnerEnrollment(
             id=f"enrollment_{uuid4().hex[:12]}",
-            learner_id=request.learner_id,
+            learner_id=learner_id,
             course_run_id=course_run.id,
             publish_snapshot_id=snapshot.id,
             course_title=learner_package.title,

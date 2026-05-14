@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import current_user, require_role
-from app.domain.auth import Role
+from app.domain.auth import Role, User
 
 from app.domain.assets import (
     CreateCreatorAssetRequest,
@@ -816,16 +816,20 @@ def list_lms_catalog(request: Request) -> PublishedCourseCatalog:
 @router.get("/v1/lms/enrollments", response_model=LearnerEnrollmentList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def list_lms_enrollments(
     request: Request,
-    learner_id: str = Query("local-learner", description="Local learner identity for the LMS prototype."),
+    user: User = Depends(current_user),
 ) -> LearnerEnrollmentList:
-    return _lms_service(request).list_enrollments(learner_id=learner_id)
+    return _lms_service(request).list_enrollments(learner_id=str(user.id))
 
 
 @router.post("/v1/lms/enrollments", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
-def create_lms_enrollment(payload: CreateEnrollmentRequest, request: Request) -> LearnerEnrollment:
+def create_lms_enrollment(
+    payload: CreateEnrollmentRequest,
+    request: Request,
+    user: User = Depends(current_user),
+) -> LearnerEnrollment:
     service = _lms_service(request)
     try:
-        return service.enroll(payload)
+        return service.enroll(payload, learner_id=str(user.id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown course run '{payload.course_run_id}'.") from exc
     except LMSConflictError as exc:

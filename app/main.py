@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api.auth_routes import router as auth_router
+from app.api.deps import current_user_optional
 from app.api.routes import router
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
@@ -222,18 +223,22 @@ def draft_timeline(request: Request, draft: str | None = None) -> HTMLResponse:
 
 @app.get("/", tags=["system"], include_in_schema=False)
 def root(request: Request) -> HTMLResponse:
+    user = current_user_optional(request)
+    svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
-        catalog=_ensure_lms_service(request.app).list_catalog(),
-        enrollments=_ensure_lms_service(request.app).list_enrollments(),
+        catalog=svc.list_catalog(),
+        enrollments=svc.list_enrollments(learner_id=str(user.id)) if user is not None else svc.list_enrollments(learner_id=""),
     )
     return HTMLResponse(render_lms_home(lms_state))
 
 
 @app.get("/courses", tags=["system"], include_in_schema=False)
 def courses(request: Request) -> HTMLResponse:
+    user = current_user_optional(request)
+    svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
-        catalog=_ensure_lms_service(request.app).list_catalog(),
-        enrollments=_ensure_lms_service(request.app).list_enrollments(),
+        catalog=svc.list_catalog(),
+        enrollments=svc.list_enrollments(learner_id=str(user.id)) if user is not None else svc.list_enrollments(learner_id=""),
     )
     return HTMLResponse(render_lms_courses_page(lms_state))
 
