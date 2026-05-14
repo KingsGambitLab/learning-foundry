@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
+from app.api.tutor import router as tutor_router
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
@@ -193,6 +194,7 @@ app.mount(
     name="static",
 )
 app.include_router(router)
+app.include_router(tutor_router)
 
 
 @app.get("/create-course", tags=["system"], include_in_schema=False)
