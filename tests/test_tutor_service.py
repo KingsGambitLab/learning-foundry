@@ -1,21 +1,22 @@
 import unittest
 
 from app.domain.tutor import TutorChatRequest, TutorSubmitRequest
-from app.services.tutor_service import TutorService
+from app.services.tutor_service import TutorService, _CHAT_PREVIEW_LIMIT
 
 
 class TutorServiceTest(unittest.TestCase):
     def test_chat_echoes_truncated_message(self) -> None:
         svc = TutorService()
         reply = svc.chat(TutorChatRequest(session_id="s1", message="hello"))
-        self.assertIn("hello", reply.reply)
-        self.assertEqual(reply.hint_tier, None)
+        self.assertEqual(reply.reply, "(stub) Got: hello")
+        self.assertIsNone(reply.hint_tier)
 
     def test_chat_truncates_long_message(self) -> None:
         svc = TutorService()
         msg = "x" * 200
         reply = svc.chat(TutorChatRequest(session_id="s1", message=msg))
-        self.assertLessEqual(len(reply.reply), 120)
+        prefix_len = len("(stub) Got: ")
+        self.assertLessEqual(len(reply.reply), _CHAT_PREVIEW_LIMIT + prefix_len)
 
     def test_submit_returns_two_viva_questions(self) -> None:
         svc = TutorService()

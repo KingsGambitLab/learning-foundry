@@ -998,21 +998,22 @@ Create `tests/test_tutor_service.py`:
 import unittest
 
 from app.domain.tutor import TutorChatRequest, TutorSubmitRequest
-from app.services.tutor_service import TutorService
+from app.services.tutor_service import TutorService, _CHAT_PREVIEW_LIMIT
 
 
 class TutorServiceTest(unittest.TestCase):
     def test_chat_echoes_truncated_message(self) -> None:
         svc = TutorService()
         reply = svc.chat(TutorChatRequest(session_id="s1", message="hello"))
-        self.assertIn("hello", reply.reply)
-        self.assertEqual(reply.hint_tier, None)
+        self.assertEqual(reply.reply, "(stub) Got: hello")
+        self.assertIsNone(reply.hint_tier)
 
     def test_chat_truncates_long_message(self) -> None:
         svc = TutorService()
         msg = "x" * 200
         reply = svc.chat(TutorChatRequest(session_id="s1", message=msg))
-        self.assertLessEqual(len(reply.reply), 120)
+        prefix_len = len("(stub) Got: ")
+        self.assertLessEqual(len(reply.reply), _CHAT_PREVIEW_LIMIT + prefix_len)
 
     def test_submit_returns_two_viva_questions(self) -> None:
         svc = TutorService()
@@ -1041,37 +1042,33 @@ Create `app/domain/tutor.py`:
 ```python
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass(frozen=True)
-class TutorChatRequest:
+
+class TutorChatRequest(BaseModel):
     session_id: str
     message: str
 
 
-@dataclass(frozen=True)
-class TutorChatResponse:
+class TutorChatResponse(BaseModel):
     reply: str
     hint_tier: int | None = None
 
 
-@dataclass(frozen=True)
-class TutorSubmitRequest:
+class TutorSubmitRequest(BaseModel):
     session_id: str
     code_snapshot: str
 
 
-@dataclass(frozen=True)
-class TutorVivaQuestion:
+class TutorVivaQuestion(BaseModel):
     prompt: str
 
 
-@dataclass(frozen=True)
-class TutorSubmitResponse:
-    test_results: dict[str, Any] = field(default_factory=dict)
-    viva_questions: list[TutorVivaQuestion] = field(default_factory=list)
+class TutorSubmitResponse(BaseModel):
+    test_results: dict[str, Any] = Field(default_factory=dict)
+    viva_questions: list[TutorVivaQuestion] = Field(default_factory=list)
 ```
 
 - [ ] **Step 4: Implement the service with canned responses**

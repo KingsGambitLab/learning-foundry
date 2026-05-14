@@ -1,33 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass(frozen=True)
-class TutorChatRequest:
+
+class TutorChatRequest(BaseModel):
     session_id: str
     message: str
 
 
-@dataclass(frozen=True)
-class TutorChatResponse:
+class TutorChatResponse(BaseModel):
     reply: str
     hint_tier: int | None = None
 
 
-@dataclass(frozen=True)
-class TutorSubmitRequest:
+class TutorSubmitRequest(BaseModel):
     session_id: str
     code_snapshot: str
 
 
-@dataclass(frozen=True)
-class TutorVivaQuestion:
+class TutorVivaQuestion(BaseModel):
     prompt: str
 
 
-@dataclass(frozen=True)
-class TutorSubmitResponse:
-    test_results: dict[str, Any] = field(default_factory=dict)
-    viva_questions: list[TutorVivaQuestion] = field(default_factory=list)
+class TutorSubmitResponse(BaseModel):
+    test_results: dict[str, Any] = Field(default_factory=dict)
+    viva_questions: list[TutorVivaQuestion] = Field(default_factory=list)
