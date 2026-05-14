@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -8,7 +9,14 @@ from app.services.tutor_service import TutorService
 
 class TutorRoutesTest(unittest.TestCase):
     def setUp(self) -> None:
-        app.state.tutor_service = TutorService()
+        svc = TutorService()
+        # Wire a stub Anthropic client so the route test doesn't need real credentials
+        fake_client = MagicMock()
+        fake_response = MagicMock()
+        fake_response.content = [MagicMock(type="text", text="(stub) Got: hello")]
+        fake_client.with_options.return_value.messages.create.return_value = fake_response
+        svc._client = fake_client
+        app.state.tutor_service = svc
         self.client = TestClient(app)
 
     def test_chat_returns_canned_reply(self) -> None:
