@@ -130,12 +130,19 @@ def test_materialize_starter_writes_files_under_public_starter(tmp_path: Path) -
     starter_files = [
         ("Dockerfile", "FROM python:3.12-slim\n"),
         ("app/main.py", "x = 1\n"),
-        ("requirements.txt", "fastapi\n"),
+        ("requirements.txt", "fastapi\nhttpx>=0.27\n"),
     ]
     materialize_starter(tmp_path, starter_files)
     assert (tmp_path / "public/starter/Dockerfile").read_text() == "FROM python:3.12-slim\n"
     assert (tmp_path / "public/starter/app/main.py").read_text() == "x = 1\n"
-    assert (tmp_path / "public/starter/requirements.txt").read_text() == "fastapi\n"
+    # ``httpx>=0.27`` is auto-injected by the materializer when the
+    # LLM-author omits it (live-run hardcode 2026-05-14, fixes verify.sh
+    # crash on the starter's FastAPI testclient import). When the input
+    # already includes httpx, no duplicate gets added.
+    assert (
+        (tmp_path / "public/starter/requirements.txt").read_text()
+        == "fastapi\nhttpx>=0.27\n"
+    )
 
 
 def test_materialize_starter_creates_intermediate_dirs(tmp_path: Path) -> None:

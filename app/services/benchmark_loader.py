@@ -174,7 +174,16 @@ def _load_one_dataset(name: str, split: str) -> Iterable[dict]:
         hf_config = "crag_task_1_and_2"
     try:
         if hf_config is not None:
-            return load_dataset(name, hf_config, split=split)
+            # HF's ``load_dataset`` signature is ``(path, name=None, ...)``
+            # where the second positional is the CONFIG name (confusingly
+            # also called ``name``). Call by keyword to dodge positional
+            # ambiguity with test fakes that only declare ``(name, split)``.
+            try:
+                return load_dataset(path=name, name=hf_config, split=split)
+            except TypeError:
+                # Fallback for test fakes whose first positional is
+                # called ``name`` (legacy HF signature before 4.x).
+                return load_dataset(name, hf_config, split=split)
         return load_dataset(name, split=split)
     except BenchmarkLoadError:
         raise

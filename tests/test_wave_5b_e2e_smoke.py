@@ -245,11 +245,24 @@ class _FakeHFIterable:
         return len(self._rows)
 
 
-def _patched_load_dataset(name: str, split: str = "train"):
-    """Replace ``datasets.load_dataset`` so the loader sees the CRAG fixture."""
-    if "Quivr/CRAG" in name or name.endswith("CRAG"):
+def _patched_load_dataset(
+    path: str | None = None,
+    name: str | None = None,
+    *,
+    split: str = "train",
+    **_kwargs,
+):
+    """Replace ``datasets.load_dataset`` so the loader sees the CRAG fixture.
+
+    Accepts HF 4.x signature ``(path, name=None, split=None, ...)``;
+    ``path`` is the dataset path (e.g. ``"Quivr/CRAG"``), ``name`` is
+    the optional config — the Quivr/CRAG hardcode passes
+    ``name="crag_task_1_and_2"`` so we accept and discard it.
+    """
+    dataset_path = path if path is not None else (name or "")
+    if "Quivr/CRAG" in dataset_path or dataset_path.endswith("CRAG"):
         return _FakeHFIterable(_crag_fixture_rows())
-    raise ValueError(f"unexpected dataset name: {name}")
+    raise ValueError(f"unexpected dataset name: {dataset_path}")
 
 
 # =====================================================================

@@ -545,7 +545,16 @@ def _fake_crag_load_dataset(rows: list[dict]):
     own split-column filter is the thing under test.
     """
 
-    def _impl(name: str, split: str = "train"):
+    def _impl(
+        path: str | None = None,
+        name: str | None = None,
+        *,
+        split: str = "train",
+        **_kwargs,
+    ):
+        # Accept both new HF 4.x signature ``(path, name, split=...)``
+        # and the legacy positional form via kwargs catch-all.
+        del path, name  # config selection not modelled
         return _FakeIterable(rows)
 
     return _impl
