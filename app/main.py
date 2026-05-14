@@ -198,6 +198,20 @@ app.mount(
     StaticFiles(directory=Path(__file__).resolve().parent / "static"),
     name="static",
 )
+
+# CORS for the page-embedded tutor widget — when the widget is loaded into
+# code-server (a different origin from the FastAPI app), the browser blocks
+# its fetch() to /v1/tutor/* without these headers. Dev-wide "*" is fine
+# locally; tighten to specific origins for production.
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 app.include_router(router)
 app.include_router(tutor_router)
 
