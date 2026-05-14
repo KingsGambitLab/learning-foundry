@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sign in — Course Gen Codex</title>
+  <link rel="stylesheet" href="/static/app-shell.css" />
+  <style>
+    main { max-width: 420px; margin: 4rem auto; padding: 0 1rem; }
+    label { display: block; margin: 0.5rem 0; }
+    input { width: 100%; padding: 0.5rem; }
+    button { padding: 0.6rem 1.2rem; }
+    .err { color: #c00; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form id="login-form">
+    <label>Email <input name="email" type="email" required autocomplete="email" /></label>
+    <label>Password <input name="password" type="password" required minlength="8" autocomplete="current-password" /></label>
+    <button type="submit">Sign in</button>
+    <p class="err" id="err"></p>
+  </form>
+  <p>No account? <a href="/register">Register</a></p>
+</main>
+<script>
+document.getElementById("login-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target).entries());
+  const resp = await fetch("/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(data),
+    credentials: "same-origin",
+  });
+  if (resp.ok) {
+    const params = new URLSearchParams(location.search);
+    location.href = params.get("next") || "/";
+  } else {
+    document.getElementById("err").textContent = "Invalid credentials";
+  }
+});
+</script>
+</body>
+</html>

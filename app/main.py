@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.api.auth_routes import router as auth_router
 from app.api.routes import router
@@ -199,6 +200,8 @@ app.mount(
 app.include_router(router)
 app.include_router(auth_router)
 
+templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
+
 
 @app.get("/create-course", tags=["system"], include_in_schema=False)
 def create_course(request: Request) -> HTMLResponse:
@@ -233,6 +236,16 @@ def courses(request: Request) -> HTMLResponse:
         enrollments=_ensure_lms_service(request.app).list_enrollments(),
     )
     return HTMLResponse(render_lms_courses_page(lms_state))
+
+
+@app.get("/login", response_class=HTMLResponse, tags=["system"], include_in_schema=False)
+def login_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "login.html", {})
+
+
+@app.get("/register", response_class=HTMLResponse, tags=["system"], include_in_schema=False)
+def register_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "register.html", {})
 
 
 @app.get("/docs", tags=["system"], include_in_schema=False)
