@@ -489,10 +489,13 @@
   };
 
   // ── Agent panel intercept ─────────────────────────────────────────────────
-  // Hooks code-server's "Build with Agent" input so every submit is routed to
-  // the tutor instead of the agent. No judge, no verdict, unconditional.
+  // Hooks code-server's "Build with Agent" input. On every submit the prompt
+  // is sent to POST /v1/tutor/triage. The judge returns "tutor" (broad,
+  // do-the-assignment-for-me prompts) or "agent" (focused tool use). We
+  // route accordingly; fail-open to "agent" on any error.
   (function setupAgentIntercept() {
-    let replaying = false; // unused now, reserved for future send-to-agent passthrough
+    let replaying = false; // true while we are synthetically replaying to the agent
+    let triagePending = false; // debounce: one in-flight triage at a time
 
     const SELECTORS = [
       'textarea[placeholder*="Describe what to build" i]',
@@ -535,12 +538,65 @@
       );
     }
 
-    function intercept(prompt, input) {
-      // Always route the captured text to the tutor — no judge, no verdict.
-      if (typeof window.__labTutorOpen === "function") window.__labTutorOpen();
-      if (typeof window.__labTutorAskAs === "function") window.__labTutorAskAs(prompt);
-      // Clear the agent input so the learner doesn't have to delete it manually.
-      clearPrompt(input);
+    function replayToAgent(input) {
+      // Synthetically re-submit so the agent handles it normally.
+      replaying = true;
+      const btn = findSendButton(input);
+      if (btn) {
+        btn.click();
+      } else {
+        input.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
+        );
+      }
+      setTimeout(() => { replaying = false; }, 250);
+    }
+
+    async function intercept(prompt, input) {
+      if (triagePending) return; // already classifying a prompt — skip
+      triagePending = true;
+
+      let action = "agent";
+      let reason = "triage skipped";
+
+      try {
+        const cfg = (widget && widget._cfg) || scriptCfg;
+        const sessionId = (cfg && cfg.sessionId) || scriptCfg.sessionId;
+        const assignmentTitle = (cfg && cfg.assignmentTitle) || scriptCfg.assignmentTitle || null;
+        const baseUrl = (cfg && cfg.baseUrl) || scriptCfg.baseUrl || "";
+
+        const res = await fetch(baseUrl + "/v1/tutor/triage", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, prompt, assignment_title: assignmentTitle }),
+          signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          action = (data.action === "tutor" || data.action === "agent") ? data.action : "agent";
+          reason = data.reason || "";
+          console.info("[lab-tutor] triage:", action, "—", reason);
+        } else {
+          console.warn("[lab-tutor] triage HTTP error", res.status, "— defaulting to agent");
+          action = "agent";
+        }
+      } catch (err) {
+        console.warn("[lab-tutor] triage fetch failed:", err, "— defaulting to agent");
+        action = "agent";
+      } finally {
+        triagePending = false;
+      }
+
+      if (action === "tutor") {
+        // Route to the tutor widget and clear the agent input.
+        if (typeof window.__labTutorOpen === "function") window.__labTutorOpen();
+        if (typeof window.__labTutorAskAs === "function") window.__labTutorAskAs(prompt);
+        clearPrompt(input);
+      } else {
+        // Let the agent answer — replay the submit with the original text intact.
+        replayToAgent(input);
+      }
     }
 
     // Track the currently-hooked agent input so the document/window-level
@@ -566,7 +622,10 @@
       const prompt = readPrompt(hookedInput).trim();
       if (prompt.length < 1) return false;
       console.info("[lab-tutor] intercepting via", reason, "— prompt:", prompt.slice(0, 60));
-      intercept(prompt, hookedInput);
+      // intercept is async; fire-and-forget (errors are caught inside).
+      intercept(prompt, hookedInput).catch((err) => {
+        console.warn("[lab-tutor] intercept unexpected error:", err);
+      });
       return true;
     }
 

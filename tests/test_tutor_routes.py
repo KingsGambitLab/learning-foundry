@@ -52,6 +52,41 @@ class TutorRoutesTest(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 422)
 
+    def test_triage_returns_expected_shape(self) -> None:
+        """POST /v1/tutor/triage with a valid body returns 200 and correct shape."""
+        # Mock triage on the service
+        from app.domain.tutor import TutorTriageResponse
+        app.state.tutor_service.triage = MagicMock(
+            return_value=TutorTriageResponse(
+                action="tutor",
+                reason="broad one-shot prompt",
+                original_prompt="write the whole service for me",
+            )
+        )
+        resp = self.client.post(
+            "/v1/tutor/triage",
+            json={"session_id": "s1", "prompt": "write the whole service for me"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["action"], "tutor")
+        self.assertEqual(body["reason"], "broad one-shot prompt")
+        self.assertEqual(body["original_prompt"], "write the whole service for me")
+
+    def test_triage_rejects_missing_session_id(self) -> None:
+        resp = self.client.post(
+            "/v1/tutor/triage",
+            json={"prompt": "what does this error mean?"},
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_triage_rejects_missing_prompt(self) -> None:
+        resp = self.client.post(
+            "/v1/tutor/triage",
+            json={"session_id": "s1"},
+        )
+        self.assertEqual(resp.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,8 @@ from app.domain.tutor import (
     TutorChatResponse,
     TutorSubmitRequest,
     TutorSubmitResponse,
+    TutorTriageRequest,
+    TutorTriageResponse,
     TutorVivaQuestion,
 )
 
@@ -31,6 +33,41 @@ Style:
 - If you write code, keep it tiny (3-5 lines max) and only to illustrate a technique they couldn't easily look up.
 - Talk to them like a peer who's worked through this kind of problem before — not like a lecturer or a drill sergeant.
 - When you have to push back (e.g. "just write it for me"), be kind about it. Explain why briefly, then offer the next thing they can try."""
+
+_TRIAGE_JUDGE_PROMPT = """You sit between a learner working on a graded coding assignment and an AI coding agent the learner can talk to. Your one job: decide which side handles the learner's next prompt.
+
+Route to AGENT (action: "agent") when the learner is using the agent as a TOOL for a focused, bounded task:
+- Asking a conceptual question — "what does this trait bound mean", "explain async/await", "what is cargo"
+- Looking up syntax, naming, or library docs
+- Debugging a specific error or test failure they're already looking at — "what does this error mean: cannot borrow as mutable"
+- Renaming, formatting, or refactoring a specific symbol they already wrote
+- Asking the agent to read/summarise a piece of code that already exists
+- Asking "is this approach right" with a concrete sketch attached
+
+Route to TUTOR (action: "tutor") when the learner is asking the agent to do the assignment FOR them — to write the implementation, build the system, complete the deliverable, generate the solution end-to-end. This is the case where, if the agent answered, the learner would skip the actual problem-solving:
+- "implement the route handler", "write the escalation logic", "build the service"
+- "write all the code", "do the assignment", "complete this"
+- "fix all the failing tests" (without any diagnosis attached)
+- "implement the README" (meaning: build everything described in it)
+- "generate the solution"
+- Prompts vague enough that the agent would have to invent the spec ("just make it work", "do whatever you think is best")
+
+The bar: would a senior reviewer watching over the learner's shoulder say "wait, you should think this one through first"? If yes → tutor. If they'd let the prompt fly to the agent without intervention → agent.
+
+When in doubt, lean toward AGENT — the learner can ALWAYS choose to ask the tutor directly through the tutor widget; we only intercept when the agent answering would replace the learner's own problem-solving.
+
+Output strictly JSON: {"action": "agent" | "tutor", "reason": "<one short sentence>"}"""
+
+
+_TRIAGE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["agent", "tutor"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["action", "reason"],
+    "additionalProperties": False,
+}
 
 # Workspace files we never include (build artefacts, VCS, lockfiles, vendored deps).
 _SKIP_DIRS = {
@@ -328,6 +365,89 @@ class TutorService:
         if not text:
             text = "(no response)"
         return TutorChatResponse(reply=text, hint_tier=None)
+
+    def triage(self, req: TutorTriageRequest) -> TutorTriageResponse:
+        """Decide whether the agent or the tutor handles the learner's prompt.
+
+        Defaults to 'agent' on any error so the learner is never blocked by a
+        flaky backend.
+        """
+        client = self._get_client()
+        if client is None:
+            return TutorTriageResponse(
+                action="agent",
+                reason="tutor backend not configured",
+                original_prompt=req.prompt,
+            )
+
+        # Build the system prompt: judge rubric + (optional) project brief +
+        # deliverables. NO workspace code, NO failure summary — the triage
+        # decision is about the *prompt*, not the code state.
+        parts = [_TRIAGE_JUDGE_PROMPT]
+        ctx = self._resolve_session_context(req.session_id)
+        if ctx is not None:
+            project_brief, deliverables, _code, _failure = ctx
+            if project_brief:
+                parts.append("\n\n<project_brief>\n" + project_brief + "\n</project_brief>")
+            if deliverables:
+                parts.append("\n\n<deliverables>\n" + deliverables + "\n</deliverables>")
+        elif req.assignment_title:
+            parts.append(f"\n\nThe learner is working on: {req.assignment_title}.")
+        system_text = "".join(parts)
+
+        user_text = f"<learner_prompt>\n{req.prompt}\n</learner_prompt>"
+
+        try:
+            response = client.with_options(timeout=15.0).messages.create(
+                model=self._model,
+                max_tokens=256,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_text}],
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "schema": _TRIAGE_JSON_SCHEMA,
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.warning("[tutor] triage API call failed: %s", exc)
+            return TutorTriageResponse(
+                action="agent",
+                reason=f"triage call failed: {exc!s}",
+                original_prompt=req.prompt,
+            )
+
+        try:
+            import json as _json
+            raw_text = next(
+                (b.text for b in response.content if b.type == "text"),
+                "{}",
+            )
+            parsed = _json.loads(raw_text)
+            action = str(parsed.get("action", "agent"))
+            if action not in ("agent", "tutor"):
+                action = "agent"
+            reason = str(parsed.get("reason", ""))
+        except Exception as exc:
+            logger.warning("[tutor] triage response parse failed: %s", exc)
+            return TutorTriageResponse(
+                action="agent",
+                reason="triage response parse failed",
+                original_prompt=req.prompt,
+            )
+
+        return TutorTriageResponse(
+            action=action,
+            reason=reason,
+            original_prompt=req.prompt,
+        )
 
     def submit(self, req: TutorSubmitRequest) -> TutorSubmitResponse:
         # Phase 1 stub — real grading lands later.

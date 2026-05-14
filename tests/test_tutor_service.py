@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from app.domain.tutor import TutorChatRequest, TutorSubmitRequest
+from app.domain.tutor import TutorChatRequest, TutorSubmitRequest, TutorTriageRequest
 from app.services.tutor_service import TutorService
 
 
@@ -185,6 +185,96 @@ class TutorServiceTest(unittest.TestCase):
             self.assertIn("0/3", user_content)
             # The specific test summary from our fake submission
             self.assertIn("test_routing_priority", user_content)
+
+
+class TutorServiceTriageTest(unittest.TestCase):
+    def test_triage_returns_agent_when_no_api_key(self) -> None:
+        """No API key → client is None → default to 'agent'."""
+        saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            svc = TutorService()
+            result = svc.triage(TutorTriageRequest(session_id="s1", prompt="write the whole service"))
+            self.assertEqual(result.action, "agent")
+            self.assertIn("not configured", result.reason)
+            self.assertEqual(result.original_prompt, "write the whole service")
+        finally:
+            if saved is not None:
+                os.environ["ANTHROPIC_API_KEY"] = saved
+
+    def test_triage_returns_agent_when_api_call_raises(self) -> None:
+        """API call raises → default to 'agent' (fail-open)."""
+        svc = TutorService()
+        fake_client = MagicMock()
+        fake_client.with_options.return_value.messages.create.side_effect = RuntimeError("network error")
+        svc._client = fake_client
+
+        result = svc.triage(TutorTriageRequest(session_id="s1", prompt="implement everything"))
+        self.assertEqual(result.action, "agent")
+        self.assertIn("triage call failed", result.reason)
+
+    def test_triage_returns_agent_when_response_is_unparsable(self) -> None:
+        """Response JSON is garbage → default to 'agent'."""
+        svc = TutorService()
+        fake_client = _make_fake_client("NOT JSON AT ALL !!!")
+        svc._client = fake_client
+
+        result = svc.triage(TutorTriageRequest(session_id="s1", prompt="fix all the tests"))
+        self.assertEqual(result.action, "agent")
+        self.assertIn("parse failed", result.reason)
+
+    def test_triage_returns_tutor_for_broad_prompt(self) -> None:
+        """Mocked response sets action: 'tutor' → returns tutor verdict."""
+        svc = TutorService()
+        import json
+        payload = json.dumps({"action": "tutor", "reason": "learner asked agent to do whole assignment"})
+        fake_client = _make_fake_client(payload)
+        svc._client = fake_client
+
+        result = svc.triage(TutorTriageRequest(
+            session_id="s1",
+            prompt="write the whole service for me",
+            assignment_title="Routing Service",
+        ))
+        self.assertEqual(result.action, "tutor")
+        self.assertEqual(result.reason, "learner asked agent to do whole assignment")
+        self.assertEqual(result.original_prompt, "write the whole service for me")
+
+    def test_triage_returns_agent_for_focused_prompt(self) -> None:
+        """Mocked response sets action: 'agent' → returns agent verdict."""
+        svc = TutorService()
+        import json
+        payload = json.dumps({"action": "agent", "reason": "specific error explanation request"})
+        fake_client = _make_fake_client(payload)
+        svc._client = fake_client
+
+        result = svc.triage(TutorTriageRequest(
+            session_id="s1",
+            prompt="what does 'cannot borrow as mutable' mean?",
+        ))
+        self.assertEqual(result.action, "agent")
+        self.assertEqual(result.reason, "specific error explanation request")
+
+    def test_triage_returns_agent_for_unknown_action_value(self) -> None:
+        """Mocked response has unrecognised action → sanitised to 'agent'."""
+        svc = TutorService()
+        import json
+        payload = json.dumps({"action": "unknown_value", "reason": "something"})
+        fake_client = _make_fake_client(payload)
+        svc._client = fake_client
+
+        result = svc.triage(TutorTriageRequest(session_id="s1", prompt="some prompt"))
+        self.assertEqual(result.action, "agent")
+
+    def test_triage_uses_15s_timeout(self) -> None:
+        """Triage uses a 15-second timeout (not the 30s chat timeout)."""
+        svc = TutorService()
+        import json
+        payload = json.dumps({"action": "agent", "reason": "ok"})
+        fake_client = _make_fake_client(payload)
+        svc._client = fake_client
+
+        svc.triage(TutorTriageRequest(session_id="s1", prompt="what is a trait?"))
+        fake_client.with_options.assert_called_once_with(timeout=15.0)
 
 
 if __name__ == "__main__":

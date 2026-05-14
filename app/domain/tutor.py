@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,3 +28,15 @@ class TutorVivaQuestion(BaseModel):
 class TutorSubmitResponse(BaseModel):
     test_results: dict[str, Any] = Field(default_factory=dict)
     viva_questions: list[TutorVivaQuestion] = Field(default_factory=list)
+
+
+class TutorTriageRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    assignment_title: str | None = None
+
+
+class TutorTriageResponse(BaseModel):
+    action: Literal["tutor", "agent"]
+    reason: str
+    original_prompt: str

@@ -7,6 +7,8 @@ from app.domain.tutor import (
     TutorChatResponse,
     TutorSubmitRequest,
     TutorSubmitResponse,
+    TutorTriageRequest,
+    TutorTriageResponse,
 )
 from app.services.tutor_service import TutorService
 
@@ -32,3 +34,11 @@ def submit(
     svc: TutorService = Depends(_tutor_service),
 ) -> TutorSubmitResponse:
     return svc.submit(req)
+
+
+@router.post("/triage", response_model=TutorTriageResponse)
+def triage(
+    req: TutorTriageRequest,
+    svc: TutorService = Depends(_tutor_service),
+) -> TutorTriageResponse:
+    return svc.triage(req)
