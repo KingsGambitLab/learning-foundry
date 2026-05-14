@@ -62,14 +62,16 @@ This plan covers **Phase 1 only** from the handover doc (skeleton). Phases 2–5
 - `app/domain/tutor.py` — request/response dataclasses + Pydantic schemas
 - `tests/test_tutor_routes.py` — FastAPI route tests (unittest + `TestClient`)
 - `tests/test_tutor_service.py` — service unit tests
-- `tests/test_tutor_workspace_seeding.py` — verifies `.vscode/settings.json` is seeded
+- `tests/test_learner_studio_env_vars.py` — verifies the launcher passes `LAB_TUTOR_BASE_URL` + `LAB_TUTOR_SESSION_ID` to the container
 
 **Modified files:**
 - `docker/learner-studio.Dockerfile` — copy + build + pre-install the extension into a fixed `--extensions-dir`
-- `app/services/learner_studio_service.py` — pass `--extensions-dir /opt/lab-tutor/extensions` to code-server
-- `app/services/learner_package_runtime.py` — seed `.vscode/settings.json` with `labTutor.baseUrl`
-- `app/main.py` (or wherever routers are mounted — confirm in Task 8) — include `tutor_router`
+- `app/services/learner_studio_service.py` — pass `--extensions-dir /opt/lab-tutor/extensions` to code-server AND pass `LAB_TUTOR_BASE_URL` + `LAB_TUTOR_SESSION_ID` as container env vars (REVISED 2026-05-14 — see Task 8 note below)
+- `extensions/lab-tutor/src/extension.ts` — read tutor base URL + session id from `process.env.LAB_TUTOR_*` first; fall back to `labTutor.*` workspace config for dev-only override
+- `app/main.py` — include `tutor_router`
 - `.gitignore` — add `extensions/lab-tutor/node_modules/`, `extensions/lab-tutor/dist/`, `extensions/lab-tutor/*.vsix`
+
+**REMOVED from scope (2026-05-14):** seeding `.vscode/settings.json` from `seed_workspace_from_snapshot`. Per `/codex:adversarial-review` findings (see Task 8 note below), that approach creates an ownership conflict on a learner-editable file, can erase JSONC-formatted user settings, and races on concurrent launches. The env-var approach in Task 9 replaces it.
 
 ---
 
@@ -1283,13 +1285,21 @@ git commit -m "refactor(tutor): align router with codebase DI + drop parallel sc
 
 ---
 
-## Task 8: Seed `.vscode/settings.json` into the workspace
+## Task 8: ~~Seed `.vscode/settings.json` into the workspace~~ — RETIRED 2026-05-14
 
-**Files:**
-- Modify: `app/services/learner_package_runtime.py` (extend `seed_workspace_from_snapshot`)
-- Create: `tests/test_tutor_workspace_seeding.py`
+> **This task was retired before implementation.** `/codex:adversarial-review` flagged three blocking design issues with merging tutor metadata into `.vscode/settings.json`:
+>
+> 1. **Ownership conflict.** The function's existing contract is skip-if-exists (no clobber). Special-casing settings.json with merge-and-overwrite either silently overrides learner edits to `labTutor.*` (bad UX) or leaves `sessionId` stale on session rotation (functionally broken). No policy works in both directions because settings.json is jointly owned by the learner and the launcher.
+> 2. **JSONC corruption.** VS Code settings files are conventionally JSONC (comments, trailing commas). The proposed `json.loads` + fallback-to-`{}` would treat ordinary user-authored settings as corrupt and silently erase them.
+> 3. **Race on concurrent launches.** Read-modify-write isn't atomic; two launches against the same workspace last-write-win, pinning one editor to the other session's id. Visible breakage, hard to diagnose.
+>
+> **Replacement design (now in Task 9):** the launcher passes `LAB_TUTOR_BASE_URL` and `LAB_TUTOR_SESSION_ID` as environment variables on the code-server container. The extension reads them from `process.env.*` at activation, with `labTutor.*` workspace config kept only as a dev-time override. Launcher-owned ephemeral state belongs in launcher-owned ephemeral storage (env vars), not in a learner-editable file.
+>
+> Task 9 below has been updated to include this env-var change. No code from Task 8's original design lands.
 
-- [ ] **Step 1: Read the current seeding signature**
+**Original Task 8 content (kept below for historical reference only — DO NOT IMPLEMENT):**
+
+- [ ] **(retired) Step 1: Read the current seeding signature**
 
 Run: `grep -n "def seed_workspace_from_snapshot" app/services/learner_package_runtime.py`
 Read the function definition and the immediately surrounding 40 lines so you understand its inputs (workspace root, snapshot) and where it writes files. Note the existing pattern for paths under `.coursegen/` — the tutor file lives at `.vscode/settings.json`, parallel to that.
@@ -1440,11 +1450,16 @@ git commit -m "feat(learner-package): seed labTutor base URL into .vscode/settin
 
 ---
 
-## Task 9: Pass tutor URL + session id through `LearnerStudioService.launch_editor`
+## Task 9: Pass tutor URL + session id through `LearnerStudioService.launch_editor` — REVISED 2026-05-14
+
+> **Revised design** (after Task 8's adversarial review). Launcher passes `LAB_TUTOR_BASE_URL` and `LAB_TUTOR_SESSION_ID` as **container environment variables** at `docker run` time. The extension reads them from `process.env.LAB_TUTOR_*` at activation, with `labTutor.*` workspace config retained only as a dev-time override. Nothing is written to `.vscode/settings.json` from the launcher.
 
 **Files:**
-- Modify: `app/services/learner_studio_service.py`
-- Modify: `tests/test_learner_studio_service.py` (add a new test case)
+- Modify: `app/services/learner_studio_service.py` — pass `-e LAB_TUTOR_BASE_URL=... -e LAB_TUTOR_SESSION_ID=...` on the docker invocation, and add `--extensions-dir /opt/lab-tutor/extensions` to the code-server command.
+- Modify: `extensions/lab-tutor/src/extension.ts` — read `process.env.LAB_TUTOR_*` first; fall back to `vscode.workspace.getConfiguration("labTutor")`.
+- Create: `tests/test_learner_studio_env_vars.py` — verifies the docker invocation carries the env vars and the `--extensions-dir` flag.
+
+**Below this revised header, the original step list is preserved for context but should be re-read against the new design — most original steps still apply with `tutor_base_url` and `tutor_session_id` flowing as env vars rather than as kwargs to `seed_workspace_from_snapshot`.**
 
 - [ ] **Step 1: Read the launcher**
 
