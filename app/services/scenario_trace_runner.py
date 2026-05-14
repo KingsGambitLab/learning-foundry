@@ -543,11 +543,15 @@ _RUBRIC_KWARG_ALIASES: dict[tuple[str, str], str] = {
     ("numeric_range", "max"): "max_value",
     ("oracle_set_overlap", "gold_path"): "gold_set_path",
     ("oracle_set_overlap", "min_overlap"): "min_recall",
+    # ``value`` is the most common LLM kwarg drift here. It can be
+    # either a literal value or a string-shaped path; the rubric now
+    # treats string values that LOOK like dotted paths as path-vs-path
+    # via the heuristic in ``_normalize_rubric_kwargs`` below.
     ("behavioral_equivalence", "value"): "expected",
-    ("behavioral_equivalence", "reference_target"): "expected",
+    ("behavioral_equivalence", "reference_target"): "expected_path",
     ("behavioral_equivalence", "target_a"): "target",
-    ("behavioral_equivalence", "target_b"): "expected",
-    ("behavioral_equivalence", "reference_trace"): "expected",
+    ("behavioral_equivalence", "target_b"): "expected_path",
+    ("behavioral_equivalence", "reference_trace"): "expected_path",
     ("subset_match", "value"): "acceptable_source",
     ("subset_match", "subset_of"): "acceptable_source",
     ("llm_judge_semantic_eq", "gold"): "gold_path",

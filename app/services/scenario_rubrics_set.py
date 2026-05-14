@@ -152,19 +152,37 @@ class SubsetMatch(Rubric):
         )
 
 
+# Sentinel for "expected was not supplied". Plain ``None`` is a valid
+# literal value (e.g., ``abstained == None``) so we can't use it.
+_MISSING = object()
+
+
 @register_rubric
 class BehavioralEquivalence(Rubric):
-    """Verify a captured scalar equals an expected value.
+    """Verify a captured scalar equals an expected value or another path.
 
     Used for categorical / boolean behavior assertions like "this
     question is out-of-corpus, so ``abstained`` must be ``true``" or
-    "this endpoint should return status ``404``".
+    "this endpoint should return status ``404``", AND for path-vs-path
+    equivalence like "the response from ``first_call`` matches the
+    response from ``second_call``" (idempotency / adversarial-reorder
+    scenarios).
 
-    Config:
+    Config — provide exactly one of ``expected`` / ``expected_path``:
       - ``target``: dotted path (in ``captures``) to a value.
-      - ``expected``: the value the target must equal.
+      - ``expected``: a literal value the target must equal. Used for
+        boolean / categorical assertions.
+      - ``expected_path``: dotted path to another value the target must
+        match. Resolved like ``target`` (uses ``ctx.captures``). When
+        both are provided, ``expected_path`` wins.
       - ``case_sensitive``: when ``False`` and both sides are strings,
-        compare case-insensitively. Has no effect on non-string values.
+        compare case-insensitively.
+
+    Bug 19 (2026-05-15): the original rubric only supported literal
+    ``expected`` values. Cross-step equivalence — the canonical
+    idempotency check ``first_call.body.answer == second_call.body.answer``
+    — was impossible. ``expected_path`` closes that gap without
+    breaking the literal-value form.
     """
 
     name = "behavioral_equivalence"
@@ -173,11 +191,18 @@ class BehavioralEquivalence(Rubric):
         self,
         *,
         target: str,
-        expected: Any,
+        expected: Any = _MISSING,
+        expected_path: str | None = None,
         case_sensitive: bool = True,
     ) -> None:
+        if expected is _MISSING and expected_path is None:
+            raise TypeError(
+                "BehavioralEquivalence requires either ``expected`` "
+                "(literal value) or ``expected_path`` (path into captures)."
+            )
         self.target = target
         self.expected = expected
+        self.expected_path = expected_path
         self.case_sensitive = case_sensitive
 
     def judge(self, ctx: RubricContext) -> Verdict:
@@ -190,25 +215,43 @@ class BehavioralEquivalence(Rubric):
                 diagnostic={"missing_path": self.target},
             )
 
+        # Resolve ``expected`` from ``expected_path`` when provided.
+        # Path-vs-path takes priority over literal — the explicit
+        # ``expected_path`` kwarg signals "compare to a captured value".
+        if self.expected_path is not None:
+            try:
+                expected_value = resolve_path(ctx.captures, self.expected_path)
+            except (KeyError, IndexError):
+                return Verdict(
+                    status="fail",
+                    rationale=(
+                        f"expected_path '{self.expected_path}' not found "
+                        f"in captures"
+                    ),
+                    diagnostic={"missing_path": self.expected_path},
+                )
+        else:
+            expected_value = self.expected
+
         if (
             not self.case_sensitive
             and isinstance(got, str)
-            and isinstance(self.expected, str)
+            and isinstance(expected_value, str)
         ):
-            equal = got.casefold() == self.expected.casefold()
+            equal = got.casefold() == expected_value.casefold()
         else:
-            equal = got == self.expected
+            equal = got == expected_value
 
         if equal:
             return Verdict(
                 status="pass",
-                rationale=f"target equals expected ({self.expected!r})",
-                diagnostic={"got": got, "expected": self.expected},
+                rationale=f"target equals expected ({expected_value!r})",
+                diagnostic={"got": got, "expected": expected_value},
             )
         return Verdict(
             status="fail",
             rationale=(
-                f"expected {self.expected!r} at '{self.target}', got {got!r}"
+                f"expected {expected_value!r} at '{self.target}', got {got!r}"
             ),
-            diagnostic={"got": got, "expected": self.expected},
+            diagnostic={"got": got, "expected": expected_value},
         )

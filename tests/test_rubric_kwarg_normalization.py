@@ -138,13 +138,20 @@ class KwargNormalizationTests(unittest.TestCase):
         self.assertEqual(out_b["acceptable_source"], "setup_data.passages")
 
     def test_behavioral_equivalence_aliases(self) -> None:
-        # 8× value, 8× reference_target, 6× target_a.
-        for llm_name in ("value", "reference_target", "reference_trace"):
+        # 8× value → expected (literal-value form preserved)
+        out = _normalize_rubric_kwargs(
+            "behavioral_equivalence",
+            {"target": "x", "value": "y"},
+        )
+        self.assertEqual(out["expected"], "y")
+        # 8× reference_target, 2× reference_trace → expected_path
+        # (the path-vs-path form added in Bug 19 fix)
+        for llm_name in ("reference_target", "reference_trace"):
             out = _normalize_rubric_kwargs(
                 "behavioral_equivalence",
                 {"target": "x", llm_name: "y"},
             )
-            self.assertEqual(out["expected"], "y", f"failed for {llm_name}")
+            self.assertEqual(out["expected_path"], "y", f"failed for {llm_name}")
 
     def test_schema_match_schema_dict_extracts_required(self) -> None:
         # 56× SchemaMatch.schema.
