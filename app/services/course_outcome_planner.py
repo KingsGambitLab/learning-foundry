@@ -189,6 +189,19 @@ class _OutcomePlanPayload(BaseModel):
     # for why we don't use ``dict[str, Any]`` here). Optional; omitted /
     # null / "" / "{}" all coerce to default flags (everything off).
     capabilities_json: str | None = None
+    # JSON-stringified BenchmarkSource (HFBenchmarkSource | CRAGBenchmarkSource).
+    # Optional; omitted / null / "{}" means "no benchmark — LLM-author the
+    # setup data". When set, oracle_authoring pulls the dataset from HF and
+    # serializes it under ``_setup/`` instead. Same stringification rule as
+    # ``capabilities_json`` (a raw ``dict[str, Any]`` field would break
+    # OpenAI's strict structured-output mode).
+    #
+    # Example for Quivr/CRAG:
+    #   ``'{"kind":"crag","dataset":"Quivr/CRAG","max_queries":20}'``
+    # Example for a BeIR dataset:
+    #   ``'{"kind":"huggingface","corpus_dataset":"BeIR/scifact",
+    #     "qrels_dataset":"BeIR/scifact-qrels","max_queries":50}'``
+    benchmark_json: str | None = None
 
 
 # ---------------- system prompt ----------------
@@ -258,6 +271,21 @@ _SYSTEM_PROMPT = (
     "``\"response_schema_json\": \"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{...}}\"``. "
     "The ``request_schema_json`` is optional (omit for GET endpoints with "
     "no body); the ``response_schema_json`` is required.\n\n"
+    "If the brief names a public benchmark dataset (e.g., "
+    "Quivr/CRAG, BeIR/scifact, BeIR/nfcorpus, MS MARCO), emit "
+    "``benchmark_json`` as a **JSON STRING** describing the source so "
+    "the oracle authoring step can load the real gold data rather than "
+    "synthesize curated scenarios. Examples:\n"
+    "  - Quivr/CRAG: "
+    "``\"benchmark_json\": \"{\\\"kind\\\":\\\"crag\\\","
+    "\\\"dataset\\\":\\\"Quivr/CRAG\\\",\\\"max_queries\\\":20}\"``\n"
+    "  - BeIR/scifact: "
+    "``\"benchmark_json\": \"{\\\"kind\\\":\\\"huggingface\\\","
+    "\\\"corpus_dataset\\\":\\\"BeIR/scifact\\\","
+    "\\\"qrels_dataset\\\":\\\"BeIR/scifact-qrels\\\","
+    "\\\"max_queries\\\":50}\"``\n"
+    "Omit ``benchmark_json`` entirely when no dataset is named — the "
+    "oracle author will then synthesize curated scenarios.\n\n"
     "Also emit ``capabilities_json`` as a **JSON STRING** (not a raw "
     "object) declaring what runtime primitives the learner's service "
     "needs. Example: "
@@ -503,42 +531,73 @@ class OutcomeCoursePlanner:
                 f"CapabilityFlags conversion failed: {exc}"
             ) from exc
 
-        # HARDCODED BRIDGE (2026-05-14 live-run finding):
-        # ``_OutcomePlanPayload`` has no ``benchmark`` field yet, so the LLM
-        # cannot declare "this course grades against Quivr/CRAG" — even when
-        # the brief literally names it. Until the payload schema grows a
-        # discriminated benchmark field, we sniff the BRIEF text (the user's
-        # original ``request.goal``, not the LLM's rewritten ``payload.goal``
-        # — observed: the LLM paraphrases the goal and drops the dataset
-        # marker) for the Quivr/CRAG token and inject a default
-        # ``CRAGBenchmarkSource`` binding. This lets the oracle authoring
-        # step pull real CRAG rows (gold answers + per-query search_results)
-        # instead of authoring synthetic curated scenarios for a brief that
-        # explicitly named the benchmark. ``oracle_source`` is upgraded to
-        # ``hybrid`` so the reference-impl pass still contributes while the
-        # benchmark rows ground the eval set.
+        # ---- BenchmarkSource resolution ----
+        # The payload now carries an optional ``benchmark_json`` field
+        # (added Bug 4 fix, 2026-05-15). When the LLM emits it, we parse
+        # it as the discriminated union and use it. When it doesn't, we
+        # fall back to the previous brief-text sniff so legacy briefs
+        # that name Quivr/CRAG without the planner-payload field still
+        # bind correctly.
         benchmark = None
-        brief_blob = " ".join(
-            [
-                request.goal or "",
-                request.title or "",
-                *(request.learning_outcomes or []),
-            ]
-        ).lower()
-        if "quivr/crag" in brief_blob or "quivr/ crag" in brief_blob:
-            benchmark = CRAGBenchmarkSource(
-                # Cap the live sample at 20 rows so the smoke run stays
-                # fast; raise this once we're past the smoke.
-                max_queries=20,
-            )
+        if payload.benchmark_json:
+            try:
+                bench_dict = _parse_optional_json_object(
+                    payload.benchmark_json, field_label="benchmark_json"
+                )
+            except OutcomeCourseGenerationError:
+                bench_dict = None
+            if bench_dict:
+                kind = bench_dict.get("kind")
+                try:
+                    if kind == "crag":
+                        benchmark = CRAGBenchmarkSource.model_validate(bench_dict)
+                    elif kind == "huggingface":
+                        from app.services.course_outcome_models import (
+                            HFBenchmarkSource,
+                        )
+
+                        benchmark = HFBenchmarkSource.model_validate(bench_dict)
+                    else:
+                        # Unknown kind — log and ignore, falling through
+                        # to the sniff fallback below.
+                        log_coursegen_event(
+                            "outcome_planner_unknown_benchmark_kind",
+                            kind=str(kind),
+                        )
+                except ValidationError as exc:
+                    log_coursegen_event(
+                        "outcome_planner_benchmark_json_invalid",
+                        error=str(exc),
+                        kind=str(kind),
+                    )
+
+        # Brief-text sniff fallback. Useful when the LLM doesn't emit
+        # ``benchmark_json`` but the brief literally names a benchmark
+        # (Quivr/CRAG). Skipped when the LLM already emitted a valid
+        # benchmark above.
+        if benchmark is None:
+            brief_blob = " ".join(
+                [
+                    request.goal or "",
+                    request.title or "",
+                    *(request.learning_outcomes or []),
+                ]
+            ).lower()
+            if "quivr/crag" in brief_blob or "quivr/ crag" in brief_blob:
+                benchmark = CRAGBenchmarkSource(max_queries=20)
+                log_coursegen_event(
+                    "outcome_planner_benchmark_binding_injected",
+                    kind="crag",
+                    dataset="Quivr/CRAG",
+                    max_queries=20,
+                    detected_in="brief",
+                )
+
+        # Whenever ANY benchmark is bound (LLM- or sniff-emitted), the
+        # oracle_source is upgraded to hybrid so the reference-impl pass
+        # contributes while the benchmark rows ground the eval set.
+        if benchmark is not None and oracle_source is OracleSource.curated:
             oracle_source = OracleSource.hybrid
-            log_coursegen_event(
-                "outcome_planner_benchmark_binding_injected",
-                kind="crag",
-                dataset="Quivr/CRAG",
-                max_queries=20,
-                detected_in="brief",
-            )
 
         try:
             return CourseOutcomeSpec(
