@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+from app.api.deps import current_user, require_role
+from app.domain.auth import Role
 
 from app.domain.assets import (
     CreateCreatorAssetRequest,
@@ -131,17 +134,17 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/v1/sandbox/status", response_model=SandboxAvailability, tags=["system"])
+@router.get("/v1/sandbox/status", response_model=SandboxAvailability, tags=["system"], dependencies=[Depends(require_role(Role.creator))])
 def sandbox_status(request: Request) -> SandboxAvailability:
     return _docker_sandbox_runner(request).status()
 
 
-@router.get("/v1/task-agent-authoring/status", response_model=TaskAgentAuthoringStatus, tags=["system"])
+@router.get("/v1/task-agent-authoring/status", response_model=TaskAgentAuthoringStatus, tags=["system"], dependencies=[Depends(require_role(Role.creator))])
 def task_agent_authoring_status(request: Request) -> TaskAgentAuthoringStatus:
     return _workflow_service(request).task_agent_authoring_status()
 
 
-@router.get("/v1/registry", tags=["registry"])
+@router.get("/v1/registry", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
 def get_registry():
     return {
         "package_types": [package_type.value for package_type in DESIGN_CATALOG.package_types],
@@ -150,22 +153,22 @@ def get_registry():
     }
 
 
-@router.get("/v1/domain-packs", tags=["registry"])
+@router.get("/v1/domain-packs", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
 def list_domain_packs():
     return DESIGN_CATALOG.domain_packs
 
 
-@router.get("/v1/overlays", tags=["registry"])
+@router.get("/v1/overlays", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
 def list_overlays():
     return DESIGN_CATALOG.overlays
 
 
-@router.get("/v1/course-patterns", tags=["registry"])
+@router.get("/v1/course-patterns", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_patterns():
     return CATALOG_PATTERNS
 
 
-@router.get("/v1/course-patterns/{course_slug}", tags=["registry"])
+@router.get("/v1/course-patterns/{course_slug}", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_pattern(course_slug: str):
     pattern = course_pattern_by_slug(course_slug)
     if pattern is None:
@@ -173,7 +176,7 @@ def get_course_pattern(course_slug: str):
     return pattern
 
 
-@router.post("/v1/designs/infer", response_model=AssignmentDesignInference, tags=["intake"])
+@router.post("/v1/designs/infer", response_model=AssignmentDesignInference, tags=["intake"], dependencies=[Depends(require_role(Role.creator))])
 def infer_assignment_design_for_intake(intake: GenerationIntake) -> AssignmentDesignInference:
     return infer_assignment_design(
         title=intake.title,
@@ -195,12 +198,12 @@ def infer_assignment_design_for_intake(intake: GenerationIntake) -> AssignmentDe
     )
 
 
-@router.post("/v1/specs/task-agent/validate", response_model=ValidationResult, tags=["validation"])
+@router.post("/v1/specs/task-agent/validate", response_model=ValidationResult, tags=["validation"], dependencies=[Depends(require_role(Role.creator))])
 def validate_task_agent(spec: TaskAgentServiceSpec) -> ValidationResult:
     return validate_task_agent_spec(spec)
 
 
-@router.post("/v1/specs/task-agent/gates/{deliverable_id}", response_model=DeliverableGate, tags=["validation"])
+@router.post("/v1/specs/task-agent/gates/{deliverable_id}", response_model=DeliverableGate, tags=["validation"], dependencies=[Depends(require_role(Role.creator))])
 def compute_gate(deliverable_id: str, spec: TaskAgentServiceSpec) -> DeliverableGate:
     try:
         return compute_task_agent_gate(spec, deliverable_id)
@@ -208,12 +211,12 @@ def compute_gate(deliverable_id: str, spec: TaskAgentServiceSpec) -> Deliverable
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["validation"])
+@router.post("/v1/specs/task-agent/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["validation"], dependencies=[Depends(require_role(Role.creator))])
 def build_task_agent_grader_plans(spec: TaskAgentServiceSpec) -> TaskAgentGraderPlanCollection:
     return build_all_task_agent_grader_plans(spec)
 
 
-@router.post("/v1/specs/task-agent/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["validation"])
+@router.post("/v1/specs/task-agent/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["validation"], dependencies=[Depends(require_role(Role.creator))])
 def build_task_agent_grader_plan_for_deliverable(deliverable_id: str, spec: TaskAgentServiceSpec) -> DeliverableGraderPlan:
     try:
         return build_task_agent_grader_plan(spec, deliverable_id)
@@ -221,7 +224,7 @@ def build_task_agent_grader_plan_for_deliverable(deliverable_id: str, spec: Task
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["grading"])
+@router.post("/v1/specs/task-agent/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["grading"], dependencies=[Depends(require_role(Role.creator))])
 def grade_task_agent_spec(deliverable_id: str, payload: GradeTaskAgentRequest) -> DeliverableGradeReport:
     try:
         return grade_task_agent_submission(payload.spec, deliverable_id, payload.submission)
@@ -229,7 +232,7 @@ def grade_task_agent_spec(deliverable_id: str, payload: GradeTaskAgentRequest) -
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["grading"])
+@router.post("/v1/specs/task-agent/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["grading"], dependencies=[Depends(require_role(Role.creator))])
 def grade_task_agent_spec_live(
     deliverable_id: str,
     payload: LiveGradeTaskAgentSpecRequest,
@@ -244,17 +247,17 @@ def grade_task_agent_spec_live(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs", response_model=WorkflowRunList, tags=["workflow"])
+@router.get("/v1/workflow-runs", response_model=WorkflowRunList, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def list_workflow_runs(request: Request) -> WorkflowRunList:
     return _workflow_service(request).list_runs()
 
 
-@router.post("/v1/workflow-runs", response_model=WorkflowRun, tags=["workflow"])
+@router.post("/v1/workflow-runs", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def create_workflow_run(payload: CreateWorkflowRunRequest, request: Request) -> WorkflowRun:
     return _workflow_service(request).create_run(payload.intake)
 
 
-@router.get("/v1/workflow-runs/{run_id}", response_model=WorkflowRun, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_run(run_id: str, request: Request) -> WorkflowRun:
     run = _workflow_service(request).get_run(run_id)
     if run is None:
@@ -262,7 +265,7 @@ def get_workflow_run(run_id: str, request: Request) -> WorkflowRun:
     return run
 
 
-@router.get("/v1/workflow-runs/{run_id}/events", response_model=list[WorkflowEvent], tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/events", response_model=list[WorkflowEvent], tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_events(run_id: str, request: Request) -> list[WorkflowEvent]:
     service = _workflow_service(request)
     run = service.get_run(run_id)
@@ -271,7 +274,7 @@ def get_workflow_events(run_id: str, request: Request) -> list[WorkflowEvent]:
     return service.list_events(run_id)
 
 
-@router.get("/v1/workflow-runs/{run_id}/nodes", response_model=list[WorkflowNodeExecution], tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/nodes", response_model=list[WorkflowNodeExecution], tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_nodes(run_id: str, request: Request) -> list[WorkflowNodeExecution]:
     service = _workflow_service(request)
     try:
@@ -280,7 +283,7 @@ def get_workflow_nodes(run_id: str, request: Request) -> list[WorkflowNodeExecut
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/review", response_model=WorkflowReviewSummary, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/review", response_model=WorkflowReviewSummary, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_review(run_id: str, request: Request) -> WorkflowReviewSummary:
     service = _workflow_service(request)
     try:
@@ -289,7 +292,7 @@ def get_workflow_review(run_id: str, request: Request) -> WorkflowReviewSummary:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/workspace", response_model=MaterializedBundle, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/workspace", response_model=MaterializedBundle, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_workspace(run_id: str, request: Request) -> MaterializedBundle:
     service = _workflow_service(request)
     try:
@@ -300,7 +303,7 @@ def get_workflow_workspace(run_id: str, request: Request) -> MaterializedBundle:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/workspace/file", response_model=BundleFileContent, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/workspace/file", response_model=BundleFileContent, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_workspace_file(
     run_id: str,
     request: Request,
@@ -319,7 +322,7 @@ def get_workflow_workspace_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/nodes/execute", response_model=WorkflowRun, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/nodes/execute", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def execute_workflow_nodes(run_id: str, request: Request) -> WorkflowRun:
     service = _workflow_service(request)
     try:
@@ -330,7 +333,7 @@ def execute_workflow_nodes(run_id: str, request: Request) -> WorkflowRun:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def list_workflow_grader_plans(run_id: str, request: Request) -> TaskAgentGraderPlanCollection:
     service = _workflow_service(request)
     try:
@@ -343,7 +346,7 @@ def list_workflow_grader_plans(run_id: str, request: Request) -> TaskAgentGrader
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_grader_plan(run_id: str, deliverable_id: str, request: Request) -> DeliverableGraderPlan:
     service = _workflow_service(request)
     try:
@@ -356,7 +359,7 @@ def get_workflow_grader_plan(run_id: str, deliverable_id: str, request: Request)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def grade_workflow_submission(run_id: str, deliverable_id: str, submission: TaskAgentSubmission, request: Request) -> DeliverableGradeReport:
     service = _workflow_service(request)
     try:
@@ -369,7 +372,7 @@ def grade_workflow_submission(run_id: str, deliverable_id: str, submission: Task
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def grade_workflow_submission_live(
     run_id: str,
     deliverable_id: str,
@@ -389,7 +392,7 @@ def grade_workflow_submission_live(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.put("/v1/workflow-runs/{run_id}/task-agent-spec", response_model=WorkflowRun, tags=["workflow"])
+@router.put("/v1/workflow-runs/{run_id}/task-agent-spec", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def update_task_agent_workflow_spec(run_id: str, spec: TaskAgentServiceSpec, request: Request) -> WorkflowRun:
     service = _workflow_service(request)
     try:
@@ -400,7 +403,7 @@ def update_task_agent_workflow_spec(run_id: str, spec: TaskAgentServiceSpec, req
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/decisions", response_model=WorkflowRun, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/decisions", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def decide_workflow_gate(run_id: str, decision: GateDecisionRequest, request: Request) -> WorkflowRun:
     service = _workflow_service(request)
     try:
@@ -411,7 +414,7 @@ def decide_workflow_gate(run_id: str, decision: GateDecisionRequest, request: Re
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/workflow-runs/{run_id}/materialize", response_model=WorkflowRun, tags=["workflow"])
+@router.post("/v1/workflow-runs/{run_id}/materialize", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def materialize_workflow_run(run_id: str, payload: MaterializeBundleRequest, request: Request) -> WorkflowRun:
     service = _workflow_service(request)
     try:
@@ -424,22 +427,22 @@ def materialize_workflow_run(run_id: str, payload: MaterializeBundleRequest, req
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/course-runs", response_model=CourseRunList, tags=["course"])
+@router.get("/v1/course-runs", response_model=CourseRunList, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def list_course_runs(request: Request) -> CourseRunList:
     return _course_workflow_service(request).list_runs()
 
 
-@router.get("/v1/course-generation/status", response_model=CourseGenerationStatus, tags=["course"])
+@router.get("/v1/course-generation/status", response_model=CourseGenerationStatus, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_generation_status(request: Request) -> CourseGenerationStatus:
     return _course_generation_service(request).status()
 
 
-@router.get("/v1/creator-assets", response_model=CreatorAssetList, tags=["course"])
+@router.get("/v1/creator-assets", response_model=CreatorAssetList, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def list_creator_assets(request: Request) -> CreatorAssetList:
     return _creator_asset_service(request).list_assets()
 
 
-@router.post("/v1/creator-assets", response_model=CreatorAssetRecord, tags=["course"])
+@router.post("/v1/creator-assets", response_model=CreatorAssetRecord, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_creator_asset(
     payload: CreateCreatorAssetRequest,
     request: Request,
@@ -450,7 +453,7 @@ def create_creator_asset(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.delete("/v1/creator-assets/{asset_id}", response_model=DeleteCreatorAssetResult, tags=["course"])
+@router.delete("/v1/creator-assets/{asset_id}", response_model=DeleteCreatorAssetResult, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def delete_creator_asset(asset_id: str, request: Request) -> DeleteCreatorAssetResult:
     deleted = _creator_asset_service(request).delete_asset(asset_id)
     if not deleted:
@@ -458,7 +461,7 @@ def delete_creator_asset(asset_id: str, request: Request) -> DeleteCreatorAssetR
     return DeleteCreatorAssetResult(asset_id=asset_id)
 
 
-@router.post("/v1/course-generation/suggest-outcomes", response_model=SuggestLearningOutcomesResponse, tags=["course"])
+@router.post("/v1/course-generation/suggest-outcomes", response_model=SuggestLearningOutcomesResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def suggest_learning_outcomes(
     payload: SuggestLearningOutcomesRequest,
     request: Request,
@@ -469,7 +472,7 @@ def suggest_learning_outcomes(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-generation/creator-plan", response_model=GenerateCreatorCoursePlanResponse, tags=["course"])
+@router.post("/v1/course-generation/creator-plan", response_model=GenerateCreatorCoursePlanResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def generate_creator_course_plan(
     payload: GenerateCreatorCoursePlanRequest,
     request: Request,
@@ -480,7 +483,7 @@ def generate_creator_course_plan(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-generation/creator-stack-contract", response_model=RecommendCreatorStackContractResponse, tags=["course"])
+@router.post("/v1/course-generation/creator-stack-contract", response_model=RecommendCreatorStackContractResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def recommend_creator_stack_contract(
     payload: RecommendCreatorStackContractRequest,
     request: Request,
@@ -491,7 +494,7 @@ def recommend_creator_stack_contract(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/generate", response_model=GenerateCourseFromBriefResponse, tags=["course"])
+@router.post("/v1/course-runs/generate", response_model=GenerateCourseFromBriefResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def generate_course_run_from_brief(
     payload: GenerateCourseFromBriefRequest,
     request: Request,
@@ -502,7 +505,7 @@ def generate_course_run_from_brief(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/from-creator-plan", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs/from-creator-plan", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_course_run_from_creator_plan(
     payload: CreateCourseFromCreatorPlanRequest,
     request: Request,
@@ -513,7 +516,7 @@ def create_course_run_from_creator_plan(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/from-creator-plan-async", response_model=QueueCourseGenerationResponse, tags=["course"])
+@router.post("/v1/course-runs/from-creator-plan-async", response_model=QueueCourseGenerationResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def queue_course_run_from_creator_plan(
     payload: CreateCourseFromCreatorPlanRequest,
     request: Request,
@@ -524,7 +527,7 @@ def queue_course_run_from_creator_plan(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/generate-async", response_model=QueueCourseGenerationResponse, tags=["course"])
+@router.post("/v1/course-runs/generate-async", response_model=QueueCourseGenerationResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def queue_course_run_from_brief(
     payload: GenerateCourseFromBriefRequest,
     request: Request,
@@ -535,12 +538,12 @@ def queue_course_run_from_brief(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/reset-local", response_model=LocalDraftResetResult, tags=["course"])
+@router.post("/v1/course-runs/reset-local", response_model=LocalDraftResetResult, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def reset_local_course_state(request: Request) -> LocalDraftResetResult:
     return _course_workflow_service(request).reset_local_state()
 
 
-@router.post("/v1/course-runs", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_course_run(payload: CreateCourseRunRequest, request: Request) -> CourseRun:
     service = _course_workflow_service(request)
     try:
@@ -549,7 +552,7 @@ def create_course_run(payload: CreateCourseRunRequest, request: Request) -> Cour
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}", response_model=CourseRun, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_run(course_run_id: str, request: Request) -> CourseRun:
     run = _course_workflow_service(request).get_run(course_run_id)
     if run is None:
@@ -557,7 +560,7 @@ def get_course_run(course_run_id: str, request: Request) -> CourseRun:
     return run
 
 
-@router.get("/v1/course-runs/{course_run_id}/events", response_model=list[CourseEvent], tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/events", response_model=list[CourseEvent], tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_events(course_run_id: str, request: Request) -> list[CourseEvent]:
     service = _course_workflow_service(request)
     run = service.get_run(course_run_id)
@@ -566,7 +569,7 @@ def get_course_events(course_run_id: str, request: Request) -> list[CourseEvent]
     return service.list_events(course_run_id)
 
 
-@router.get("/v1/course-runs/{course_run_id}/timeline", response_model=DraftTimelineResponse, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/timeline", response_model=DraftTimelineResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_timeline(course_run_id: str, request: Request) -> DraftTimelineResponse:
     service = _course_workflow_service(request)
     try:
@@ -575,7 +578,7 @@ def get_course_timeline(course_run_id: str, request: Request) -> DraftTimelineRe
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/review", response_model=CourseReviewReport, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/review", response_model=CourseReviewReport, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def review_course_run(course_run_id: str, request: Request) -> CourseReviewReport:
     service = _course_workflow_service(request)
     try:
@@ -584,7 +587,7 @@ def review_course_run(course_run_id: str, request: Request) -> CourseReviewRepor
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/creator-view", response_model=CreatorTestingView, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/creator-view", response_model=CreatorTestingView, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_creator_testing_view(course_run_id: str, request: Request) -> CreatorTestingView:
     service = _course_workflow_service(request)
     try:
@@ -593,7 +596,7 @@ def get_creator_testing_view(course_run_id: str, request: Request) -> CreatorTes
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackList, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackList, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def list_creator_feedback(course_run_id: str, request: Request) -> CreatorFeedbackList:
     service = _course_workflow_service(request)
     try:
@@ -602,7 +605,7 @@ def list_creator_feedback(course_run_id: str, request: Request) -> CreatorFeedba
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackRecord, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/feedback", response_model=CreatorFeedbackRecord, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_creator_feedback(
     course_run_id: str,
     payload: CreateCreatorFeedbackRequest,
@@ -617,7 +620,7 @@ def create_creator_feedback(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_latest_learner_evaluation(
     course_run_id: str,
     request: Request,
@@ -632,7 +635,7 @@ def get_latest_learner_evaluation(
     return report
 
 
-@router.post("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/learner-eval", response_model=LearnerCourseEvaluationReport, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_learner_evaluation(
     course_run_id: str,
     payload: CreateLearnerEvaluationReportRequest,
@@ -650,7 +653,7 @@ def create_learner_evaluation(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/published-versions", response_model=PublishedVersionList, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/published-versions", response_model=PublishedVersionList, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def list_published_versions(course_run_id: str, request: Request) -> PublishedVersionList:
     service = _course_workflow_service(request)
     try:
@@ -659,7 +662,7 @@ def list_published_versions(course_run_id: str, request: Request) -> PublishedVe
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/sync", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/sync", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def sync_course_run(course_run_id: str, request: Request) -> CourseRun:
     service = _course_workflow_service(request)
     try:
@@ -668,7 +671,7 @@ def sync_course_run(course_run_id: str, request: Request) -> CourseRun:
         raise HTTPException(status_code=404, detail=f"Unknown course run '{course_run_id}'.") from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/publish", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/publish", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def publish_course_run(course_run_id: str, request: Request) -> CourseRun:
     service = _course_workflow_service(request)
     try:
@@ -679,7 +682,7 @@ def publish_course_run(course_run_id: str, request: Request) -> CourseRun:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/publish-async", response_model=QueueCourseOperationResponse, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/publish-async", response_model=QueueCourseOperationResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def queue_publish_course_run(course_run_id: str, request: Request) -> QueueCourseOperationResponse:
     service = _course_workflow_service(request)
     try:
@@ -690,7 +693,7 @@ def queue_publish_course_run(course_run_id: str, request: Request) -> QueueCours
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/create-revision", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/create-revision", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def create_course_revision(course_run_id: str, request: Request) -> CourseRun:
     service = _course_workflow_service(request)
     try:
@@ -701,7 +704,7 @@ def create_course_revision(course_run_id: str, request: Request) -> CourseRun:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/create-revision-async", response_model=QueueCourseRevisionResponse, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/create-revision-async", response_model=QueueCourseRevisionResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def queue_course_revision(course_run_id: str, request: Request) -> QueueCourseRevisionResponse:
     service = _course_workflow_service(request)
     try:
@@ -712,7 +715,7 @@ def queue_course_revision(course_run_id: str, request: Request) -> QueueCourseRe
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/materialize", response_model=CourseRun, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/materialize", response_model=CourseRun, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def materialize_course_run(
     course_run_id: str,
     payload: MaterializeBundleRequest,
@@ -729,7 +732,7 @@ def materialize_course_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/course-runs/{course_run_id}/materialize-async", response_model=QueueCourseOperationResponse, tags=["course"])
+@router.post("/v1/course-runs/{course_run_id}/materialize-async", response_model=QueueCourseOperationResponse, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def queue_materialize_course_run(
     course_run_id: str,
     payload: MaterializeBundleRequest,
@@ -746,7 +749,7 @@ def queue_materialize_course_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/course-runs/{course_run_id}/bundle", response_model=MaterializedBundle, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/bundle", response_model=MaterializedBundle, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def get_course_bundle(course_run_id: str, request: Request) -> MaterializedBundle:
     run = _course_workflow_service(request).get_run(course_run_id)
     if run is None:
@@ -756,7 +759,7 @@ def get_course_bundle(course_run_id: str, request: Request) -> MaterializedBundl
     return run.materialized_bundle
 
 
-@router.get("/v1/course-runs/{course_run_id}/bundle/file", response_model=BundleFileContent, tags=["course"])
+@router.get("/v1/course-runs/{course_run_id}/bundle/file", response_model=BundleFileContent, tags=["course"], dependencies=[Depends(require_role(Role.creator))])
 def read_course_bundle_file(
     course_run_id: str,
     request: Request,
@@ -775,7 +778,7 @@ def read_course_bundle_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/v1/workflow-runs/{run_id}/bundle", response_model=MaterializedBundle, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/bundle", response_model=MaterializedBundle, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def get_workflow_bundle(run_id: str, request: Request) -> MaterializedBundle:
     service = _workflow_service(request)
     run = service.get_run(run_id)
@@ -786,7 +789,7 @@ def get_workflow_bundle(run_id: str, request: Request) -> MaterializedBundle:
     return run.artifacts.materialized_bundle
 
 
-@router.get("/v1/workflow-runs/{run_id}/bundle/file", response_model=BundleFileContent, tags=["workflow"])
+@router.get("/v1/workflow-runs/{run_id}/bundle/file", response_model=BundleFileContent, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def read_workflow_bundle_file(
     run_id: str,
     request: Request,
@@ -805,12 +808,12 @@ def read_workflow_bundle_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/catalog", response_model=PublishedCourseCatalog, tags=["lms"])
+@router.get("/v1/lms/catalog", response_model=PublishedCourseCatalog, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def list_lms_catalog(request: Request) -> PublishedCourseCatalog:
     return _lms_service(request).list_catalog()
 
 
-@router.get("/v1/lms/enrollments", response_model=LearnerEnrollmentList, tags=["lms"])
+@router.get("/v1/lms/enrollments", response_model=LearnerEnrollmentList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def list_lms_enrollments(
     request: Request,
     learner_id: str = Query("local-learner", description="Local learner identity for the LMS prototype."),
@@ -818,7 +821,7 @@ def list_lms_enrollments(
     return _lms_service(request).list_enrollments(learner_id=learner_id)
 
 
-@router.post("/v1/lms/enrollments", response_model=LearnerEnrollment, tags=["lms"])
+@router.post("/v1/lms/enrollments", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def create_lms_enrollment(payload: CreateEnrollmentRequest, request: Request) -> LearnerEnrollment:
     service = _lms_service(request)
     try:
@@ -829,7 +832,7 @@ def create_lms_enrollment(payload: CreateEnrollmentRequest, request: Request) ->
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}", response_model=LearnerEnrollment, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollment:
     service = _lms_service(request)
     try:
@@ -838,7 +841,7 @@ def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollmen
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerDeliverableExperience, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def get_lms_deliverable_experience(
     enrollment_id: str,
     request: Request,
@@ -853,7 +856,7 @@ def get_lms_deliverable_experience(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/learner-view", response_model=LearnerTestingView, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}/learner-view", response_model=LearnerTestingView, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def get_lms_learner_view(
     enrollment_id: str,
     request: Request,
@@ -868,7 +871,7 @@ def get_lms_learner_view(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackList, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def list_lms_feedback(enrollment_id: str, request: Request) -> LearnerFeedbackList:
     service = _lms_service(request)
     try:
@@ -877,7 +880,7 @@ def list_lms_feedback(enrollment_id: str, request: Request) -> LearnerFeedbackLi
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackRecord, tags=["lms"])
+@router.post("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackRecord, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def create_lms_feedback(
     enrollment_id: str,
     payload: CreateLearnerFeedbackRequest,
@@ -892,7 +895,7 @@ def create_lms_feedback(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/workspace", response_model=LearnerEnrollment, tags=["lms"])
+@router.post("/v1/lms/enrollments/{enrollment_id}/workspace", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def launch_lms_workspace(
     enrollment_id: str,
     payload: LaunchWorkspaceRequest,
@@ -909,7 +912,7 @@ def launch_lms_workspace(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/files", response_model=LearnerWorkspaceFileList, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/files", response_model=LearnerWorkspaceFileList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def list_lms_workspace_files(
     enrollment_id: str,
     request: Request,
@@ -924,7 +927,7 @@ def list_lms_workspace_files(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileContent, tags=["lms"])
+@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileContent, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def read_lms_workspace_file(
     enrollment_id: str,
     request: Request,
@@ -942,7 +945,7 @@ def read_lms_workspace_file(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.put("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileWriteResult, tags=["lms"])
+@router.put("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileWriteResult, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def write_lms_workspace_file(
     enrollment_id: str,
     payload: WriteLearnerWorkspaceFileRequest,
@@ -957,7 +960,7 @@ def write_lms_workspace_file(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerDeliverableExperience, tags=["lms"])
+@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
 def submit_lms_deliverable(
     enrollment_id: str,
     payload: SubmitDeliverableRequest,
