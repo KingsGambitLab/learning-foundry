@@ -43,8 +43,10 @@ def _load_env_file(path: str | None) -> None:
             continue
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key:
-            os.environ.setdefault(key, value)
+        if key and not os.environ.get(key):
+            # Treat empty-string env vars the same as unset so a stale `KEY=`
+            # exported by the parent shell doesn't shadow the file.
+            os.environ[key] = value
 
 
 class TutorService:
