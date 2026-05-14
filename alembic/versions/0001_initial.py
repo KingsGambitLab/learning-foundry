@@ -76,30 +76,27 @@ def upgrade() -> None:
 
     op.create_table(
         "learner_submissions",
-        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("submission_id", sa.Text(), primary_key=True),
         sa.Column("enrollment_id", sa.Text(), nullable=False),
         sa.Column("deliverable_id", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
-        sa.Column("status", sa.Text(), nullable=False),
         sa.Column("payload", sa.dialects.postgresql.JSONB(), nullable=False),
     )
     op.create_index("learner_submissions_enrollment_idx", "learner_submissions", ["enrollment_id", "created_at"])
 
     op.create_table(
         "learner_workspace_sessions",
-        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("session_id", sa.Text(), primary_key=True),
         sa.Column("enrollment_id", sa.Text(), nullable=False),
         sa.Column("deliverable_id", sa.Text(), nullable=False),
-        sa.Column("status", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.Column("payload", sa.dialects.postgresql.JSONB(), nullable=False),
     )
-    op.create_index("learner_workspace_sessions_enrollment_idx", "learner_workspace_sessions", ["enrollment_id", "created_at"])
+    op.create_index("learner_workspace_sessions_enrollment_idx", "learner_workspace_sessions", ["enrollment_id", "updated_at"])
 
     op.create_table(
         "publish_snapshots",
-        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("snapshot_id", sa.Text(), primary_key=True),
         sa.Column("course_run_id", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
@@ -109,7 +106,7 @@ def upgrade() -> None:
 
     op.create_table(
         "creator_feedback",
-        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("feedback_id", sa.Text(), primary_key=True),
         sa.Column("course_run_id", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("payload", sa.dialects.postgresql.JSONB(), nullable=False),
@@ -118,7 +115,7 @@ def upgrade() -> None:
 
     op.create_table(
         "learner_feedback",
-        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("feedback_id", sa.Text(), primary_key=True),
         sa.Column("enrollment_id", sa.Text(), nullable=False),
         sa.Column("course_run_id", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
@@ -128,24 +125,20 @@ def upgrade() -> None:
 
     op.create_table(
         "learner_eval_reports",
-        sa.Column("id", sa.Text(), primary_key=True),
-        sa.Column("enrollment_id", sa.Text(), nullable=False),
+        sa.Column("report_id", sa.Text(), primary_key=True),
         sa.Column("course_run_id", sa.Text(), nullable=False),
         sa.Column("publish_snapshot_id", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("payload", sa.dialects.postgresql.JSONB(), nullable=False),
     )
-    op.create_index("learner_eval_reports_enrollment_idx", "learner_eval_reports", ["enrollment_id", "created_at"])
+    op.create_index("learner_eval_reports_course_idx", "learner_eval_reports", ["course_run_id", "created_at"])
 
     op.create_table(
         "creator_assets",
-        sa.Column("id", sa.Text(), primary_key=True),
-        sa.Column("course_run_id", sa.Text(), nullable=False),
+        sa.Column("asset_id", sa.Text(), primary_key=True),
         sa.Column("created_at", sa.Text(), nullable=False),
-        sa.Column("updated_at", sa.Text(), nullable=False),
         sa.Column("payload", sa.dialects.postgresql.JSONB(), nullable=False),
     )
-    op.create_index("creator_assets_course_idx", "creator_assets", ["course_run_id", "updated_at"])
 
 
 def downgrade() -> None:
