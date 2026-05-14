@@ -48,6 +48,7 @@ def main() -> int:
         return 0
 
     title = (os.environ.get("LAB_TUTOR_ASSIGNMENT_TITLE") or "").strip()
+    session_id = (os.environ.get("LAB_TUTOR_SESSION_ID") or "").strip()
 
     workbench = find_workbench()
     if workbench is None:
@@ -71,6 +72,7 @@ def main() -> int:
     # Build the injection. HTML-escape the title for attribute context.
     base_url_attr = html.escape(base_url, quote=True)
     title_attr = html.escape(title, quote=True)
+    session_attr = html.escape(session_id, quote=True)
     injection = (
         f'\n  {SENTINEL}\n'
         f'  <link rel="stylesheet" href="{base_url_attr}/static/lab-tutor.css">\n'
@@ -78,6 +80,7 @@ def main() -> int:
         f'    src="{base_url_attr}/static/lab-tutor.js"\n'
         f'    data-base-url="{base_url_attr}"\n'
         f'    data-assignment-title="{title_attr}"\n'
+        f'    data-session-id="{session_attr}"\n'
         f'    defer\n'
         f'  ></script>\n'
     )

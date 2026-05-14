@@ -90,8 +90,15 @@ class LearnerStudioService:
             "LAB_TUTOR_BASE_URL", "http://127.0.0.1:8012"
         )
 
-    def _tutor_environment(self, assignment_title: str | None) -> dict[str, str]:
-        env: dict[str, str] = {"LAB_TUTOR_BASE_URL": self._tutor_base_url}
+    def _tutor_environment(
+        self,
+        session_id: str,
+        assignment_title: str | None,
+    ) -> dict[str, str]:
+        env: dict[str, str] = {
+            "LAB_TUTOR_BASE_URL": self._tutor_base_url,
+            "LAB_TUTOR_SESSION_ID": session_id,
+        }
         if assignment_title:
             env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
         return env
@@ -160,7 +167,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-            *(self._docker_env_args(self._tutor_environment(assignment_title)) if lab_tutor_enabled else []),
+            *(self._docker_env_args(self._tutor_environment(session_id, assignment_title)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
