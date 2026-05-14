@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from app.domain.publish import (
     PublishCertificationCheck,
@@ -20,9 +19,6 @@ from app.services.learner_package_runtime import (
 )
 from app.services.learner_studio_service import LearnerStudioError, LearnerStudioService
 
-if TYPE_CHECKING:
-    from app.storage.sqlite_store import SQLiteWorkflowStore
-
 
 def default_publish_certification_workspace_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "tmp" / "publish_certification"
@@ -33,12 +29,10 @@ class PublishLearnerCertificationService:
         self,
         *,
         learner_studio_service: LearnerStudioService | None = None,
-        store: SQLiteWorkflowStore | None = None,
         base_dir: str | Path | None = None,
         enabled: bool = False,
     ) -> None:
         self.learner_studio_service = learner_studio_service or LearnerStudioService()
-        self.store = store
         self.base_dir = Path(base_dir or default_publish_certification_workspace_dir())
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.enabled = enabled
@@ -189,13 +183,6 @@ class PublishLearnerCertificationService:
             )
 
             primary_deliverable_id = learner_package.deliverables[0].deliverable_id
-            lab_tutor_enabled = False
-            lab_tutor_assignment_title: str | None = None
-            if self.store is not None and snapshot.course_run_id:
-                source_run = self.store.get_course_run(snapshot.course_run_id)
-                if source_run is not None:
-                    lab_tutor_enabled = source_run.lab_tutor_enabled
-                    lab_tutor_assignment_title = source_run.title
             try:
                 workspace_session = self.learner_studio_service.launch_editor(
                     enrollment_id=f"publish_cert_{snapshot.id}",
@@ -203,8 +190,6 @@ class PublishLearnerCertificationService:
                     workspace_root=workspace_root,
                     scope=learner_package.workspace_scope,
                     start_support_services=False,
-                    lab_tutor_enabled=lab_tutor_enabled,
-                    lab_tutor_assignment_title=lab_tutor_assignment_title,
                 )
             except LearnerStudioError as exc:
                 return self._failed_report(

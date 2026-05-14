@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import functools
 import hashlib
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -56,39 +54,8 @@ class RuntimeImageBuildError(LearnerStudioError):
         self.stderr = stderr
 
 
-def _learner_studio_image_inputs() -> list[Path]:
-    """Files whose content determines image freshness."""
-    repo_root = Path(__file__).resolve().parents[2]
-    paths: list[Path] = [repo_root / "docker" / "learner-studio.Dockerfile"]
-    ext_root = repo_root / "extensions" / "lab-tutor"
-    skip_dirs = {"node_modules", "dist", "out", "test-out"}
-    skip_suffixes = {".vsix"}
-    if ext_root.exists():
-        for path in sorted(ext_root.rglob("*")):
-            if not path.is_file():
-                continue
-            rel_parts = set(path.relative_to(ext_root).parts)
-            if rel_parts & skip_dirs:
-                continue
-            if path.suffix in skip_suffixes:
-                continue
-            paths.append(path)
-    return paths
-
-
-def _hash_learner_studio_inputs() -> str:
-    digest = hashlib.sha1(usedforsecurity=False)
-    for path in _learner_studio_image_inputs():
-        digest.update(str(path).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()[:12]
-
-
-@functools.lru_cache(maxsize=1)
 def default_learner_studio_image() -> str:
-    return f"course-gen-learner-studio:{_hash_learner_studio_inputs()}"
+    return "course-gen-learner-studio:latest"
 
 
 class LearnerStudioService:
@@ -105,7 +72,6 @@ class LearnerStudioService:
         host: str = "127.0.0.1",
         minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
-        tutor_base_url: str | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.image_name = image_name or default_learner_studio_image()
@@ -114,9 +80,6 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
-        self._tutor_base_url = tutor_base_url or os.environ.get(
-            "LAB_TUTOR_BASE_URL", "http://localhost:8000"
-        )
 
     def launch_editor(
         self,
@@ -127,15 +90,12 @@ class LearnerStudioService:
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
-        lab_tutor_enabled: bool = False,
-        lab_tutor_assignment_title: str | None = None,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
 
         if existing_session is not None and existing_session.container_name:
-            toggle_changed = existing_session.lab_tutor_enabled != lab_tutor_enabled
-            if not toggle_changed and self._can_reuse_session(
+            if self._can_reuse_session(
                 existing_session=existing_session,
                 workspace_path=workspace_path,
             ):
@@ -144,13 +104,6 @@ class LearnerStudioService:
                 refreshed.status = LearnerWorkspaceSessionStatus.running
                 refreshed.updated_at = self._now()
                 return refreshed
-            if toggle_changed:
-                # Tear down the stale container so the recreate below is not a name collision.
-                self._remove_runtime_support(
-                    workspace_path,
-                    network_name=f"{existing_session.container_name}-net",
-                    container_prefix=existing_session.container_name,
-                )
 
         host_port = self._allocate_port()
         session_id = existing_session.id if existing_session is not None else f"studio_{uuid4().hex[:12]}"
@@ -190,7 +143,6 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
-            *(self._docker_env_args(self._tutor_environment(session_id, lab_tutor_assignment_title)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
@@ -199,7 +151,6 @@ class LearnerStudioService:
             "none",
             "--user-data-dir",
             "/tmp/code-server",
-            *(["--extensions-dir", "/opt/lab-tutor/extensions"] if lab_tutor_enabled else []),
             "/workspace",
         ]
         session_image_name = self.image_name
@@ -234,7 +185,6 @@ class LearnerStudioService:
             host_port=host_port,
             editor_url=editor_url,
             image_name=session_image_name,
-            lab_tutor_enabled=lab_tutor_enabled,
             notes=["VS Code (code-server) session running in Docker."],
         )
 
@@ -521,15 +471,6 @@ class LearnerStudioService:
             for service in self._runtime_services(workspace_path)
             if str(service.get("service_id")) != "app" and service.get("container_image")
         ]
-
-    def _tutor_environment(self, session_id: str, assignment_title: str | None = None) -> dict[str, str]:
-        env = {
-            "LAB_TUTOR_BASE_URL": self._tutor_base_url,
-            "LAB_TUTOR_SESSION_ID": session_id,
-        }
-        if assignment_title:
-            env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
-        return env
 
     def _app_runtime_environment(self, workspace_path: Path) -> dict[str, str]:
         environment: dict[str, str] = {}
