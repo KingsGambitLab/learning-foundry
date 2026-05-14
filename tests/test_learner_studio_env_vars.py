@@ -44,13 +44,18 @@ class LearnerStudioEnvVarsTest(unittest.TestCase):
             cmd = captured.get("cmd")
             self.assertIsNotNone(cmd, "docker run command must be captured")
             assert isinstance(cmd, list)
-            self.assertIn("-e", cmd)
-            self.assertIn("LAB_TUTOR_BASE_URL=http://lab-tutor.svc:8000", cmd)
+
+            base_url_value = "LAB_TUTOR_BASE_URL=http://lab-tutor.svc:8000"
+            self.assertIn(base_url_value, cmd)
+            self.assertEqual(cmd[cmd.index(base_url_value) - 1], "-e")
+
             tutor_session_env = [c for c in cmd if c.startswith("LAB_TUTOR_SESSION_ID=")]
             self.assertEqual(len(tutor_session_env), 1)
             self.assertTrue(tutor_session_env[0].startswith("LAB_TUTOR_SESSION_ID=studio_"))
-            self.assertIn("--extensions-dir", cmd)
-            self.assertIn("/opt/lab-tutor/extensions", cmd)
+            self.assertEqual(cmd[cmd.index(tutor_session_env[0]) - 1], "-e")
+
+            ext_dir_idx = cmd.index("--extensions-dir")
+            self.assertEqual(cmd[ext_dir_idx + 1], "/opt/lab-tutor/extensions")
 
 
 if __name__ == "__main__":

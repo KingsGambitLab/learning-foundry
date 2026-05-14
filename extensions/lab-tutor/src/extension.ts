@@ -8,12 +8,12 @@ import { TutorClient } from "./services/tutor-client";
 export function activate(context: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration("labTutor");
   const baseUrl =
-    process.env.LAB_TUTOR_BASE_URL ??
-    cfg.get<string>("baseUrl") ??
+    process.env.LAB_TUTOR_BASE_URL ||
+    cfg.get<string>("baseUrl") ||
     "http://localhost:8000";
   const sessionId =
-    process.env.LAB_TUTOR_SESSION_ID ??
-    cfg.get<string>("sessionId") ??
+    process.env.LAB_TUTOR_SESSION_ID ||
+    cfg.get<string>("sessionId") ||
     "dev-session";
   const client = new TutorClient(baseUrl, sessionId);
 
