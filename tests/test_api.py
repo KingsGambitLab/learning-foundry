@@ -4004,7 +4004,13 @@ class CourseGenCodexApiTests(unittest.TestCase):
         self.assertIn("grading_completed", check_keys)
         self.assertIn("deliverable_mapping", check_keys)
 
-    def test_publish_routes_repairable_learner_certification_failure_back_into_shared_workflow_revision(self) -> None:
+    def test_publish_blocks_repairable_learner_certification_failure_for_legacy_runs(self) -> None:
+        # Wave 5c retired the legacy node executor + task-agent spec edit
+        # surface, so cloning the shared workflow into a revision on
+        # repairable_generation cert failures would only produce an
+        # un-repairable shell. The fix short-circuits that path: the original
+        # run is marked ``blocked`` with a clear ``last_error`` and a
+        # dedicated ``course_certification_failed_blocked`` event is emitted.
         app.state.course_workflow_service = CourseWorkflowService(
             app.state.workflow_service.store,
             app.state.workflow_service,
@@ -4040,31 +4046,29 @@ class CourseGenCodexApiTests(unittest.TestCase):
 
         published = self.client.post(f"/v1/course-runs/{course_run_id}/publish")
         self.assertEqual(published.status_code, 409)
-        self.assertIn("routed the shared assignment workflow back into revision", published.json()["detail"])
+        self.assertIn(
+            "Legacy revision repair is no longer supported",
+            published.json()["detail"],
+        )
 
         refreshed = self.client.get(f"/v1/course-runs/{course_run_id}")
         self.assertEqual(refreshed.status_code, 200)
         refreshed_body = refreshed.json()
-        self.assertEqual(refreshed_body["stage"], "awaiting_course_review")
-        self.assertNotEqual(refreshed_body["shared_workflow_run_id"], shared_run_id)
-        self.assertIn("Learner-path certification failed before publish", refreshed_body["last_error"])
-
-        revised_shared_run = app.state.workflow_service.get_run(refreshed_body["shared_workflow_run_id"])
-        self.assertIsNotNone(revised_shared_run)
-        assert revised_shared_run is not None
-        node_kinds = [node.kind for node in revised_shared_run.artifacts.node_executions]
-        self.assertIn(WorkflowNodeKind.reviewer_learner_runtime, node_kinds)
-        learner_runtime_nodes = [
-            node
-            for node in revised_shared_run.artifacts.node_executions
-            if node.kind == WorkflowNodeKind.reviewer_learner_runtime
-        ]
-        self.assertTrue(any("ImportError" in finding.detail for node in learner_runtime_nodes for finding in node.findings))
+        self.assertEqual(refreshed_body["stage"], "blocked")
+        self.assertEqual(refreshed_body["status"], "blocked")
+        # The shared workflow MUST NOT be cloned into a revision shell.
+        self.assertEqual(refreshed_body["shared_workflow_run_id"], shared_run_id)
+        self.assertIn("Certification failed", refreshed_body["last_error"])
+        self.assertIn(
+            "Legacy revision repair is no longer supported",
+            refreshed_body["last_error"],
+        )
 
         course_events = self.client.get(f"/v1/course-runs/{course_run_id}/events")
         self.assertEqual(course_events.status_code, 200)
         event_types = [event["event_type"] for event in course_events.json()]
-        self.assertIn("course_publish_certification_failed", event_types)
+        self.assertIn("course_certification_failed_blocked", event_types)
+        self.assertNotIn("course_publish_certification_failed", event_types)
 
     def test_publish_blocks_platform_learner_certification_failure_without_routing_to_revision(self) -> None:
         app.state.course_workflow_service = CourseWorkflowService(

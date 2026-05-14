@@ -6,7 +6,8 @@ from app.services.runtime_normalization import (
 )
 
 
-def test_dockerfile_strips_trailing_copy_workspace_to_app():
+def test_dockerfile_keeps_trailing_copy_workspace_to_app():
+    """Inverted from prior strip behavior: `COPY . <dst>` is now always preserved."""
     docker_in = (
         "FROM python:3.11-slim\n"
         "WORKDIR /app\n"
@@ -16,15 +17,16 @@ def test_dockerfile_strips_trailing_copy_workspace_to_app():
         "EXPOSE 8000\n"
     )
     out = normalize_dockerfile(docker_in, package_manager="pip")
-    assert "COPY . /app" not in out
+    assert "COPY . /app" in out
     assert "FROM python:3.11-slim" in out
     assert "EXPOSE 8000" in out
 
 
-def test_dockerfile_strips_trailing_copy_dot_dot():
+def test_dockerfile_keeps_trailing_copy_dot_dot():
+    """Inverted from prior strip behavior: `COPY . .` is now always preserved."""
     docker_in = "FROM node:18\nWORKDIR /app\nRUN npm ci\nCOPY . .\n"
     out = normalize_dockerfile(docker_in, package_manager="npm")
-    assert "COPY . ." not in out
+    assert "COPY . ." in out
 
 
 def test_dockerfile_keeps_targeted_copy_unchanged():
@@ -165,7 +167,8 @@ def test_normalize_runtime_protocol_dict_applies_both_transforms():
         requirements_content="sentence-transformers==3.1.1\n",
         package_manager="pip",
     )
-    assert "COPY . /app" not in out["Dockerfile"]
+    # COPY . <dst> is now always preserved (the strip was removed).
+    assert "COPY . /app" in out["Dockerfile"]
     assert "download.pytorch.org/whl/cpu" in out[".coursegen/runtime/install.sh"]
     # Untouched scripts pass through unchanged
     assert out[".coursegen/runtime/verify.sh"] == runtime[".coursegen/runtime/verify.sh"]
@@ -185,3 +188,171 @@ def test_normalize_runtime_protocol_dict_does_not_mutate_caller_dict():
         runtime, requirements_content=None, package_manager="pip"
     )
     assert runtime == snapshot
+
+
+# ---------------------------------------------------------------------------
+# Preservation contract: `COPY . <dst>` is ALWAYS preserved.
+#
+# Earlier versions stripped `COPY . <dst>` assuming a runtime bind-mount, with
+# a narrow heuristic to detect when the strip would break the build. The
+# heuristic missed common cases (`pip install -r requirements.txt`,
+# `npm install`, `mvn`, `cargo`, `go build`, multiline RUN). The strip is
+# now removed entirely; cache-mount injection is the remaining optimization.
+# ---------------------------------------------------------------------------
+
+
+def test_dockerfile_preserves_copy_when_run_uses_relative_chmod_and_script():
+    """The original failing case: chmod + relative-path script invocation."""
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN chmod +x .coursegen/runtime/install.sh && ./.coursegen/runtime/install.sh\n"
+        "EXPOSE 8000\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . ." in out
+    assert "EXPOSE 8000" in out
+
+
+def test_dockerfile_preserves_copy_when_run_uses_sh_relative_script():
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY . /app\n"
+        "RUN sh .coursegen/runtime/install.sh\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . /app" in out
+
+
+def test_dockerfile_preserves_copy_when_run_invokes_python_relative_script():
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "COPY . /app\n"
+        "RUN python ./scripts/postinstall.py\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . /app" in out
+
+
+def test_dockerfile_preserves_copy_when_run_cats_relative_file():
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "COPY . /app\n"
+        "RUN cat ./VERSION\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . /app" in out
+
+
+# ---------------------------------------------------------------------------
+# New: cases the old heuristic missed. Strip is gone, so they all keep COPY.
+# ---------------------------------------------------------------------------
+
+
+def test_pip_install_dockerfile_keeps_copy():
+    """`pip install -r requirements.txt` needs requirements.txt in build ctx."""
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN pip install -r requirements.txt\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . ." in out
+
+
+def test_npm_install_dockerfile_keeps_copy():
+    """`npm install` needs package.json + package-lock.json in build ctx."""
+    docker_in = (
+        "FROM node:18\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN npm install\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="npm")
+    assert "COPY . ." in out
+
+
+def test_mvn_install_dockerfile_keeps_copy():
+    """`mvn install` needs pom.xml in build ctx."""
+    docker_in = (
+        "FROM maven:3.9-eclipse-temurin-17\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN mvn install\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="maven")
+    assert "COPY . ." in out
+
+
+def test_cargo_build_dockerfile_keeps_copy():
+    """`cargo build` needs Cargo.toml + Cargo.lock + src in build ctx."""
+    docker_in = (
+        "FROM rust:1.78\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN cargo build --release\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="cargo")
+    assert "COPY . ." in out
+
+
+def test_go_build_dockerfile_keeps_copy():
+    """`go build` needs go.mod + go.sum + source in build ctx."""
+    docker_in = (
+        "FROM golang:1.22\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN go build ./...\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="gomod")
+    assert "COPY . ." in out
+
+
+def test_multiline_run_with_pip_install_keeps_copy():
+    """Backslash-continuation RUN with pip install (the old heuristic
+    inspected per physical line and missed continuations)."""
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY . .\n"
+        "RUN apt-get update && apt-get install -y build-essential \\\n"
+        "    && pip install --upgrade pip \\\n"
+        "    && pip install -r requirements.txt\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . ." in out
+
+
+def test_dockerfile_with_only_cmd_keeps_copy():
+    """No build-time RUN at all: under the old policy `COPY . <dst>` would
+    be stripped; under the new policy it's preserved unconditionally."""
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt /app/requirements.txt\n"
+        "RUN pip install -r /app/requirements.txt\n"
+        "COPY . /app\n"
+        'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]\n'
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY . /app" in out
+    # the targeted COPY still survives
+    assert "COPY requirements.txt /app/requirements.txt" in out
+
+
+def test_targeted_copy_unaffected():
+    """Targeted COPYs (specific source paths, not `.`) have always been
+    preserved — confirm that remains true under the new policy."""
+    docker_in = (
+        "FROM python:3.11-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt /app/\n"
+        "COPY src/ /app/src/\n"
+        "RUN pip install -r /app/requirements.txt\n"
+    )
+    out = normalize_dockerfile(docker_in, package_manager="pip")
+    assert "COPY requirements.txt /app/" in out
+    assert "COPY src/ /app/src/" in out

@@ -2,15 +2,22 @@
 
 The LLM authoring layer produces a `Dockerfile` and `.coursegen/runtime/*.sh`.
 This module rewrites those bytes (after authoring, before they reach disk)
-to apply two language-agnostic performance guardrails:
+to apply a language-agnostic performance guardrail: BuildKit cache mounts on
+the install RUN step, keyed off the creator-declared `package_manager`. The
+mounts survive layer-cache invalidations so the next rebuild reuses pip /
+npm / cargo / go / maven / etc. wheels.
 
-1.  BuildKit cache mounts on the install RUN step, keyed off the creator-
-    declared `package_manager`. Survives layer-cache invalidations so the
-    next rebuild reuses pip / npm / cargo / go / maven / etc. wheels.
-2.  Strip `COPY . <dst>` lines that bake the whole workspace into the image.
-    The sandbox runtime bind-mounts the workspace at `/workspace`, so the
-    bake-in is dead weight that also invalidates the final layer on every
-    learner-source change.
+Earlier versions also stripped `COPY . <dst>` lines, assuming a runtime
+bind-mount at `/workspace` made the bake-in dead weight. A narrow heuristic
+tried to detect when the strip would break the build (`chmod`, `./script`,
+`sh|bash|python|cat <relpath>`), but it missed common ecosystem-standard
+cases: `RUN pip install -r requirements.txt`, `RUN npm install`, `RUN mvn
+install`, `RUN cargo build`, `RUN go build`, and any multiline `RUN` with
+backslash continuations. Missing those produced builds that fail because
+`requirements.txt` / `package.json` / `pom.xml` / `go.mod` weren't present
+in the image. The strip is removed; cache-mount injection is the remaining
+optimization, which already delivers the bulk of the rebuild speedup and
+composes correctly with `COPY .`.
 
 For Python + CUDA-pulling deps (`torch`, `sentence-transformers`,
 `transformers`, …) we also prepend a CPU-only `torch` install in `install.sh`
@@ -69,19 +76,6 @@ def runtime_cache_mount_args(package_manager: str | None) -> list[str]:
     return [f"--mount=type=cache,target={t}" for t in targets]
 
 
-def _is_full_context_copy(line: str) -> bool:
-    """True for `COPY . /app` or `COPY . .` lines that bake the whole
-    workspace into the image."""
-    stripped = line.strip()
-    if not stripped.upper().startswith("COPY "):
-        return False
-    rest = stripped[5:].strip()
-    tokens = [t for t in rest.split() if not t.startswith("--")]
-    if len(tokens) < 2:
-        return False
-    return tokens[0] == "."
-
-
 def _is_install_run(line: str) -> bool:
     stripped = line.strip()
     if not stripped.upper().startswith("RUN "):
@@ -103,16 +97,14 @@ def _apply_cache_mounts(run_line: str, mounts: list[str]) -> str:
 def normalize_dockerfile(dockerfile: str, *, package_manager: str | None) -> str:
     """Rewrite the LLM-authored Dockerfile for cacheability.
 
-    - Strip any `COPY . <dst>` line (bake-in defeats /workspace bind mount).
-    - Add cache mounts to the RUN line that invokes
-      `.coursegen/runtime/install.sh`.
-    Both transforms are idempotent.
+    Adds BuildKit cache mounts to the RUN line that invokes
+    `.coursegen/runtime/install.sh`. Every `COPY` line is preserved exactly
+    as authored — see the module docstring for why the prior `COPY . <dst>`
+    strip was removed. The cache-mount transform is idempotent.
     """
     mounts = runtime_cache_mount_args(package_manager)
     out_lines: list[str] = []
     for raw_line in dockerfile.splitlines():
-        if _is_full_context_copy(raw_line):
-            continue
         if mounts and _is_install_run(raw_line):
             out_lines.append(_apply_cache_mounts(raw_line, mounts))
             continue

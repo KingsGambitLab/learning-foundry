@@ -431,6 +431,25 @@ class LMSService:
     def _lms_support(self, course_run: CourseRun, snapshot: PublishSnapshot | None) -> tuple[bool, str | None]:
         if course_run.status != CourseRunStatus.published:
             return False, "This course is still being prepared and is not available to learners yet."
+
+        # Outcome-mode courses (those whose payload_json carries an
+        # ``outcome_state`` blob) don't carry a ``shared_workflow_run_id``
+        # or a ``TaskAgentServiceSpec`` — those are legacy fields. Apply
+        # a relaxed gate for them: just require the synthesized
+        # publish_snapshot exists and has a non-empty learner_package.
+        is_outcome = bool(
+            (course_run.payload_json or {}).get("outcome_state")
+        )
+        if is_outcome:
+            if snapshot is None:
+                return False, "This course is being prepared and is not ready for learners yet."
+            if snapshot.learner_package is None:
+                return False, "This course is being prepared and is not ready for learners yet."
+            if not snapshot.learner_package.deliverables:
+                return False, "This course is being prepared and is not ready for learners yet."
+            return True, None
+
+        # Legacy multi-deliverable course path (unchanged).
         if not course_run.shared_workflow_run_id:
             return False, "This course is still being prepared and is not available to learners yet."
         if snapshot is None:
