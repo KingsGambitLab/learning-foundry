@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -72,6 +73,7 @@ class LearnerStudioService:
         host: str = "127.0.0.1",
         minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
+        tutor_base_url: str | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.image_name = image_name or default_learner_studio_image()
@@ -80,6 +82,15 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
+        self._tutor_base_url = tutor_base_url or os.environ.get(
+            "LAB_TUTOR_BASE_URL", "http://host.docker.internal:8012"
+        )
+
+    def _tutor_environment(self, assignment_title: str | None) -> dict[str, str]:
+        env: dict[str, str] = {"LAB_TUTOR_BASE_URL": self._tutor_base_url}
+        if assignment_title:
+            env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
+        return env
 
     def launch_editor(
         self,
@@ -90,6 +101,8 @@ class LearnerStudioService:
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
+        lab_tutor_enabled: bool = False,
+        assignment_title: str | None = None,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -143,6 +156,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
+            *(self._docker_env_args(self._tutor_environment(assignment_title)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
