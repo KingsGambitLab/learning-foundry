@@ -5,21 +5,198 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <title>Tutor</title>
   <style>
-    body { font-family: var(--vscode-font-family); padding: 12px; margin: 0; color: var(--vscode-foreground); }
-    #log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 60vh; overflow-y: auto; }
-    .msg { padding: 8px 10px; border-radius: 6px; line-height: 1.4; }
-    .msg.user { background: var(--vscode-input-background); }
-    .msg.tutor { background: var(--vscode-editor-inactiveSelectionBackground); }
-    #row { display: flex; gap: 6px; }
-    #input { flex: 1; padding: 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
-    button { padding: 6px 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; }
-    button:hover { background: var(--vscode-button-hoverBackground); }
+    body {
+      font-family: var(--vscode-font-family);
+      padding: 0;
+      margin: 0;
+      color: var(--vscode-foreground);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      border-left: 3px solid var(--vscode-focusBorder);
+      flex-shrink: 0;
+      transition: border-left-color 200ms;
+    }
+
+    body[data-state="idle"] #header {
+      border-left-color: color-mix(in srgb, var(--vscode-focusBorder) 35%, transparent);
+    }
+
+    #header .titles {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    #header .title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    #header .subtitle {
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    #dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+      opacity: 0.5;
+      flex-shrink: 0;
+      transition: background 200ms, opacity 200ms;
+    }
+
+    body[data-state="engaging"] #dot {
+      background: var(--vscode-testing-iconPassed, #3FB950);
+      opacity: 1;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    #log {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 14px;
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+    }
+
+    .welcome-card {
+      padding: 14px 16px;
+      border-left: 3px solid var(--vscode-focusBorder);
+      background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+      border-radius: 4px;
+      line-height: 1.45;
+    }
+
+    .welcome-card .lead {
+      font-weight: 600;
+      font-size: 14px;
+      margin: 0 0 6px 0;
+      display: block;
+    }
+
+    .welcome-card .body {
+      font-size: 13px;
+      opacity: 0.9;
+    }
+
+    #chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 4px 0;
+      padding: 0;
+    }
+
+    .chip {
+      padding: 5px 10px;
+      font-size: 12px;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--vscode-foreground);
+      border: 1px solid var(--vscode-panel-border);
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+    }
+
+    .chip:hover {
+      background: var(--vscode-list-hoverBackground);
+    }
+
+    .msg {
+      padding: 10px 12px;
+      border-radius: 6px;
+      line-height: 1.45;
+      font-size: 13px;
+      max-width: 95%;
+    }
+
+    .msg.user {
+      background: var(--vscode-input-background);
+      align-self: flex-end;
+      max-width: 90%;
+    }
+
+    .msg.tutor {
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      border-left: 3px solid var(--vscode-focusBorder);
+    }
+
+    #row {
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--vscode-panel-border);
+      flex-shrink: 0;
+    }
+
+    #input {
+      flex: 1;
+      height: 36px;
+      font-size: 13px;
+      padding: 0 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, transparent);
+      border-radius: 4px;
+      box-sizing: border-box;
+      font-family: var(--vscode-font-family);
+    }
+
+    #input:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    button#send {
+      height: 36px;
+      padding: 0 14px;
+      font-size: 13px;
+      font-weight: 500;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+    }
+
+    button#send:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
   </style>
 </head>
-<body>
+<body data-state="idle">
+  <div id="header">
+    <div class="titles">
+      <div class="title">Lab Tutor</div>
+      <div class="subtitle" id="subtitle"></div>
+    </div>
+    <div id="dot" title="idle"></div>
+  </div>
   <div id="log"></div>
   <div id="row">
-    <input id="input" type="text" placeholder="Ask the tutor..." />
+    <input id="input" type="text" placeholder="Ask the tutor anything..." />
     <button id="send">Send</button>
   </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>

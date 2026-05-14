@@ -25,9 +25,27 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusBar = new TutorStatusBar(budget);
   context.subscriptions.push(statusBar);
 
+  let engagingTimer: ReturnType<typeof setTimeout> | undefined;
+  const onUserMessage = async (text: string): Promise<string> => {
+    statusBar.setEngaging(true);
+    if (engagingTimer !== undefined) {
+      clearTimeout(engagingTimer);
+      engagingTimer = undefined;
+    }
+    try {
+      const reply = await client.chat(text);
+      return reply;
+    } finally {
+      engagingTimer = setTimeout(() => {
+        statusBar.setEngaging(false);
+        engagingTimer = undefined;
+      }, 60_000);
+    }
+  };
+
   const sidebar = new TutorSidebarProvider(
     context.extensionUri,
-    (text) => client.chat(text),
+    onUserMessage,
     assignmentTitle,
   );
   context.subscriptions.push(
@@ -56,6 +74,12 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     );
   }, 500);
+
+  // One-time attention cue per activation — no storage gate needed.
+  vscode.window.showInformationMessage(
+    "Lab Tutor is open on the right — ask anything, I won't give you the answer.",
+    "Got it",
+  );
 }
 
 function currentEditorContent(): string {

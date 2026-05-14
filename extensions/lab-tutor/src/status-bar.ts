@@ -25,6 +25,23 @@ export class TutorStatusBar {
     this.item.show();
   }
 
+  /**
+   * Toggle visual prominence of the status bar item.
+   * When engaging (user recently sent a message or tutor is composing),
+   * highlight with prominentBackground; otherwise restore default styling.
+   */
+  setEngaging(engaging: boolean): void {
+    if (engaging) {
+      this.item.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.prominentBackground",
+      );
+      this.setState("coaching");
+    } else {
+      this.item.backgroundColor = undefined;
+      this.setState("watching");
+    }
+  }
+
   dispose(): void {
     this.item.dispose();
   }
