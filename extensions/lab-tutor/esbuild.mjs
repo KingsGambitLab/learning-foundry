@@ -9,7 +9,7 @@ const opts = {
   format: "cjs",
   platform: "node",
   target: "node20",
-  sourcemap: true,
+  sourcemap: "inline",
   logLevel: "info",
 };
 
