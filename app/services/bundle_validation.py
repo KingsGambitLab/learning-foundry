@@ -60,6 +60,11 @@ _STARTER_README_REQUIRED_SECTIONS = (
     "## Files to edit",
     "## Definition of done",
     "## Helpful commands",
+    # "Run visible checks" surfaces the Docker + local-toolchain
+    # commands a learner needs to actually execute the visible test
+    # script. Required so future README edits can't silently drop the
+    # only how-to-run guidance the learner gets.
+    "## Run visible checks",
 )
 _SECONDARY_BRIEF_FILENAMES = {
     "deliverable_content.md",

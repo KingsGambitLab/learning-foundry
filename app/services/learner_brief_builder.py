@@ -509,6 +509,67 @@ def render_learner_deliverable_markdown(
     return "\n".join(lines).strip() + "\n"
 
 
+_LANGUAGES_USUALLY_PREINSTALLED = {"python", "python3"}
+
+
+def _render_run_visible_checks_section(
+    *,
+    visible_check_command: str,
+    implementation_language: str | None,
+    language_version: str | None,
+    package_manager: str | None,
+) -> list[str]:
+    """Render the '## Run visible checks' section.
+
+    The recommended path is always Docker because the course's
+    ``Dockerfile`` + ``.coursegen/runtime/install.sh`` pin the language
+    toolchain — the same image the grader uses. The local path is a
+    faster inner-loop alternative WHEN the toolchain is already on the
+    host. For stacks where ``language: command not found`` is the
+    common failure mode (Go, Rust, Java, Node, …), we surface that
+    explicitly so a learner who hits it knows to fall back to Docker.
+    """
+    docker_run = (
+        'docker run --rm -p 8000:8000 -v "$PWD:/workspace" -w /workspace '
+        f"course-runtime {visible_check_command}"
+    )
+    lines = [
+        "## Run visible checks",
+        "",
+        "Recommended — same container the grader uses (any stack):",
+        "",
+        "```bash",
+        "docker build -t course-runtime .",
+        docker_run,
+        "```",
+    ]
+    if implementation_language:
+        lang_label = implementation_language.strip().lower()
+        version_label = f" {language_version}" if language_version else ""
+        pm_label = f" + `{package_manager}`" if package_manager else ""
+        is_ubiquitous = lang_label in _LANGUAGES_USUALLY_PREINSTALLED
+        lines.extend(
+            [
+                "",
+                f"Faster local loop (requires **{lang_label}{version_label}**"
+                f"{pm_label} on the host):",
+                "",
+                "```bash",
+                "sh .coursegen/runtime/install.sh",
+                visible_check_command,
+                "```",
+            ]
+        )
+        if not is_ubiquitous:
+            lines.append("")
+            lines.append(
+                f"If you see `{lang_label}: command not found` (or any other "
+                "missing-binary error), your host toolchain isn't ready — "
+                "fall back to Docker."
+            )
+    return lines
+
+
 def render_learner_starter_readme(
     *,
     title: str,
@@ -518,6 +579,9 @@ def render_learner_starter_readme(
     visible_check_command: str | None = None,
     preview_command: str | None = None,
     public_checks: list[PublicCheckSpec] | None = None,
+    implementation_language: str | None = None,
+    language_version: str | None = None,
+    package_manager: str | None = None,
 ) -> str:
     lines = [
         f"# {title}",
@@ -545,7 +609,19 @@ def render_learner_starter_readme(
         lines.extend(f"- {item}" for item in brief.implementation_hints)
     lines.extend(["", "## Helpful commands", ""])
     lines.append("- Preview: `" + (preview_command or "sh .coursegen/runtime/run.sh") + "`")
-    lines.append(f"- Visible checks: `{visible_check_command or f'sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}'}`")
+    resolved_visible_command = (
+        visible_check_command or f"sh {RUNTIME_VISIBLE_CHECK_SCRIPT_PATH}"
+    )
+    lines.append(f"- Visible checks: `{resolved_visible_command}`")
+    lines.append("")
+    lines.extend(
+        _render_run_visible_checks_section(
+            visible_check_command=resolved_visible_command,
+            implementation_language=implementation_language,
+            language_version=language_version,
+            package_manager=package_manager,
+        )
+    )
     if public_checks:
         lines.extend(["", "## Visible checks", ""])
         for check in public_checks:
