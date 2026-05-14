@@ -22,7 +22,7 @@ from sqlalchemy import Engine, create_engine, text
 from app.services.auth_passwords import hash_password
 
 
-SEED_LEARNER_EMAIL = "legacy-local-learner@coursegen.local"
+SEED_LEARNER_EMAIL = "legacy-local-learner@coursegen.example"
 
 # FK-safe order: parents before children. workflow_events / course_events last
 # because they may reference rows from earlier tables.
