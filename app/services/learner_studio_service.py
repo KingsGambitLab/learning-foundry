@@ -55,8 +55,38 @@ class RuntimeImageBuildError(LearnerStudioError):
         self.stderr = stderr
 
 
+def _learner_studio_image_inputs() -> list[Path]:
+    """Files whose content determines image freshness."""
+    repo_root = Path(__file__).resolve().parents[2]
+    paths: list[Path] = [repo_root / "docker" / "learner-studio.Dockerfile"]
+    ext_root = repo_root / "extensions" / "lab-tutor"
+    skip_dirs = {"node_modules", "dist", "out", "test-out"}
+    skip_suffixes = {".vsix"}
+    if ext_root.exists():
+        for path in sorted(ext_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel_parts = set(path.relative_to(ext_root).parts)
+            if rel_parts & skip_dirs:
+                continue
+            if path.suffix in skip_suffixes:
+                continue
+            paths.append(path)
+    return paths
+
+
+def _hash_learner_studio_inputs() -> str:
+    digest = hashlib.sha1()
+    for path in _learner_studio_image_inputs():
+        digest.update(str(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
 def default_learner_studio_image() -> str:
-    return "course-gen-learner-studio:latest"
+    return f"course-gen-learner-studio:{_hash_learner_studio_inputs()}"
 
 
 class LearnerStudioService:
