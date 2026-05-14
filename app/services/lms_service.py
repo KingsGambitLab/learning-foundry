@@ -411,7 +411,16 @@ class LMSService:
         snapshot = self._latest_snapshot(course_run)
         if snapshot is None:
             raise LMSConflictError("This published course does not have a learner-ready publish snapshot yet.")
-        if snapshot.learner_package is None or snapshot.task_agent_spec is None:
+        if snapshot.learner_package is None:
+            raise LMSConflictError("This published course is not yet packaged for the LMS learner flow.")
+        # Outcome-mode courses don't carry a TaskAgentServiceSpec — the
+        # legacy spec shape is replaced by the outcome bundle's
+        # course_spec.json + scenarios/ + _reference/. Only require
+        # ``task_agent_spec`` for legacy multi-deliverable courses.
+        is_outcome = bool(
+            (course_run.payload_json or {}).get("outcome_state")
+        )
+        if not is_outcome and snapshot.task_agent_spec is None:
             raise LMSConflictError("This published course is not yet packaged for the LMS learner flow.")
         return snapshot
 
