@@ -12,7 +12,7 @@ Turn the single-user local prototype into a real multi-user backend without chan
 3. Bind enrollments to real authenticated users instead of the hard-coded `local-learner` identity.
 4. Key learner workspaces and editor sessions by `<user_id, assignment_id>` instead of `<enrollment_id>`.
 
-The migration must be done without disturbing the existing server running at `127.0.0.1:8010`. The new server runs in parallel on port `8030` so behavior can be diffed end-to-end before any cutover.
+The migration must be done without disturbing the existing server running at `127.0.0.1:8010`. The new server runs in parallel on port `8040` so behavior can be diffed end-to-end before any cutover.
 
 ## Scope
 
@@ -26,7 +26,7 @@ In scope:
 - Role-guarded `/v1/*` routes (creator vs learner).
 - Snapshot-based one-shot migrator: 8010's live SQLite → local snapshot DB → Postgres.
 - Workspace path scheme change to `learner_workspaces/<user_id>/<assignment_id>/workspace/` and a workspace-rename pass in the migrator.
-- Side-by-side verification script comparing 8010 (SQLite) and 8030 (Postgres) JSON outputs.
+- Side-by-side verification script comparing 8010 (SQLite) and 8040 (Postgres) JSON outputs.
 - Deployment notes for the demo EC2 host.
 
 Out of scope (flagged so they are explicitly deferred):
@@ -42,7 +42,7 @@ Out of scope (flagged so they are explicitly deferred):
 
 ```
                 ┌───────────────────────────────┐
-   browser ───▶ │  FastAPI app (port 8030)      │
+   browser ───▶ │  FastAPI app (port 8040)      │
                 │  ┌─────────────────────────┐  │
                 │  │  /auth routes           │  │
                 │  │  /v1/* (role-guarded)   │  │
@@ -235,17 +235,17 @@ The `learner_workspace_sessions` payload carries `workspace_root` strings that r
 
 ### Verification script: `scripts/verify_migration.py`
 
-Compares 8010 (SQLite, untouched) to 8030 (Postgres, freshly migrated) end-to-end.
+Compares 8010 (SQLite, untouched) to 8040 (Postgres, freshly migrated) end-to-end.
 
-1. Hit `127.0.0.1:8010` and `127.0.0.1:8030` for each of these endpoints, capture JSON:
+1. Hit `127.0.0.1:8010` and `127.0.0.1:8040` for each of these endpoints, capture JSON:
    - `GET /v1/lms/courses` (catalog)
-   - `GET /v1/lms/enrollments?learner_id=local-learner` (against 8010) vs `GET /v1/lms/enrollments` (against 8030 with the seed-learner's session cookie). The two endpoints address the same logical learner under different keys; the diff normalizes `learner_id` before comparing so the rewrite from `"local-learner"` to `seed_learner_id` is not flagged as a mismatch.
+   - `GET /v1/lms/enrollments?learner_id=local-learner` (against 8010) vs `GET /v1/lms/enrollments` (against 8040 with the seed-learner's session cookie). The two endpoints address the same logical learner under different keys; the diff normalizes `learner_id` before comparing so the rewrite from `"local-learner"` to `seed_learner_id` is not flagged as a mismatch.
    - `GET /v1/workflow/runs`
    - `GET /v1/course-runs/{id}/timeline` for a sampled course
    - `GET /v1/lms/enrollments/{id}/experience` for the first enrollment
 2. Normalize both payloads (sort keys, project away volatile fields like `last_seen_at`, `updated_at` when those fields aren't load-bearing).
 3. Diff. Mismatches written to `scripts/migration_verification_report.json`.
-4. Spot-check: log in as the seed learner against 8030, launch the workspace, list workspace files — assert the file list matches what 8010 returns for the same enrollment.
+4. Spot-check: log in as the seed learner against 8040, launch the workspace, list workspace files — assert the file list matches what 8010 returns for the same enrollment.
 5. Exit non-zero on any unaccounted-for mismatch.
 
 ## Section 4 — Workspace key change
@@ -285,7 +285,7 @@ Captured here so the deploy decision lives with the design rather than being rel
 - Docker Compose with services: `app`, `postgres`, `nginx`.
 - `app` container bind-mounts `/var/run/docker.sock` so it can continue to spawn code-server and sandbox runtime containers. **Acceptable for staging/demo with team-only access; not safe for production with untrusted learners** — production hardening (rootless docker, sysbox, or a dedicated runner host) is a separate design.
 - Persistent volumes: `postgres_data`, `learner_workspaces`.
-- nginx (or Caddy) terminates TLS via Let's Encrypt and reverse-proxies to the FastAPI app on `:8030`. Dynamic code-server host ports are reverse-proxied through the same origin via subpaths or per-session subdomains (decision deferred — current local dev exposes raw host ports).
+- nginx (or Caddy) terminates TLS via Let's Encrypt and reverse-proxies to the FastAPI app on `:8040`. Dynamic code-server host ports are reverse-proxied through the same origin via subpaths or per-session subdomains (decision deferred — current local dev exposes raw host ports).
 - Env-driven config: `DATABASE_URL`, `SESSION_SECRET`, `SESSION_COOKIE_SECURE=true`, `AUTH_BCRYPT_COST`, OpenAI env file path.
 - Deploy mechanism for now: `git pull && docker compose up --build -d`. Promote to a GitHub Actions deploy when manual deploys become painful.
 - Postgres lives **inside the same compose file on the same host** for demo simplicity. Splitting to RDS is a one-env-var change when DB ops become a chore.
@@ -294,13 +294,13 @@ Captured here so the deploy decision lives with the design rather than being rel
 
 | What | How |
 | --- | --- |
-| Storage swap parity | Side-by-side JSON diff of 8010 (SQLite) vs 8030 (Postgres) for the catalog, enrollments, workflow, timeline, and experience endpoints. Exit non-zero on any unaccounted mismatch. |
+| Storage swap parity | Side-by-side JSON diff of 8010 (SQLite) vs 8040 (Postgres) for the catalog, enrollments, workflow, timeline, and experience endpoints. Exit non-zero on any unaccounted mismatch. |
 | Storage swap concurrency | `pytest tests/storage/` with the new Postgres fixture; existing tests run unchanged against the Protocol. |
 | Auth happy path | `tests/auth/test_register_login_logout.py` — register a creator and a learner, log in, hit `/auth/me`, log out, confirm cookie invalidation. |
 | Auth role guards | `tests/auth/test_role_guards.py` — a learner gets 403 on `/v1/courses`; a creator gets 403 on `/v1/lms/enrollments`. |
 | Data migration idempotence | Run the migrator twice in a row; second run is a no-op (row counts unchanged). |
 | Workspace rename | Pre-create a fake old-layout workspace; run Phase 3; assert new path exists and old is untouched (because 8010 owns it). |
-| End-to-end on 8030 | Manually: register a learner against 8030, enroll in a course copied over by the migrator, launch the workspace, write a file, submit, see the grade report. |
+| End-to-end on 8040 | Manually: register a learner against 8040, enroll in a course copied over by the migrator, launch the workspace, write a file, submit, see the grade report. |
 
 ## Open questions
 
@@ -318,4 +318,4 @@ The implementation plan (next document) should sequence work as four layered mil
 1. **M1 — Storage swap.** Land `WorkflowStore` Protocol, `PostgresWorkflowStore`, Alembic, docker-compose Postgres, test fixtures. App starts and serves the existing surface against Postgres. No data migrated yet.
 2. **M2 — Auth.** Add `users` / `user_sessions`, hashing, session module, dependencies, routes, pages. Existing routes still accept the legacy `learner_id` query param so the app keeps working unauthenticated until M3.
 3. **M3 — Wire enrollment to authenticated users + run the migrator.** Drop `learner_id` from request shapes, apply route guards, run snapshot → migrate → verify against 8010.
-4. **M4 — Workspace path change.** Update `_workspace_root`, run the workspace-rename migrator phase, verify launch + file read/write + submit on 8030.
+4. **M4 — Workspace path change.** Update `_workspace_root`, run the workspace-rename migrator phase, verify launch + file read/write + submit on 8040.

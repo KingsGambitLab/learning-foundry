@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn the local single-user prototype into a real multi-user backend: replace SQLite with Postgres, add email+password auth with server-side sessions, bind enrollments to real users, and key workspaces by `<user_id, assignment_id>`. The existing server at `127.0.0.1:8010` keeps running; the new server runs in parallel on `127.0.0.1:8030` so behavior can be diffed end-to-end.
+**Goal:** Turn the local single-user prototype into a real multi-user backend: replace SQLite with Postgres, add email+password auth with server-side sessions, bind enrollments to real users, and key workspaces by `<user_id, assignment_id>`. The existing server at `127.0.0.1:8010` keeps running; the new server runs in parallel on `127.0.0.1:8040` so behavior can be diffed end-to-end.
 
 **Architecture:** Four sequenced milestones. M1 introduces a `WorkflowStore` Protocol and a `PostgresWorkflowStore` that ports the existing 35 store methods 1:1 (JSON-blob tables preserved). M2 adds `users` + `user_sessions` tables, password hashing, server-side sessions, and `/auth/*` routes. M3 wires enrollments to authenticated users, applies role guards, and runs a one-shot migrator (snapshot 8010's SQLite via `VACUUM INTO`, copy into Postgres, rewrite `local-learner` to a seed user). M4 changes the on-disk workspace path to `learner_workspaces/<user_id>/<assignment_id>/workspace/`.
 
@@ -114,7 +114,7 @@ DATABASE_URL=postgresql+psycopg://course_gen:course_gen@localhost:5435/course_ge
 SESSION_SECRET=change-me-in-production
 SESSION_COOKIE_SECURE=false
 AUTH_BCRYPT_COST=12
-COURSE_GEN_PORT=8030
+COURSE_GEN_PORT=8040
 ```
 
 - [ ] **Step 5: Start Postgres and verify**
@@ -1554,8 +1554,8 @@ Expected: existing tests pass; storage tests pass.
 
 - [ ] **Step 4: Smoke-boot the new server**
 
-Run in a separate terminal: `DATABASE_URL=postgresql+psycopg://course_gen:course_gen@localhost:5435/course_gen COURSE_GEN_PORT=8030 uvicorn app.main:app --port 8030`
-Expected: server starts; `curl http://127.0.0.1:8030/v1/lms/courses` returns `{"courses": []}` (Postgres is empty).
+Run in a separate terminal: `DATABASE_URL=postgresql+psycopg://course_gen:course_gen@localhost:5435/course_gen COURSE_GEN_PORT=8040 uvicorn app.main:app --port 8040`
+Expected: server starts; `curl http://127.0.0.1:8040/v1/lms/courses` returns `{"courses": []}` (Postgres is empty).
 
 - [ ] **Step 5: Commit**
 
@@ -2680,8 +2680,8 @@ def register_page(request: Request) -> HTMLResponse:
 
 - [ ] **Step 5: Manually verify**
 
-Restart the dev server: `DATABASE_URL=... uvicorn app.main:app --port 8030`
-Open `http://127.0.0.1:8030/register` in a browser, register a learner, confirm the cookie is set and `/auth/me` returns the user.
+Restart the dev server: `DATABASE_URL=... uvicorn app.main:app --port 8040`
+Open `http://127.0.0.1:8040/register` in a browser, register a learner, confirm the cookie is set and `/auth/me` returns the user.
 
 - [ ] **Step 6: Commit**
 
@@ -3370,29 +3370,29 @@ git commit -m "M3: adjust migrator for live 8010 payload shapes"
 
 ---
 
-### Task 22: Side-by-side verification script (8010 vs 8030)
+### Task 22: Side-by-side verification script (8010 vs 8040)
 
 **Files:**
 - Create: `scripts/verify_migration.py`
 
-- [ ] **Step 1: Boot the new server on 8030**
+- [ ] **Step 1: Boot the new server on 8040**
 
 In a separate terminal:
 
 ```bash
 DATABASE_URL=postgresql+psycopg://course_gen:course_gen@localhost:5435/course_gen \
 SESSION_SECRET=dev-secret \
-uvicorn app.main:app --port 8030
+uvicorn app.main:app --port 8040
 ```
 
-Verify: `curl http://127.0.0.1:8030/v1/lms/courses` returns 401 (auth required) — the route now requires a session.
+Verify: `curl http://127.0.0.1:8040/v1/lms/courses` returns 401 (auth required) — the route now requires a session.
 
 - [ ] **Step 2: Create the verification script**
 
 Create `scripts/verify_migration.py`:
 
 ```python
-"""Diff 8010 (SQLite, untouched) against 8030 (Postgres, migrated)."""
+"""Diff 8010 (SQLite, untouched) against 8040 (Postgres, migrated)."""
 from __future__ import annotations
 
 import argparse
@@ -3421,7 +3421,7 @@ def _diff(name: str, a: Any, b: Any, *, seed_learner_id: str) -> bool:
         return True
     print(f"  ✗ {name}")
     print("    8010:", json.dumps(na, sort_keys=True)[:200])
-    print("    8030:", json.dumps(nb, sort_keys=True)[:200])
+    print("    8040:", json.dumps(nb, sort_keys=True)[:200])
     return False
 
 
@@ -3432,7 +3432,7 @@ def main() -> int:
     args = parser.parse_args()
 
     sqlite_client = httpx.Client(base_url="http://127.0.0.1:8010")
-    pg_client = httpx.Client(base_url="http://127.0.0.1:8030")
+    pg_client = httpx.Client(base_url="http://127.0.0.1:8040")
     login = pg_client.post("/auth/login", json={"email": args.seed_learner_email, "password": args.seed_learner_password})
     login.raise_for_status()
     seed_learner_id = login.json()["user_id"]
@@ -3477,7 +3477,7 @@ Expected: all checks pass (✓). Any mismatch (✗) is investigated and the migr
 
 ```bash
 git add scripts/verify_migration.py
-git commit -m "M3: verify_migration script — diff 8010 vs 8030 JSON endpoints"
+git commit -m "M3: verify_migration script — diff 8010 vs 8040 JSON endpoints"
 ```
 
 ---
@@ -3755,24 +3755,24 @@ git commit -m "M4: workspace rename phase copies old layout to user-keyed scheme
 
 ---
 
-### Task 26: End-to-end smoke against 8030
+### Task 26: End-to-end smoke against 8040
 
 This is a manual verification step — no automated test. Confirms the full stack works.
 
 - [ ] **Step 1: Restart the server**
 
-Restart the 8030 server so it picks up the new workspace path scheme:
+Restart the 8040 server so it picks up the new workspace path scheme:
 
 ```bash
 DATABASE_URL=postgresql+psycopg://course_gen:course_gen@localhost:5435/course_gen \
 SESSION_SECRET=dev-secret \
-uvicorn app.main:app --port 8030
+uvicorn app.main:app --port 8040
 ```
 
 - [ ] **Step 2: Register a fresh learner**
 
 ```bash
-curl -c /tmp/jar.txt -X POST http://127.0.0.1:8030/auth/register \
+curl -c /tmp/jar.txt -X POST http://127.0.0.1:8040/auth/register \
   -H 'content-type: application/json' \
   -d '{"email":"smoke@example.com","password":"hunter2!!","role":"learner","display_name":"Smoke"}'
 ```
@@ -3782,9 +3782,9 @@ Expected: 201 with `user_id` and `role: learner`.
 - [ ] **Step 3: Browse the catalog and enroll**
 
 ```bash
-curl -b /tmp/jar.txt http://127.0.0.1:8030/v1/lms/courses
+curl -b /tmp/jar.txt http://127.0.0.1:8040/v1/lms/courses
 # Pick a course_run_id from the response, then:
-curl -b /tmp/jar.txt -X POST http://127.0.0.1:8030/v1/lms/enrollments \
+curl -b /tmp/jar.txt -X POST http://127.0.0.1:8040/v1/lms/enrollments \
   -H 'content-type: application/json' \
   -d '{"course_run_id":"<course_id_from_catalog>"}'
 ```
@@ -3794,7 +3794,7 @@ Expected: 200 with an enrollment object whose `learner_id` matches the registere
 - [ ] **Step 4: Launch the workspace and inspect the disk path**
 
 ```bash
-curl -b /tmp/jar.txt -X POST http://127.0.0.1:8030/v1/lms/enrollments/<enrollment_id>/workspace -d '{}'
+curl -b /tmp/jar.txt -X POST http://127.0.0.1:8040/v1/lms/enrollments/<enrollment_id>/workspace -d '{}'
 ls learner_workspaces/<user_id>/<assignment_id>/workspace/
 ```
 
@@ -3808,7 +3808,7 @@ Run the `verify_migration.py` script one more time — all checks must still pas
 
 ```bash
 git add -A
-git commit -m "M4: smoke validation against 8030 — workspace launch + file flow"
+git commit -m "M4: smoke validation against 8040 — workspace launch + file flow"
 ```
 
 ---
