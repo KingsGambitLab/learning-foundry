@@ -36,6 +36,7 @@ from app.services.scenario_rubrics_base import (
     RubricContext,
     Verdict,
     register_rubric,
+    resolve_capture_target,
     resolve_path,
 )
 
@@ -165,7 +166,7 @@ class LLMJudgeCoverage(Rubric):
         #    out-of-range index is a learner-side bug → FAIL with the
         #    path so the feedback synth can name it.
         try:
-            content = resolve_path(ctx.captures, self.target)
+            content = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",
@@ -185,7 +186,7 @@ class LLMJudgeCoverage(Rubric):
         judge_context_value: Any = None
         if self.judge_context_path:
             try:
-                judge_context_value = resolve_path(ctx.captures, self.judge_context_path)
+                judge_context_value = resolve_capture_target(ctx.captures, self.judge_context_path)
             except (KeyError, IndexError):
                 judge_context_value = None
 
@@ -386,7 +387,7 @@ class LLMJudgeSemanticEq(Rubric):
         # 1. Pull the learner's answer. Missing dotted-path target is a
         #    learner-side bug → FAIL (same convention as LLMJudgeCoverage).
         try:
-            content = resolve_path(ctx.captures, self.target)
+            content = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",
@@ -562,7 +563,7 @@ class LLMJudgeFalsePremise(Rubric):
     def judge(self, ctx: RubricContext) -> Verdict:
         # 1. Pull the learner's answer.
         try:
-            content = resolve_path(ctx.captures, self.target)
+            content = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",

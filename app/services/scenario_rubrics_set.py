@@ -18,6 +18,7 @@ from app.services.scenario_rubrics_base import (
     RubricContext,
     Verdict,
     register_rubric,
+    resolve_capture_target,
     resolve_path,
 )
 
@@ -33,7 +34,7 @@ def _resolve_in_context(ctx: RubricContext, dotted_path: str) -> Any:
     """
     if dotted_path.startswith(_SETUP_PREFIX):
         return resolve_path(ctx.setup_data, dotted_path[len(_SETUP_PREFIX) :])
-    return resolve_path(ctx.captures, dotted_path)
+    return resolve_capture_target(ctx.captures, dotted_path)
 
 
 @register_rubric
@@ -72,7 +73,7 @@ class SubsetMatch(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            target_values = resolve_path(ctx.captures, self.target)
+            target_values = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",
@@ -207,7 +208,7 @@ class BehavioralEquivalence(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            got = resolve_path(ctx.captures, self.target)
+            got = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",
@@ -220,7 +221,7 @@ class BehavioralEquivalence(Rubric):
         # ``expected_path`` kwarg signals "compare to a captured value".
         if self.expected_path is not None:
             try:
-                expected_value = resolve_path(ctx.captures, self.expected_path)
+                expected_value = resolve_capture_target(ctx.captures, self.expected_path)
             except (KeyError, IndexError):
                 return Verdict(
                     status="fail",

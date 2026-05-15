@@ -19,6 +19,7 @@ from app.services.scenario_rubrics_base import (
     RubricContext,
     Verdict,
     register_rubric,
+    resolve_capture_target,
     resolve_path,
 )
 
@@ -55,7 +56,7 @@ class SchemaMatch(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            value = resolve_path(ctx.captures, self.target)
+            value = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError) as exc:
             return _missing_path_verdict(self.target, exc)
 
@@ -109,7 +110,7 @@ class LiteralMatch(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            value = resolve_path(ctx.captures, self.target)
+            value = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError) as exc:
             return _missing_path_verdict(self.target, exc)
 
@@ -143,7 +144,7 @@ class RegexMatch(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            value = resolve_path(ctx.captures, self.target)
+            value = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError) as exc:
             return _missing_path_verdict(self.target, exc)
 
@@ -195,7 +196,7 @@ class NumericRange(Rubric):
 
     def judge(self, ctx: RubricContext) -> Verdict:
         try:
-            value = resolve_path(ctx.captures, self.target)
+            value = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError) as exc:
             return _missing_path_verdict(self.target, exc)
 

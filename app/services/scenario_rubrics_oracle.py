@@ -22,6 +22,7 @@ from app.services.scenario_rubrics_base import (
     RubricContext,
     Verdict,
     register_rubric,
+    resolve_capture_target,
     resolve_path,
 )
 
@@ -121,7 +122,7 @@ class OracleSetOverlap(Rubric):
         # learner's response didn't include the expected shape — that
         # IS a learner failure, distinct from a config issue.
         try:
-            target_raw = resolve_path(ctx.captures, self.target)
+            target_raw = resolve_capture_target(ctx.captures, self.target)
         except (KeyError, IndexError):
             return Verdict(
                 status="fail",
