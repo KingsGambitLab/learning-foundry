@@ -668,6 +668,75 @@
     return { headline: details[0] || cleaned[0], details };
   }
 
+  function parseCourseSummary(text) {
+    // Course summaries follow a stable shape:
+    //
+    //   <overview paragraph(s)>
+    //
+    //   Skills you'll learn:
+    //   - skill bullet 1
+    //   - skill bullet 2
+    //   ...
+    //
+    // Split on the skills header so we can show the overview as prose
+    // and the skills as visual chips. If no header is found we treat
+    // the whole text as the overview and return no skills.
+    if (!text) return { overview: "", skills: [] };
+    const trimmed = String(text).trim();
+    const headerMatch = trimmed.match(/^([\s\S]*?)\n+\s*skills you('?ll)? learn:?\s*\n([\s\S]*)$/i);
+    if (!headerMatch) {
+      return { overview: trimmed, skills: [] };
+    }
+    const overview = headerMatch[1].trim();
+    const skillsBlock = headerMatch[3] || "";
+    const skills = skillsBlock
+      .split(/\n+/)
+      .map((line) => line.replace(/^\s*[-*•]\s+/, "").trim())
+      .filter(Boolean);
+    return { overview, skills };
+  }
+
+  function shortenOverview(text, maxSentences = 1) {
+    // The first 1-2 sentences carry the elevator pitch; later sentences
+    // ("It is interesting because...") are usually marketing prose.
+    // Trim conservatively so we never cut mid-sentence.
+    if (!text) return "";
+    const sentences = text.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+    if (!sentences || !sentences.length) return text.trim();
+    return sentences.slice(0, maxSentences).join("").trim();
+  }
+
+  function skillTagLabel(skill) {
+    // The bullet sentence is long ("Semantic versioning and lifecycle
+    // management for prompt artifacts, including ..."). Show just the
+    // headline noun phrase before the first connector word so the tag
+    // stays compact; the full sentence is preserved in the hover title.
+    if (!skill) return "";
+    const cleaned = skill.trim();
+    // Cut at the first connector word — these reliably mark the end of
+    // the skill's headline noun phrase and the start of its explanation.
+    const connectorMatch = cleaned.match(
+      /^([\w\s\-/'&]+?)\s+(?:for|using|across|with|so|that|including|which|where|based|of|to|via|by|when)\b/i
+    );
+    if (connectorMatch && connectorMatch[1]) {
+      return connectorMatch[1].trim();
+    }
+    // No connector found — fall back to the first 4 words.
+    const words = cleaned.split(/\s+/);
+    if (words.length <= 4) return cleaned;
+    return words.slice(0, 4).join(" ");
+  }
+
+  function renderSkillTags(skills) {
+    if (!skills || !skills.length) return "";
+    const chips = skills.map((skill) => {
+      const label = skillTagLabel(skill);
+      // Full sentence stays accessible as the hover tooltip — no data lost.
+      return `<span class="skill-tag" title="${escapeHtml(skill)}">${escapeHtml(label)}</span>`;
+    });
+    return `<div class="skill-tags" aria-label="Skills you'll learn">${chips.join("")}</div>`;
+  }
+
   function renderTestResults(gradeReport) {
     // Render per-test results from a DeliverableGradeReport. Outcome-mode
     // graders set ``feedback=None`` on the ReviewArea — the actionable
@@ -831,13 +900,18 @@
       ? `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed`
       : "Not submitted yet";
 
+    const parsedSummary = parseCourseSummary(enrollment.course_summary);
+    const shortOverview = shortenOverview(parsedSummary.overview)
+      || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.";
+
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
           <p class="course-chip">${escapeHtml(enrollment.course_title)}</p>
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(enrollment.course_title)}</h1>
-          <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.")}</p>
+          <p class="focus-subcopy">${escapeHtml(shortOverview)}</p>
+          ${renderSkillTags(parsedSummary.skills)}
 
           <dl class="deliverable-quickref" aria-label="Project at a glance">
             <div class="quickref-row">
