@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import re
 from datetime import UTC, datetime
@@ -7,6 +8,8 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
+
+from pydantic import BaseModel, Field
 
 from app.domain.course import CourseRun, CourseRunStatus, CourseRunSummary
 from app.domain.grading import (
@@ -141,6 +144,22 @@ def humanize_diagnostic(raw: str) -> str:
             return f"Response is missing numeric field `{path}`"
         return f"Response is missing field `{path}`"
 
+    # ``<step_id>.body.<field> does not equal expected literal`` — produced
+    # by ``literal_match`` when the resolved value doesn't match. The most
+    # frequent case in outcome-mode courses is ``body.abstained`` where the
+    # scenario expects the service to refuse (``abstained=true``) but the
+    # learner answered confidently from a distractor. Show that as advice,
+    # not as a path expression.
+    m = re.match(r"[\w_]+\.body\.(\w+) does not equal expected literal$", body)
+    if m:
+        field = m.group(1)
+        if field == "abstained":
+            return (
+                "Service should have abstained (`abstained=true`) — the "
+                "question can't be answered from the supplied passages"
+            )
+        return f"Response field `{field}` doesn't match the expected value"
+
     # Unrecognized — pass through. Better than losing signal.
     return raw
 
@@ -178,6 +197,25 @@ def _cluster_key(diagnostic: str) -> tuple[str, str]:
         return f"wrong_value:{m.group(1)}", m.group(1)
     if diagnostic.startswith("Retrieval recall"):
         return "retrieval_recall", "retrieval recall"
+    if diagnostic.startswith("Service should have abstained"):
+        return "missing_abstention", "abstention on out-of-scope questions"
+    if diagnostic.startswith("Response field `"):
+        m2 = re.match(r"Response field `([^`]+)` doesn't match", diagnostic)
+        if m2:
+            return f"wrong_value:{m2.group(1)}", m2.group(1)
+    # LLM-judge rationale strings vary per scenario (the judge writes a
+    # free-form sentence explaining the mismatch). Cluster them by
+    # rubric kind so we surface "judge rejected the answer on N
+    # scenarios" instead of N near-duplicate one-off rows.
+    m = re.match(r"^(llm_judge_\w+) \(fail\):", diagnostic)
+    if m:
+        kind = m.group(1)
+        readable = {
+            "llm_judge_semantic_eq": "answer doesn't semantically match the expected response",
+            "llm_judge_coverage": "answer is missing required facts",
+            "llm_judge_false_premise": "service didn't refuse the false-premise question",
+        }.get(kind, "judge rejected the answer")
+        return f"llm_judge:{kind}", readable
     # Fallback: each unique diagnostic is its own cluster.
     return f"other:{diagnostic}", diagnostic
 
@@ -221,6 +259,16 @@ def _describe_cluster(
         return (
             f"Retrieval recall below threshold — "
             f"affects {scenario_count} {plural}"
+        )
+    if cluster_key == "missing_abstention":
+        return (
+            f"Service should abstain when no passage actually answers "
+            f"the question — affects {scenario_count} {plural}"
+        )
+    if cluster_key.startswith("llm_judge:"):
+        return (
+            f"The {root} — affects {scenario_count} {plural} "
+            f"(expand any failing row to see the judge's specific reasoning)"
         )
     # Fallback to the raw diagnostic.
     return f"{root} — {scenario_count} {plural}"
@@ -305,12 +353,92 @@ def build_outcome_feedback(
         )
 
     fundamental_gap = _describe_cluster(top_key, top_root, top_count, top_exemplar)
+    # Avoid the "Fundamental gap" line repeating the first "Likely root
+    # cause" verbatim — the UI renders both, so the duplicate is noise.
+    # Drop ``fundamental_gap`` when it equals ``likely_root_cause[0]``.
+    if likely_root_cause and fundamental_gap == likely_root_cause[0]:
+        fundamental_gap = ""
 
     return LearnerReviewGuidance(
         learner_feedback=headline,
         fundamental_gap=fundamental_gap,
         likely_root_cause=likely_root_cause,
     )
+
+
+# ---------------- LLM-rewritten learner feedback ----------------
+
+# Optional layer: take the deterministic ``LearnerReviewGuidance`` plus
+# the course spec context and ask haiku to rewrite the headline as
+# conversational prose tied to the spec's quality bars. Cheap (~1
+# haiku call per submit, ~500 tokens) and the fallback is the
+# deterministic headline when the router isn't configured or fails.
+
+
+_FEEDBACK_REWRITE_SYSTEM = (
+    "You write 2-3 sentence summary feedback for a learner who just "
+    "submitted their implementation of a graded course project. The "
+    "user will hand you:\n"
+    "- The course goal + the measurable quality bars the project is "
+    "judged against\n"
+    "- The structured root-cause list our grader already produced\n"
+    "- The pass/fail count\n\n"
+    "Rewrite the summary so it reads like a senior engineer's PR "
+    "comment: name the concrete gap, tie it to which quality bar "
+    "it blocks, and give one specific direction to fix first. Do not "
+    "list more than the single top priority. Do not repeat the pass "
+    "count (the UI shows it elsewhere). Plain prose, no markdown, no "
+    "bullet points. Under 60 words total."
+)
+
+
+class _FeedbackRewrite(BaseModel):
+    summary: str = Field(min_length=10, max_length=600)
+
+
+def _rewrite_feedback_with_llm(
+    *,
+    feedback: LearnerReviewGuidance,
+    spec_title: str,
+    spec_goal: str,
+    quality_bars: list[dict[str, Any]],
+    passed: int,
+    total: int,
+    router: Any,
+) -> str | None:
+    """Return a rewritten ``learner_feedback`` headline, or ``None`` on
+    any failure (caller falls back to the deterministic headline)."""
+    try:
+        from app.services.llm_router import LLMTier
+        user_payload = {
+            "course_title": spec_title,
+            "course_goal": spec_goal,
+            "quality_bars": [
+                {"id": bar.get("id"), "metric": bar.get("metric_description")}
+                for bar in quality_bars
+            ],
+            "score": f"{passed} of {total}",
+            "current_headline": feedback.learner_feedback,
+            "fundamental_gap": feedback.fundamental_gap,
+            "top_root_causes": feedback.likely_root_cause[:3],
+        }
+        user = (
+            "Rewrite the summary headline based on this submission "
+            "context. Return JSON ``{summary: <text>}``.\n\n"
+            + json.dumps(user_payload, indent=2)
+        )
+        result = router.parse_structured(
+            tier=LLMTier.haiku,
+            system=_FEEDBACK_REWRITE_SYSTEM,
+            user=user,
+            text_format=_FeedbackRewrite,
+            request_timeout_s=30,
+        )
+        if result and getattr(result, "parsed", None) is not None:
+            return result.parsed.summary.strip()
+    except Exception:
+        return None
+    return None
 
 
 class LMSService:
@@ -866,13 +994,46 @@ class LMSService:
             status=overall,
             results=results,
         )
+        feedback = build_outcome_feedback(results)
+        # Optional LLM rewrite of the headline — pass the spec context so
+        # haiku can tie the failure mode to the course's quality bars.
+        # Falls back to the deterministic headline on any error.
+        if feedback and router is not None:
+            spec_quality_bars: list[dict[str, Any]] = []
+            spec_title = deliverable.title
+            spec_goal = deliverable.objective
+            try:
+                from app.services.course_outcome_models import CourseOutcomeSpec
+                spec_path = Path(authoring_root) / "private" / "course_spec.json"
+                if spec_path.exists():
+                    spec_obj = CourseOutcomeSpec.model_validate_json(spec_path.read_text())
+                    spec_title = spec_obj.title
+                    spec_goal = spec_obj.goal
+                    spec_quality_bars = [
+                        {"id": bar.id, "metric_description": bar.metric_description}
+                        for bar in spec_obj.quality_bars
+                    ]
+            except Exception:
+                pass
+            rewritten = _rewrite_feedback_with_llm(
+                feedback=feedback,
+                spec_title=spec_title,
+                spec_goal=spec_goal,
+                quality_bars=spec_quality_bars,
+                passed=passed,
+                total=total,
+                router=router,
+            )
+            if rewritten:
+                feedback.learner_feedback = rewritten
+
         review_area = ReviewAreaGradeReport(
             deliverable_id=deliverable_id,
             title=deliverable.title,
             objective=deliverable.objective,
             deliverable_index=deliverable.deliverable_index,
             grade_report=grade_report,
-            feedback=build_outcome_feedback(results),
+            feedback=feedback,
         )
         assignment_report = AssignmentGradeReport(
             total_tests=total,
