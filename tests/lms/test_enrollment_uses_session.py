@@ -33,7 +33,7 @@ def client(postgres_url: str):
 
 
 def test_list_enrollments_does_not_accept_query_param(client: TestClient) -> None:
-    client.post("/auth/register", json={"email": "l1@e.com", "password": "hunter2!!", "role": "learner"})
+    client.post("/auth/register", json={"email": "l1@e.com", "password": "hunter2!!"})
     # Even if the legacy query param is supplied, it must be ignored — the session-derived user is what counts.
     resp = client.get("/v1/lms/enrollments?learner_id=should-be-ignored")
     assert resp.status_code == 200
@@ -42,7 +42,7 @@ def test_list_enrollments_does_not_accept_query_param(client: TestClient) -> Non
 
 
 def test_create_enrollment_rejects_explicit_learner_id_in_body(client: TestClient) -> None:
-    client.post("/auth/register", json={"email": "l2@e.com", "password": "hunter2!!", "role": "learner"})
+    client.post("/auth/register", json={"email": "l2@e.com", "password": "hunter2!!"})
     # Body carries an `extra` field — with extra='forbid' on the request, this 422s.
     resp = client.post("/v1/lms/enrollments", json={
         "course_run_id": "nonexistent",

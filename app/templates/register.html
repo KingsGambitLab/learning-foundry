@@ -16,15 +16,15 @@
 <body>
 <main>
   <h1>Create your account</h1>
+  <p class="hint" style="color:#555; font-size:0.9rem;">
+    Public signup creates a <strong>learner</strong> account. Creator
+    accounts are provisioned by the operator via the admin bootstrap
+    script.
+  </p>
   <form id="register-form">
     <label>Email <input name="email" type="email" required autocomplete="email" /></label>
     <label>Password <input name="password" type="password" required minlength="8" autocomplete="new-password" /></label>
     <label>Display name <input name="display_name" maxlength="120" autocomplete="name" /></label>
-    <fieldset>
-      <legend>Role</legend>
-      <label><input type="radio" name="role" value="learner" required /> Learner</label>
-      <label><input type="radio" name="role" value="creator" /> Creator</label>
-    </fieldset>
     <button type="submit">Register</button>
     <p class="err" id="err"></p>
   </form>

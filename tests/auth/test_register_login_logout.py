@@ -37,7 +37,7 @@ def client(postgres_url: str):
 
 def test_register_creates_user_and_sets_cookie(client: TestClient) -> None:
     resp = client.post("/auth/register", json={
-        "email": "alice@example.com", "password": "hunter2!!", "role": "learner",
+        "email": "alice@example.com", "password": "hunter2!!",
     })
     assert resp.status_code == 201
     body = resp.json()
@@ -48,7 +48,7 @@ def test_register_creates_user_and_sets_cookie(client: TestClient) -> None:
 
 def test_login_with_correct_credentials_returns_cookie(client: TestClient) -> None:
     client.post("/auth/register", json={
-        "email": "bob@example.com", "password": "hunter2!!", "role": "creator",
+        "email": "bob@example.com", "password": "hunter2!!",
     })
     client.cookies.clear()
     resp = client.post("/auth/login", json={"email": "bob@example.com", "password": "hunter2!!"})
@@ -58,7 +58,7 @@ def test_login_with_correct_credentials_returns_cookie(client: TestClient) -> No
 
 def test_login_with_wrong_password_returns_401(client: TestClient) -> None:
     client.post("/auth/register", json={
-        "email": "carol@example.com", "password": "hunter2!!", "role": "learner",
+        "email": "carol@example.com", "password": "hunter2!!",
     })
     client.cookies.clear()
     resp = client.post("/auth/login", json={"email": "carol@example.com", "password": "wrong-password"})
@@ -72,18 +72,36 @@ def test_login_with_unknown_email_returns_401(client: TestClient) -> None:
 
 def test_register_with_duplicate_email_returns_409(client: TestClient) -> None:
     client.post("/auth/register", json={
-        "email": "dup@example.com", "password": "hunter2!!", "role": "learner",
+        "email": "dup@example.com", "password": "hunter2!!",
     })
     client.cookies.clear()
     resp = client.post("/auth/register", json={
-        "email": "dup@example.com", "password": "hunter2!!", "role": "creator",
+        "email": "dup@example.com", "password": "hunter2!!",
     })
     assert resp.status_code == 409
 
 
+def test_register_rejects_role_in_body(client: TestClient) -> None:
+    """Public signup must NOT accept `role` in the body — locked to learner."""
+    resp = client.post("/auth/register", json={
+        "email": "sneaky@example.com", "password": "hunter2!!", "role": "creator",
+    })
+    # extra="forbid" on RegisterRequest → 422 with detail mentioning unexpected field.
+    assert resp.status_code == 422
+
+
+def test_register_always_creates_learner(client: TestClient) -> None:
+    """Even without a role in the body, the resulting account is a learner."""
+    resp = client.post("/auth/register", json={
+        "email": "implicit-learner@example.com", "password": "hunter2!!",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["role"] == "learner"
+
+
 def test_logout_revokes_session(client: TestClient) -> None:
     client.post("/auth/register", json={
-        "email": "dave@example.com", "password": "hunter2!!", "role": "learner",
+        "email": "dave@example.com", "password": "hunter2!!",
     })
     resp = client.post("/auth/logout")
     assert resp.status_code == 204
@@ -94,11 +112,12 @@ def test_logout_revokes_session(client: TestClient) -> None:
 
 def test_me_returns_current_user(client: TestClient) -> None:
     client.post("/auth/register", json={
-        "email": "eve@example.com", "password": "hunter2!!", "role": "creator", "display_name": "Eve",
+        "email": "eve@example.com", "password": "hunter2!!", "display_name": "Eve",
     })
     me = client.get("/auth/me")
     assert me.status_code == 200
     body = me.json()
     assert body["email"] == "eve@example.com"
     assert body["display_name"] == "Eve"
-    assert body["role"] == "creator"
+    # Public signup is locked to learner — see P0 #1 fix.
+    assert body["role"] == "learner"

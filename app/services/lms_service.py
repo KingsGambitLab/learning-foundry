@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +78,46 @@ class LMSConflictError(ValueError):
 # are regex-based, ordered most-specific first.
 
 _RUBRIC_PREFIX_RE = re.compile(r"^\s*[a-z_]+\s*\((fail|abstain)\):\s*", re.IGNORECASE)
+
+
+def _grader_bundle_digest(grader_root: Path) -> str:
+    """SHA-256 over the concatenation of `(relative_path, sha256(bytes))` for
+    every file under `grader_root`, sorted by relative_path.
+
+    Used as an audit fingerprint on each submission so post-hoc drift
+    detection is possible if a course author modifies the bundle between
+    submissions (P0 #4 stopgap).
+    """
+    import hashlib
+
+    if not grader_root.exists():
+        return ""
+    h = hashlib.sha256()
+    files = sorted(p for p in grader_root.rglob("*") if p.is_file())
+    for p in files:
+        rel = p.relative_to(grader_root).as_posix().encode("utf-8")
+        file_digest = hashlib.sha256(p.read_bytes()).digest()
+        h.update(len(rel).to_bytes(4, "big"))
+        h.update(rel)
+        h.update(file_digest)
+    return h.hexdigest()
+
+
+def _rubric_kinds(scenario) -> list[str]:
+    """Return the rubric `kind` strings declared on a Scenario.
+
+    Used by the strict-LLM-judge gate at submit time to detect when a
+    bundle requires the LLM router. Tolerant of older scenario shapes
+    where rubrics may be dicts or pydantic objects.
+    """
+    out: list[str] = []
+    for rubric in getattr(scenario, "rubrics", None) or []:
+        kind = getattr(rubric, "kind", None)
+        if kind is None and isinstance(rubric, dict):
+            kind = rubric.get("kind")
+        if isinstance(kind, str):
+            out.append(kind)
+    return out
 
 
 def _strip_rubric_prefix(text: str) -> str:
@@ -525,7 +566,14 @@ class LMSService:
             course_title=learner_package.title,
             course_summary=learner_package.summary,
             package_type=learner_package.package_type,
-            shared_workflow_run_id=snapshot.shared_workflow_run_id or course_run.shared_workflow_run_id or "shared_workflow",
+            # Outcome-mode courses have no workflow run; falling back to the
+            # literal "shared_workflow" string would collide all outcome-mode
+            # enrollments for the same learner into one workspace
+            # (`learner_workspaces/<user>/shared_workflow/workspace`), so the
+            # second course would silently see the first course's starter.
+            # Fall back to the course_run.id when no real workflow run id
+            # exists — guaranteed unique per course.
+            shared_workflow_run_id=snapshot.shared_workflow_run_id or course_run.shared_workflow_run_id or course_run.id,
             created_at=now,
             updated_at=now,
             status=LearnerEnrollmentStatus.active,
@@ -835,6 +883,17 @@ class LMSService:
                 f"Outcome grader bundle missing scenarios directory at {scenarios_dir}."
             )
 
+        # P0 #4 audit: the grader bundle today lives at the mutable
+        # authoring workspace, NOT inside the immutable publish snapshot.
+        # If the author amends and re-publishes the course after a learner
+        # has enrolled, the learner's submission is graded against the new
+        # bundle. Long-term fix is to ship grader content inside the
+        # snapshot. As a stopgap we hash the bundle contents at submit
+        # time, stamp the digest onto the submission row, and log it so
+        # any post-hoc drift detection (e.g. comparing two submissions
+        # against the same snapshot) is possible.
+        grader_bundle_digest = _grader_bundle_digest(grader_root)
+
         learner_starter = workspace_root / "public" / "starter"
         if not learner_starter.exists():
             raise LMSConflictError(
@@ -863,16 +922,36 @@ class LMSService:
         )
 
         # Live LLM judge (haiku tier) when the env is configured. The
-        # judge rubrics call ``router.parse_structured(tier=haiku, ...)``
-        # — a missing/misconfigured router falls back to the abstain
-        # path so grading still completes. Best-effort: any router-init
-        # exception is logged and we proceed without the judge.
+        # judge rubrics call ``router.parse_structured(tier=haiku, ...)``;
+        # a missing router can either (a) silently abstain on judged
+        # rubrics, or (b) cause submit to refuse to grade. Staging/prod
+        # must use (b) so a misconfigured judge can never silently pass
+        # learners. Local dev / CI can opt into (a) via the env var
+        # below.
         router: Any | None = None
         try:
             from app.services.llm_router import get_default_router
             router = get_default_router()
         except Exception:
             router = None
+
+        strict_judge = os.environ.get("COURSE_GEN_REQUIRE_LLM_JUDGE", "true").lower() == "true"
+        if strict_judge and router is None:
+            scenarios_needing_judge = sorted({
+                rubric_kind
+                for scenario in scenarios
+                for rubric_kind in _rubric_kinds(scenario)
+                if rubric_kind.startswith("llm_judge_")
+            })
+            if scenarios_needing_judge:
+                raise LMSConflictError(
+                    "Grader refused: this course uses LLM-judge rubrics "
+                    f"({', '.join(scenarios_needing_judge)}) but no LLM "
+                    "router is available on this host. Configure "
+                    "ANTHROPIC_API_KEY (or set "
+                    "COURSE_GEN_REQUIRE_LLM_JUDGE=false for offline dev) "
+                    "and resubmit."
+                )
 
         try:
             pass_result = grader.run(
@@ -1059,6 +1138,26 @@ class LMSService:
             grade_report=grade_report,
             assignment_report=assignment_report,
         )
+        # P0 #4 audit log: pin the grader-bundle fingerprint to this
+        # submission row so any post-hoc drift between two submissions
+        # against the same publish snapshot is recoverable. Long-term
+        # fix is to embed the bundle inside the immutable publish
+        # snapshot — until that ships, this is the audit trail.
+        try:
+            import logging
+            logging.getLogger("course_gen.lms.submit").info(
+                "outcome_submit.bundle_digest",
+                extra={
+                    "submission_id": submission.id,
+                    "enrollment_id": enrollment.id,
+                    "publish_snapshot_id": enrollment.publish_snapshot_id,
+                    "course_run_id": course_run.id,
+                    "grader_bundle_digest": grader_bundle_digest,
+                    "authoring_root": str(authoring_root),
+                },
+            )
+        except Exception:
+            pass
         self.store.save_learner_submission(submission)
 
         refreshed = enrollment.model_copy(deep=True)

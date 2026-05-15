@@ -1,0 +1,83 @@
+{
+  "all_passed": true,
+  "passed": 14,
+  "total": 14,
+  "notes": [
+    "8010 runs from the jovial-villani worktree SQLite db (5 courses, 5 enrollments).",
+    "Migration source was the main-repo SQLite db (1 course, 2 enrollments).",
+    "Content diff between 8010 and 8040 is intentionally not performed \u2014 different source dbs.",
+    "Primary verification is snapshot-to-Postgres row-count completeness (section A)."
+  ],
+  "results": [
+    {
+      "name": "count:course_runs",
+      "passed": true,
+      "detail": "snapshot=56  postgres=56"
+    },
+    {
+      "name": "count:workflow_runs",
+      "passed": true,
+      "detail": "snapshot=62  postgres=62"
+    },
+    {
+      "name": "count:publish_snapshots",
+      "passed": true,
+      "detail": "snapshot=1  postgres=1"
+    },
+    {
+      "name": "count:learner_enrollments",
+      "passed": true,
+      "detail": "snapshot=2  postgres=2"
+    },
+    {
+      "name": "count:learner_workspace_sessions",
+      "passed": true,
+      "detail": "snapshot=2  postgres=2"
+    },
+    {
+      "name": "count:learner_submissions",
+      "passed": true,
+      "detail": "snapshot=4  postgres=4"
+    },
+    {
+      "name": "count:creator_feedback",
+      "passed": true,
+      "detail": "snapshot=0  postgres=0"
+    },
+    {
+      "name": "count:learner_feedback",
+      "passed": true,
+      "detail": "snapshot=0  postgres=0"
+    },
+    {
+      "name": "count:learner_eval_reports",
+      "passed": true,
+      "detail": "snapshot=0  postgres=0"
+    },
+    {
+      "name": "count:creator_assets",
+      "passed": true,
+      "detail": "snapshot=0  postgres=0"
+    },
+    {
+      "name": "8010-catalog-shape",
+      "passed": true,
+      "detail": "5 items, all keys present"
+    },
+    {
+      "name": "8040-catalog-shape",
+      "passed": true,
+      "detail": "1 items, all keys present"
+    },
+    {
+      "name": "8010-enrollments-shape",
+      "passed": true,
+      "detail": "5 items, all keys present"
+    },
+    {
+      "name": "8040-enrollments-shape",
+      "passed": true,
+      "detail": "1 items, all keys present"
+    }
+  ]
+}

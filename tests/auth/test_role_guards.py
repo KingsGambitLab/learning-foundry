@@ -33,10 +33,37 @@ def client(postgres_url: str) -> TestClient:
 
 
 def _register(client: TestClient, email: str, role: str) -> None:
-    resp = client.post("/auth/register", json={
-        "email": email, "password": "hunter2!!", "role": role,
-    })
-    assert resp.status_code == 201, resp.text
+    """Register a user and log them in.
+
+    Public `/auth/register` is locked to learner (P0 #1 fix). For tests that
+    need a `creator`, we bypass the HTTP API and use the bootstrap path
+    directly against the same store the app reads from, then log in via the
+    HTTP API so the cookie jar is populated.
+    """
+    if role == "learner":
+        resp = client.post("/auth/register", json={
+            "email": email, "password": "hunter2!!",
+        })
+        assert resp.status_code == 201, resp.text
+        return
+    if role == "creator":
+        # Direct store insert + HTTP login. Equivalent to running
+        # scripts/bootstrap_creator.py against the staging DB.
+        from app.domain.auth import Role
+        from app.services.auth_passwords import hash_password
+        store = client.app.state.workflow_service.store
+        try:
+            store.create_user(
+                email=email,
+                password_hash=hash_password("hunter2!!"),
+                role=Role.creator,
+            )
+        except ValueError:
+            pass  # already exists from a prior call in the same test
+        resp = client.post("/auth/login", json={"email": email, "password": "hunter2!!"})
+        assert resp.status_code == 200, resp.text
+        return
+    raise AssertionError(f"unknown role {role!r}")
 
 
 def test_unauthenticated_creator_route_returns_401(client: TestClient) -> None:

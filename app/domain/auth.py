@@ -32,9 +32,18 @@ class UserSession(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    """Public self-serve signup.
+
+    The `role` field is intentionally absent. Public signups always create a
+    `learner`. Creator accounts must be provisioned via the admin bootstrap
+    path (`scripts/bootstrap_creator.py`) so the staging/prod authoring
+    surface is not exposed to anonymous callers.
+    """
+
+    model_config = {"extra": "forbid"}
+
     email: EmailStr
     password: str = Field(min_length=8, max_length=200)
-    role: Role
     display_name: str | None = Field(default=None, max_length=120)
 
 

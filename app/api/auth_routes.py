@@ -6,7 +6,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.deps import current_user
-from app.domain.auth import AuthResponse, LoginRequest, RegisterRequest, User
+from app.domain.auth import AuthResponse, LoginRequest, RegisterRequest, Role, User
 from app.services.auth_passwords import hash_password, verify_password
 from app.services.auth_session import COOKIE_NAME, SESSION_TTL, SessionService
 from app.storage.workflow_store import WorkflowStore
@@ -50,10 +50,13 @@ def _set_session_cookie(response: Response, session_id) -> None:
 def register(payload: RegisterRequest, request: Request, response: Response) -> AuthResponse:
     store = _store(request)
     try:
+        # Public self-serve registration is locked to learner role. Creator
+        # accounts must be bootstrapped via scripts/bootstrap_creator.py so
+        # anonymous callers cannot grant themselves authoring privileges.
         user = store.create_user(
             email=payload.email,
             password_hash=hash_password(payload.password),
-            role=payload.role,
+            role=Role.learner,
             display_name=payload.display_name,
         )
     except ValueError as exc:
