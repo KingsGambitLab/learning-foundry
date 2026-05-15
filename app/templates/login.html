@@ -7,36 +7,122 @@
   <link rel="icon" href="https://www.scaler.com/favicon.ico" />
   <link rel="stylesheet" href="/static/app-shell.css" />
   <style>
-    body { background: #0f1419; color: #e8eef5; font: 15px/1.5 system-ui, sans-serif; }
-    main { max-width: 380px; margin: 8vh auto; padding: 0 1.25rem; }
-    .brand { display: flex; align-items: center; gap: 0.6rem; justify-content: center; margin-bottom: 2rem; }
-    .brand img { width: 32px; height: 32px; border-radius: 6px; }
-    .brand span { font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
-    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 1.25rem; text-align: center; color: #aab6c4; }
-    label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; color: #aab6c4; }
-    input { width: 100%; padding: 0.6rem 0.7rem; border-radius: 7px; border: 1px solid #2a3441; background: #161c25; color: #e8eef5; box-sizing: border-box; }
-    input:focus { outline: 2px solid #3b82f6; border-color: transparent; }
-    button { width: 100%; margin-top: 1.25rem; padding: 0.65rem 1.2rem; border-radius: 7px; border: 0; background: #3b82f6; color: #fff; font-weight: 600; cursor: pointer; }
-    button:hover { background: #2f6fe0; }
-    .err { color: #f87171; margin-top: 0.75rem; min-height: 1.2em; font-size: 0.85rem; text-align: center; }
+    /* Uses the app-shell design tokens so this page is visually
+       identical to the rest of Scaler Labs (light theme, Inter,
+       indigo accent, same surfaces/borders). */
+    .auth-wrap {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      box-sizing: border-box;
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 400px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04),
+                  0 12px 32px rgba(15, 23, 42, 0.08);
+      padding: 2rem 2rem 1.75rem;
+    }
+    .auth-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+    }
+    .auth-brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: #fff;
+      border: 1px solid var(--line);
+      padding: 3px;
+      box-sizing: border-box;
+    }
+    .auth-brand span {
+      font-size: 1.2rem;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+    .auth-card h1 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--muted-strong);
+      text-align: center;
+      margin: 0 0 1.5rem;
+    }
+    .auth-field { margin-bottom: 1rem; }
+    .auth-field label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted-strong);
+      margin-bottom: 0.35rem;
+    }
+    .auth-field input {
+      width: 100%;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--surface-soft);
+      color: var(--text);
+      box-sizing: border-box;
+    }
+    .auth-field input:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px var(--blue-soft);
+      background: var(--surface);
+    }
+    .auth-submit {
+      width: 100%;
+      margin-top: 0.5rem;
+      padding: 0.65rem 1.2rem;
+      border: 0;
+      border-radius: 9px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .auth-submit:hover { background: var(--blue-strong); }
+    .auth-err {
+      color: #dc2626;
+      font-size: 0.85rem;
+      text-align: center;
+      min-height: 1.2em;
+      margin: 0.85rem 0 0;
+    }
   </style>
 </head>
 <body>
-<main>
-  <div class="brand">
-    <img src="https://www.scaler.com/favicon.ico" alt="Scaler" />
-    <span>Scaler Labs</span>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img src="https://www.scaler.com/favicon.ico" alt="Scaler" />
+        <span>Scaler Labs</span>
+      </div>
+      <h1>Sign in to continue</h1>
+      <form id="login-form" novalidate>
+        <div class="auth-field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required autocomplete="email" />
+        </div>
+        <div class="auth-field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" required minlength="8" autocomplete="current-password" />
+        </div>
+        <button class="auth-submit" type="submit">Log in</button>
+        <p class="auth-err" id="err"></p>
+      </form>
+    </div>
   </div>
-  <h1>Sign in to continue</h1>
-  <form id="login-form">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" required autocomplete="email" />
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" required minlength="8" autocomplete="current-password" />
-    <button type="submit">Log in</button>
-    <p class="err" id="err"></p>
-  </form>
-</main>
 <script>
 document.getElementById("login-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
