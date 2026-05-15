@@ -16,6 +16,12 @@
       .replaceAll("'", "&#39;");
   }
 
+  // Display-only: strip a leading marketing prefix ("Production" /
+  // "Production-Quality ") from course/lab titles. Does NOT mutate data.
+  function cleanTitle(t) {
+    return String(t ?? "").replace(/^\s*Production(?:-Quality)?\s+/i, "").trim();
+  }
+
   function setMessage(kind, text) {
     if (!text) {
       pageMessage.className = "message";
@@ -75,7 +81,15 @@
           : (isReady
             ? `<span class="button primary">Enrol</span>`
             : `<span class="button" aria-disabled="true">Preparing…</span>`));
-      const stateLabel = isEnrolled ? "Enrolled" : (isReady ? "Available" : "Preparing");
+      // The enrollment summary here only carries status /
+      // completed_deliverable_count / deliverable_count — it does NOT
+      // expose raw passed_tests, so the >=15-marks "Solved" rule can't
+      // be evaluated per-mark. Conservatively show "Solved" only when
+      // the enrollment is fully completed; otherwise keep "Enrolled".
+      const isSolvedEnrollment = isEnrolled && enrollment.status === "completed";
+      const stateLabel = isEnrolled
+        ? (isSolvedEnrollment ? "Solved" : "Enrolled")
+        : (isReady ? "Available" : "Preparing");
       const stateKind = isEnrolled ? "passed" : (isReady ? "ready" : "not-ready");
 
       return `
@@ -83,7 +97,7 @@
              ${attrs} role="${attrs ? "button" : ""}" ${attrs ? 'tabindex="0"' : ""}>
           <div class="lab-card-main">
             <span class="status-pill ${stateKind}">${escapeHtml(stateLabel)}</span>
-            <h3>${escapeHtml(course.title)}</h3>
+            <h3>${escapeHtml(cleanTitle(course.title))}</h3>
             <p>${escapeHtml(course.summary)}</p>
           </div>
           <div class="lab-card-cta">${cta}</div>

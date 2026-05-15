@@ -43,6 +43,20 @@
       .replaceAll("'", "&#39;");
   }
 
+  // Display-only: strip a leading marketing prefix ("Production" /
+  // "Production-Quality ") from course/lab titles. Does NOT mutate data.
+  function cleanTitle(t) {
+    return String(t ?? "").replace(/^\s*Production(?:-Quality)?\s+/i, "").trim();
+  }
+
+  // 15+/18 (>=15 marks) is treated as "solved"/green in the UI. The
+  // backend status stays authoritative for data; this is render-only.
+  const GOOD_ACCURACY_MARKS = 15;
+  function isSolved(passed, total, backendStatus) {
+    const p = Number(passed || 0);
+    return backendStatus === "passed" || p >= GOOD_ACCURACY_MARKS || (total && p === Number(total));
+  }
+
   function titleCase(value) {
     return String(value || "")
       .replaceAll("_", " ")
@@ -160,9 +174,21 @@
     return kinds[summary?.status] || "neutral";
   }
 
+  function deliverableSolved(deliverable) {
+    // Display-only: a deliverable is "solved"/green when its latest
+    // submission clears the >=15 marks bar (or is a full backend pass).
+    // Defensive: fall back to false if the summary lacks per-mark data.
+    const sub = deliverable?.latest_submission;
+    if (!sub) return false;
+    return isSolved(sub.passed_tests, sub.total_tests, sub.status);
+  }
+
   function deliverableStatusCopy(deliverable, enrollment) {
     if (enrollment?.status === "completed" && deliverable.status === "passed") {
       return "Completed";
+    }
+    if (deliverableSolved(deliverable)) {
+      return "Solved";
     }
     if (enrollment?.current_deliverable_id === deliverable.deliverable_id && enrollment?.status !== "completed") {
       return "In progress";
@@ -178,6 +204,9 @@
   function deliverableStatusKind(deliverable, enrollment) {
     if (enrollment?.current_deliverable_id === deliverable.deliverable_id && enrollment?.status !== "completed") {
       return "in-progress";
+    }
+    if (deliverableSolved(deliverable)) {
+      return "passed";
     }
     const kinds = {
       available: "ready",
@@ -255,7 +284,7 @@
     if (!url) {
       return false;
     }
-    window.location.assign(url);
+    window.open(url, "_blank", "noopener,noreferrer");
     return true;
   }
 
@@ -336,7 +365,7 @@
       document.title = "Scaler Labs";
       return;
     }
-    const courseTitle = experience.enrollment.course_title || "Learner LMS";
+    const courseTitle = cleanTitle(experience.enrollment.course_title) || "Learner LMS";
     document.title = `${courseTitle} · Learner LMS`;
   }
 
@@ -876,7 +905,7 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy">
           <p class="eyebrow">Continue where you left off</p>
-          <h1>${escapeHtml(selectedSummary.course_title)}</h1>
+          <h1>${escapeHtml(cleanTitle(selectedSummary.course_title))}</h1>
           <p class="focus-subtitle">Loading your project brief...</p>
         </div>
       `;
@@ -916,7 +945,7 @@
     const workspaceRunning = experience?.workspace_session?.status === "running";
     const workspaceAction = session?.editor_url
       ? `
-        <a class="button primary" href="${escapeHtml(session.editor_url)}">${escapeHtml(launchLabel)}</a>
+        <a class="button primary" href="${escapeHtml(session.editor_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(launchLabel)}</a>
       `
       : `
         <button
@@ -944,9 +973,9 @@
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
-          <p class="course-chip">${escapeHtml(enrollment.course_title)}</p>
+          <p class="course-chip">${escapeHtml(cleanTitle(enrollment.course_title))}</p>
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
-          <h1>${escapeHtml(enrollment.course_title)}</h1>
+          <h1>${escapeHtml(cleanTitle(enrollment.course_title))}</h1>
           <p class="focus-subcopy">${escapeHtml(shortOverview)}</p>
           ${renderSkillTags(parsedSummary.skills)}
 
@@ -1072,8 +1101,11 @@
 
     deliverablesBody.innerHTML = deliverables.map((deliverable) => {
       const latestGrade = deliverable.latest_submission;
+      const latestGradeSolved = latestGrade
+        ? isSolved(latestGrade.passed_tests, latestGrade.total_tests, latestGrade.status)
+        : false;
       const statusLabel = latestGrade
-        ? (latestGrade.status === "passed" ? "Ready" : "Needs work")
+        ? (latestGradeSolved ? "Solved" : "Needs work")
         : "Not reviewed";
       return `
         <div class="deliverable-row">
@@ -1082,7 +1114,7 @@
             <h4>${escapeHtml(deliverable.title)}</h4>
             <p>${escapeHtml(deliverable.objective || "")}</p>
             <div class="deliverable-row-meta">
-              ${renderStatusPill(latestGrade ? (latestGrade.status === "passed" ? "passed" : "blocked") : "neutral", statusLabel)}
+              ${renderStatusPill(latestGrade ? (latestGradeSolved ? "passed" : "blocked") : "neutral", statusLabel)}
               ${latestGrade ? renderInfoPill("Last review", `${latestGrade.passed_tests}/${latestGrade.total_tests}`) : ""}
             </div>
           </div>
@@ -1090,12 +1122,15 @@
       `;
     }).join("");
 
+    const latestSubmissionSolved = latestSubmission
+      ? isSolved(latestSubmission.passed_tests, latestSubmission.total_tests, latestSubmission.status)
+      : false;
     const latestCard = latestSubmission ? `
-      <div class="latest-grade-card ${latestSubmission.status === "passed" ? "passed" : "needs-work"}">
+      <div class="latest-grade-card ${latestSubmissionSolved ? "passed" : "needs-work"}">
         <p class="card-eyebrow">Latest project review</p>
         <div class="latest-grade-row">
           <strong>${escapeHtml(`${latestSubmission.passed_tests}/${latestSubmission.total_tests} tests passed`)}</strong>
-          ${renderStatusPill(latestSubmission.status === "passed" ? "passed" : "blocked", titleCase(latestSubmission.status))}
+          ${renderStatusPill(latestSubmissionSolved ? "passed" : "blocked", latestSubmissionSolved ? "Solved" : titleCase(latestSubmission.status))}
         </div>
         <p class="latest-grade-meta">${escapeHtml(`Pass rate ${percent(latestSubmission.pass_rate)} · Submitted ${formatDate(latestSubmission.created_at)}`)}</p>
       </div>
@@ -1138,7 +1173,7 @@
               // 83% matches the user's "15+/18 turns green" calibration —
               // captures "good solution" without requiring perfection.
               const passRate = gr.total_tests ? (gr.passed_tests / gr.total_tests) : 0;
-              const isPassed = gr.status === "passed";
+              const isPassed = isSolved(gr.passed_tests, gr.total_tests, gr.status);
               const isStrong = !isPassed && passRate >= 0.83;
               const pillKind = isPassed ? "passed" : (isStrong ? "passed" : "blocked");
               const pillLabel = isPassed ? "Ready" : (isStrong ? "Strong" : "Needs work");
@@ -1200,7 +1235,7 @@
               ${renderStatusPill(courseStatusKind(item), courseStatusCopy(item))}
               ${renderInfoPill("Deliverables", `${item.completed_deliverable_count}/${item.deliverable_count}`)}
             </div>
-            <h3>${escapeHtml(item.course_title)}</h3>
+            <h3>${escapeHtml(cleanTitle(item.course_title))}</h3>
             <p>${escapeHtml(summaryLine)}</p>
             <div class="micro-progress"><span style="width: ${progress.positionPercent}%"></span></div>
           </div>
@@ -1254,7 +1289,7 @@
               ${renderInfoPill("Deliverables", String(course.deliverable_count))}
               ${renderInfoPill("Published", formatDate(course.published_at))}
             </div>
-            <h3>${escapeHtml(course.title)}</h3>
+            <h3>${escapeHtml(cleanTitle(course.title))}</h3>
             <p>${escapeHtml(course.summary)}</p>
             <p class="catalog-helper ${isBlocked ? "warning" : ""}">
               ${escapeHtml(isBlocked
