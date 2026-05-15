@@ -265,7 +265,7 @@ scenarios were authored against a broken spec.
 
 ---
 
-## 10. Benchmark data is loaded but dropped before grading [HIGH PRIORITY]
+## 9. Scenarios don't validate the skills the course advertises
 
 **Status:** Backlog. Surfaced while comparing the V3 BM25 starter (80
 lines of `set(question) & set(sentence)`) against the course's
@@ -352,6 +352,346 @@ as authored don't produce one.
   publish.
 - (c) Accept that with abstained-LLM-judges, the scoring will always
   cliff, and document the calibration assumes a live judge.
+
+---
+
+## 12. Visible/hidden corpus passage leakage
+
+**Status:** Backlog. Surfaced 2026-05-15 during a passage-overlap audit
+of the BM25 RAG course (commit `c84ac7c5`).
+
+**Originating direct fix:** None yet — the audit found leakage; this
+item tracks the systematic fix.
+
+**The bug:** The repair scripts pick visible queries and hidden queries
+from disjoint `query_id` sets. But each query's 10-passage pool is
+selected independently by token overlap with the query, sampled from
+the same 57K-passage BeIR/fiqa corpus. Audit shows **2 of 50 visible
+passages also appear in the hidden pool**:
+
+  ```
+  VISIBLE: 5 queries, 50 unique passages
+  HIDDEN:  20 queries, 186 unique passages
+  qid overlap:     0  (clean)
+  passage overlap: 2  (leak — same passages in visible+hidden)
+  ```
+
+That's 4% leakage on visible passages. Marginal for this course, but
+the leakage rate scales with topical similarity between visible and
+hidden queries. A learner who memorizes those passages could over-fit.
+
+**Generalization:** the visible-sample picker should:
+- Track every passage_id allocated to the hidden pool first
+- Exclude those passage_ids from the candidate set when picking
+  distractors for visible queries
+- Assert at the end that ``visible_pids ∩ hidden_pids == ∅`` and
+  fail publish otherwise
+
+Implement in ``benchmark_loader.split_crag_for_visibility`` /
+``split_beir_for_visibility`` so future benchmark-backed courses get
+clean splits by construction.
+
+---
+
+## 13. Visible samples lack scenario-category coverage
+
+**Status:** Backlog. Same audit as #12.
+
+**The bug:** The 18 hidden scenarios span 5 categories — happy_path,
+boundary, malformed_input, out_of_scope, idempotency, adversarial.
+The 5 visible samples are all "general queries" (~happy_path shape).
+A learner can develop and verify retrieval/extraction locally, but
+has no visible example for:
+- abstention on false-premise / out-of-scope questions
+- distractor injection / passage reordering robustness
+- malformed-input validation responses
+
+So learners can't iterate on those skills locally — they have to
+guess what the hidden grader expects, submit, and iterate against
+the scorecard.
+
+**Generalization:** visible-sample picker should include at least one
+example per scenario CATEGORY (out_of_scope, adversarial, etc.) with
+its expected behavior labeled, so the learner has a worked example
+for each skill the grader tests.
+
+---
+
+## 14. Hidden test set is too small relative to available data
+
+**Status:** Backlog. User suggestion 2026-05-15 — "if we have 50
+examples from the repo, maybe share 5 with learner and keep 45
+hidden for private evaluation".
+
+**The bug:** Current ratio is 5 visible : 20 hidden (1:4). User
+suggests 1:9 (5 visible : 45 hidden). Today we use **0.30%** of
+BeIR/fiqa's 6,648 queries — there's plenty of headroom.
+
+**Concerns balancing this:**
+- Each hidden scenario = ~1 haiku call for the LLM judge = ~$0.0017.
+  18 → 45 scenarios = ~$0.08/submit, vs ~$0.03 today. Cost scales.
+- Wall-clock: 18 scenarios takes ~30s today (per submit). 45 would be
+  ~75s. Still fine.
+- Statistical signal: 18 binary trials gives ±12% confidence interval
+  around the true pass rate. 45 trials drops it to ±7%. Materially
+  more accurate calibration.
+
+**Generalization:** target a 1:9 visible/hidden ratio in the
+benchmark-backed authoring path. Make the hidden set size a
+spec-level parameter (``spec.benchmark.hidden_query_count``) with
+a default of 45 and per-category quotas (e.g. 15 happy + 6 boundary
++ 6 malformed + 6 out_of_scope + 3 idempotency + 9 adversarial).
+
+---
+
+## 20. Course teaches re-ranking, not full-stack RAG (chunking + indexing + retrieval done upstream)
+
+**Status:** Backlog. Surfaced 2026-05-15 when the user asked
+"Where did chunking happen? And how was the search-result pool
+selected?".
+
+**Originating direct fix:** None — this is a scope/calibration gap
+in the course design.
+
+**The gap:** The BM25 RAG course markets five RAG skills:
+BM25 retrieval, dense embeddings (FAISS/Pinecone), span extraction,
+citation grounding, false-premise abstention. But the dataset
+pipeline (FiQA-2018 + our repair script) does TWO of the five
+upstream:
+
+  1. **Chunking** — FiQA shipped pre-chunked passages
+     (1 Stack Exchange answer = 1 retrievable unit). The learner
+     never sees raw documents or decides chunk boundaries.
+  2. **First-pass retrieval** — our
+     ``scripts/repair_bm25_course_fiqa.py`` scores the full 57K-passage
+     corpus by token overlap, then ships only the top 10 per query
+     (gold + hard distractors) to the learner. The learner never
+     queries a 1K+ corpus.
+
+So when a learner implements "BM25" against 10 in-request passages,
+they're not actually exercising production BM25 — they're rebuilding
+the index per request over a tiny pool that's already been
+ground-truthed by us. The IDF term in BM25 is computed over 10
+documents instead of 57K; the document-length normalization is
+operating on hand-picked similar-length passages; etc.
+
+Same for FAISS: embedding 10 passages and doing a flat-IP search
+is functionally identical to cosine-sort. The FAISS-specific value
+(IVF / HNSW indexing, billion-scale ANN, persistence) never enters
+the picture.
+
+**What the course actually teaches:** RE-ranking, span extraction,
+citation grounding, abstention. Reasonable scope for an
+intermediate course; just doesn't match the marketed skills.
+
+**Generalization options:**
+
+(a) Rename/reframe the course. Title becomes "RAG re-ranking +
+    extraction + grounding" instead of "BM25 retrieval + FAISS
+    indexing". Drop the misleading skills tags.
+
+(b) Expand scope: ship the FULL 57K-passage corpus to the learner
+    and have them build the index themselves. First-pass retrieval
+    becomes a learner concern. Per-scenario passage pool becomes
+    "all 57K passages — you decide which 10 to consider".
+    Significantly harder course; would need different scoring
+    (recall@K with the learner's own retrieval, not just citation
+    recall on a hand-picked pool).
+
+(c) Add a SECOND deliverable: a chunking + indexing prerequisite
+    where the learner builds a corpus index over a small documents
+    dump, then deliverable 2 (current course) becomes the
+    re-rank/extract layer.
+
+(b) and (c) are the honest-to-the-marketing options. (a) is the
+honest-to-the-current-scope option.
+
+The pipeline pattern this reveals: when spec authoring lists a
+skill, the materializer should mechanically check that the
+scenarios test that skill in a way the dataset structure
+ENABLES. If FiQA ships pre-chunked passages, "chunking" can't
+be a skill in a FiQA-backed course. The spec validator should
+reject `learning_path` entries that the chosen benchmark can't
+support.
+
+---
+
+## 16. Visible samples ship with empty retrieval pools
+
+**Status:** Backlog. Surfaced 2026-05-15 while answering the user's
+question "can a learner run public checks themselves?".
+
+**Originating direct fix:** `scripts/repair_bm25_course_visible_samples.py`
+manually populated `public/examples/sample_queries.json` for the BM25
+RAG course with real BeIR/fiqa passages.
+
+**The bug:** The CRAG visibility splitter
+(`split_crag_for_visibility`) correctly strips `search_results` from
+visible queries (so the corpus isn't leaked to learners). But
+nothing populates a development pool in its place. Every shipped
+visible sample on the BM25 course had `"search_results": []`. A
+learner can't develop retrieval against empty arrays — they'd have
+to download a benchmark themselves to test locally.
+
+This blocks the entire dev iteration loop the LMS advertises (the
+visible checks runner that ships in `public/checks/run_visible_checks.py`
+is functionally a no-op without samples to fire).
+
+**Generalization:** For every benchmark-backed course, the authoring
+stage must populate `public/examples/sample_queries.json` with a
+small (≤5) but COMPLETE per-query retrieval pool — gold passages
+plus a few topical distractors, with the labels marked for learner
+iteration. The visibility splitter should produce this pool by
+construction, not just leave search_results empty.
+
+Cost is trivial: 5 × 10 passages = 50 corpus rows shipped to disk.
+
+---
+
+## 17. Authoring emits citation recall rubric but never the matching precision rubric
+
+**Status:** Backlog. Surfaced 2026-05-15.
+
+**Originating direct fix:** `scripts/repair_bm25_course_citation_precision.py`
+added 11 `subset_match` rubrics to the BM25 course scenarios.
+
+**The bug:** The scenario-authoring stage emits `oracle_set_overlap`
+(citation recall: gold passages must appear in `body.citations`) but
+never the corresponding `subset_match` rubric (citation precision:
+every value in `body.citations` must be a `passage_id` present in
+the request's `search_results`).
+
+Without precision, a learner can pass by returning every passage_id
+in the request (over-citing) — or even by fabricating IDs entirely
+(no check that cited values trace back to the request). The course
+markets "citation grounding" as a skill but the grader doesn't enforce
+the grounding half.
+
+**Generalization:** the scenario-authoring prompt should treat
+recall + precision as a PAIR on any field that carries citations.
+Concretely: when authoring a scenario with `kind: oracle_set_overlap`
+on `body.citations`, the author must also emit
+`kind: subset_match  target: <same>  acceptable_source: <step>.request.body.<corpus_field>`
+with `min_overlap: 1.0`.
+
+Could be enforced by a post-author validator that scans every
+scenario YAML and flags missing precision-pair rubrics before
+publish.
+
+---
+
+## 18. Learner-facing docs drift from the spec contract (README / deliverables.md)
+
+**Status:** Backlog. Surfaced 2026-05-15 when the user asked
+"Does the grader today check for `cited_chunks: list[str]`?"
+
+**Originating direct fix:** `scripts/repair_bm25_course_readme.py`
+rewrote the BM25 course's `README.md` to match the actual contract;
+also patched `deliverables.md` and `publish_snapshot.workspace_seed_files`.
+
+**The bug:** The original course shipped a README and `deliverables.md`
+with a citation contract that didn't match the code. README promised:
+
+  - `cited_chunks: list[str]` (URL-shaped) — code uses
+    `citations: list[str]` (passage_id-shaped)
+  - `page_url` / `page_snippet` / `page_result` fields on search_results
+    — code uses `passage_id` / `text` / `title` / `source`
+  - HTML parsing helpers at `app/utils/html_parsing.py` — file
+    doesn't exist
+
+`deliverables.md` had a stale 5-skill list ("Span extraction by...")
+that didn't match the actual quality bars or the updated course
+summary I patched earlier.
+
+So the learner reading the docs was being lied to. They could try
+to implement the documented contract and fail every scenario because
+the rubrics check different field names.
+
+**Generalization:** all learner-facing docs should be generated from
+the authoritative spec at materialize time, not authored as
+free-form prose that can drift:
+
+- `README.md` — generated from `spec.endpoints` (request/response
+  schemas), `spec.quality_bars` (the rubrics that will fire), and
+  the calibration data (V1 baseline / V5 reference scores).
+- `deliverables.md` — generated from `spec.learning_path` (skill
+  bullets) + the same quality bars.
+- The `cited_chunks` / `page_url` text in the BM25 README looks
+  like it was copy-pasted from a different course's template (or
+  from an early prompt iteration). Either way it's evidence that
+  the authoring loop doesn't validate doc-text against the actual
+  spec before publish.
+
+Concrete next step: add a publish-time validator that asserts
+every field name appearing in a fenced code block in README.md
+also appears in `spec.endpoints[*].request_schema_json` /
+`response_schema_json`. Fail publish on mismatch.
+
+---
+
+## 19. README is missing the step-by-step learner journey
+
+**Status:** Backlog. Surfaced 2026-05-15.
+
+**Originating direct fix:** Manually wrote a "How to solve this
+assignment (step by step)" section into the BM25 course README,
+plus a worked example walking through `sample_queries.json` with a
+concrete sample + a 6-line Python dev loop the learner can copy.
+
+**The bug:** A fresh learner who clicks "Open VS Code workspace"
+gets dropped into a tree with `README.md` / `project_brief.md` /
+`deliverables.md` / `public/` and no instructions on what to read
+first, how to iterate locally, or when they're "done". The
+implicit assumption is that the learner figures out the journey
+themselves; in practice they get stuck at step ~5 (boot service,
+realize sample queries are empty, can't develop).
+
+**Generalization:** authoring should always emit a learner-journey
+section in the README, with at minimum:
+
+1. Read-order for the orientation files
+2. Boot command for the local service
+3. Visible-checks command + how to interpret results
+4. When to submit + what the scorecard means
+5. Green-band threshold (e.g. "≥15/18 turns the panel green")
+
+Plus a worked example of the dev artifact (in this course,
+`sample_queries.json` — what its fields mean + a snippet showing
+how to fire one sample at the local service). This is template-able
+across courses: the artifact path varies, the journey shape doesn't.
+
+The current `outcome_artifact_materializer` writes `README.md`
+from `spec.goal` + endpoint schemas. Extend it to ALSO write the
+journey + walkthrough sections.
+
+---
+
+## 15. Visible samples expose `gold_passage_ids` labels
+
+**Status:** Backlog. Same audit as #12.
+
+**The current behavior:** Each visible sample includes
+``gold_passage_ids`` — explicitly labels which passage in the pool
+contains the answer. This is the same convention real research
+benchmarks use for DEV splits: labeled gold to help iteration.
+
+**The concern:** If the visible samples are used as a "training
+set" and the learner over-fits to the labeled gold (e.g., hard-codes
+"return passage 0" assuming gold is always first), the hidden set's
+unlabeled gold won't match the assumption.
+
+**Two possible directions:**
+(a) Keep gold_passage_ids visible (learner needs a dev signal to
+    iterate); label clearly in the README that "real submission
+    gold is hidden — don't hard-code positions or IDs from these
+    samples".
+(b) Strip gold_passage_ids from visible; provide a `dev_check`
+    endpoint or local utility that scores a learner-submitted answer
+    against unlabeled gold. Closer to a real benchmark dev split.
+
+(a) is faster to ship; (b) is more pedagogically honest. Either way
+the **course brief must explicitly document the visible/hidden
+convention** so a learner doesn't accidentally over-fit.
 
 ---
 
