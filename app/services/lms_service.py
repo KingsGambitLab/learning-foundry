@@ -4,10 +4,18 @@ import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import Any
 from uuid import uuid4
 
 from app.domain.course import CourseRun, CourseRunStatus, CourseRunSummary
-from app.domain.grading import AssignmentGradeReport, GradeStatus, DeliverableGradeReport, ReviewAreaGradeReport
+from app.domain.grading import (
+    AssignmentGradeReport,
+    DeliverableGradeReport,
+    GradeStatus,
+    ReviewAreaGradeReport,
+    TestGradeResult,
+)
+from app.services.scenario_rubrics_base import Verdict
 from app.domain.learner import (
     CreateEnrollmentRequest,
     LaunchWorkspaceRequest,
@@ -65,6 +73,7 @@ class LMSService:
         learner_studio_service: LearnerStudioService | None = None,
         learner_feedback_service: OpenAILearnerFeedbackService | None = None,
         base_dir: str | Path | None = None,
+        outcome_grader: Any | None = None,
     ) -> None:
         self.store = store
         self.workflow_service = workflow_service
@@ -72,6 +81,11 @@ class LMSService:
         self.learner_feedback_service = learner_feedback_service or OpenAILearnerFeedbackService(enabled=False)
         self.base_dir = Path(base_dir or default_learner_workspace_dir())
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        # Outcome-mode submit grader. Lazy-built on first use so we don't
+        # pull in the Docker sandbox adapter at construction time for
+        # legacy-only test fixtures. Tests inject a duck-typed
+        # ``OraclePass`` wired to a fake sandbox + canned HTTP responses.
+        self._outcome_grader: Any | None = outcome_grader
 
     def list_catalog(self) -> PublishedCourseCatalog:
         latest_run_by_family: dict[str, tuple[CourseRun, PublishSnapshot | None]] = {}
@@ -326,6 +340,24 @@ class LMSService:
             request.deliverable_id,
         )
         snapshot = self._require_snapshot(enrollment.publish_snapshot_id)
+
+        # Outcome-mode courses don't carry a TaskAgentServiceSpec — their
+        # grader ships as scenarios + setup + reference impl on disk at
+        # ``workspaces/outcome/<course_run_id>/private/grader/`` and runs
+        # via an OraclePass against the learner's ``public/starter/``.
+        # Route them to ``_submit_outcome_project`` instead of the legacy
+        # ``learner_studio_service.grade_assignment`` path which expects
+        # the spec.
+        course_run = self.store.get_course_run(enrollment.course_run_id)
+        if course_run is not None and (course_run.payload_json or {}).get("outcome_state"):
+            return self._submit_outcome_project(
+                enrollment=enrollment,
+                deliverable=deliverable,
+                course_run=course_run,
+                snapshot=snapshot,
+                workspace_root=workspace_root,
+            )
+
         if snapshot.task_agent_spec is None:
             raise LMSConflictError("The publish snapshot is missing the internal grading spec.")
 
@@ -382,6 +414,218 @@ class LMSService:
         refreshed.updated_at = datetime.now(UTC)
         self.store.save_learner_enrollment(refreshed)
         return self.get_deliverable_experience(refreshed.id, deliverable.deliverable_id)
+
+    # ---------------- Outcome-mode submit ----------------
+
+    def _submit_outcome_project(
+        self,
+        *,
+        enrollment: LearnerEnrollment,
+        deliverable: LearnerDeliverableProgress,
+        course_run: CourseRun,
+        snapshot: PublishSnapshot,
+        workspace_root: Path,
+    ) -> LearnerDeliverableExperience:
+        """Outcome-mode grading: boot the learner's ``public/starter/`` and
+        run the bundled scenarios via :class:`OraclePass`.
+
+        The on-disk grader bundle lives at ``<authoring_workspace>/private/grader/``
+        where ``<authoring_workspace>`` is recorded on the course run's
+        ``payload_json["outcome_state"]["workspace_root"]``. We re-read
+        scenarios + setup_data from there at submit time so any bundle
+        amendments (re-published course) take effect on the next
+        submission without re-seeding learner workspaces.
+        """
+        # Lazy imports — keep legacy LMS init free of OraclePass / scenario
+        # loader dependencies.
+        from app.services.oracle_pass import OraclePass, _load_setup_data
+        from app.services.scenario_loader import load_scenarios_from_dir
+        from app.services.workspace_boot import WorkspaceBootSandboxAdapter
+
+        outcome_state = (course_run.payload_json or {}).get("outcome_state") or {}
+        authoring_root = outcome_state.get("workspace_root")
+        if not authoring_root:
+            raise LMSConflictError(
+                "Outcome-mode course is missing its authoring workspace path; "
+                "the grader bundle cannot be located."
+            )
+        grader_root = Path(authoring_root) / "private" / "grader"
+        scenarios_dir = grader_root / "scenarios"
+        setup_dir = grader_root / "_setup"
+        if not scenarios_dir.exists():
+            raise LMSConflictError(
+                f"Outcome grader bundle missing scenarios directory at {scenarios_dir}."
+            )
+
+        learner_starter = workspace_root / "public" / "starter"
+        if not learner_starter.exists():
+            raise LMSConflictError(
+                "Learner workspace has no public/starter directory to grade."
+            )
+
+        scenarios = load_scenarios_from_dir(scenarios_dir)
+        setup_data_dir = setup_dir if setup_dir.exists() else None
+
+        # Pull capabilities off the spec on disk so the sandbox boot
+        # matches the reference-impl boot (durable_state_required etc.).
+        capabilities = None
+        try:
+            from app.services.course_outcome_models import CourseOutcomeSpec
+            spec_path = Path(authoring_root) / "private" / "course_spec.json"
+            if spec_path.exists():
+                spec_obj = CourseOutcomeSpec.model_validate_json(spec_path.read_text())
+                capabilities = spec_obj.capabilities
+        except Exception:
+            # Capability provisioning is best-effort at submit time; a
+            # missing or unparseable spec falls back to default boot.
+            capabilities = None
+
+        grader = self._outcome_grader or OraclePass(
+            sandbox_runner=WorkspaceBootSandboxAdapter()
+        )
+        try:
+            pass_result = grader.run(
+                scenarios=scenarios,
+                reference_impl_dir=learner_starter,
+                setup_data_dir=setup_data_dir,
+                capabilities=capabilities,
+            )
+        except TypeError:
+            # Fake graders without the ``capabilities`` kwarg.
+            pass_result = grader.run(
+                scenarios=scenarios,
+                reference_impl_dir=learner_starter,
+                setup_data_dir=setup_data_dir,
+            )
+
+        # Aggregate per-scenario verdicts into the legacy GradeReport
+        # shape so the existing experience / scorecard UI rendering
+        # works unchanged.
+        #
+        # Status mapping mirrors ``ScenarioVerdictReport.overall_status``:
+        #   any verdict status="fail"   -> scenario failed
+        #   all verdicts status="pass"  -> scenario passed
+        #   mix of pass + abstain       -> scenario passed (with diagnostic)
+        #
+        # ``abstain`` is treated as not-a-failure on purpose: LLM-judge
+        # rubrics explicitly abstain when no router is configured
+        # (see ``scenario_rubrics_llm.py``) and the design contract is
+        # "judge availability never blocks grading". Failing the learner
+        # for an infra concern would be wrong; we surface the abstain
+        # rationale in diagnostics so they can still see what wasn't
+        # judged.
+        results: list[TestGradeResult] = []
+        for output in pass_result.scenario_outputs:
+            verdict_statuses: list[str] = []
+            diagnostics: list[str] = []
+            if output.aborted and output.abort_reason:
+                diagnostics.append(output.abort_reason)
+            for kind, verdict_dump in output.verdicts:
+                verdict = Verdict.model_validate(verdict_dump)
+                verdict_statuses.append(verdict.status)
+                if verdict.status != "pass" and verdict.rationale:
+                    diagnostics.append(f"{kind} ({verdict.status}): {verdict.rationale}")
+
+            if output.aborted:
+                scenario_passed = False
+            elif not verdict_statuses:
+                scenario_passed = False
+            elif any(s == "fail" for s in verdict_statuses):
+                scenario_passed = False
+            else:
+                # all pass, or mix of pass + abstain
+                scenario_passed = True
+
+            if scenario_passed and "abstain" in verdict_statuses:
+                summary = (
+                    f"Scenario `{output.scenario_id}` passed structural rubrics; "
+                    f"{verdict_statuses.count('abstain')} LLM-judge rubric(s) abstained"
+                )
+            elif scenario_passed:
+                summary = f"Scenario `{output.scenario_id}` passed"
+            else:
+                summary = f"Scenario `{output.scenario_id}` failed"
+
+            results.append(
+                TestGradeResult(
+                    test_id=output.scenario_id,
+                    test_type="scenario",
+                    kind=output.category,
+                    status=GradeStatus.passed if scenario_passed else GradeStatus.failed,
+                    score=1.0 if scenario_passed else 0.0,
+                    summary=summary,
+                    diagnostics=diagnostics,
+                )
+            )
+
+        total = len(results)
+        passed = sum(1 for r in results if r.status == GradeStatus.passed)
+        failed = total - passed
+        pass_rate = (passed / total) if total else 0.0
+        overall = GradeStatus.passed if total > 0 and passed == total else GradeStatus.failed
+
+        deliverable_id = deliverable.deliverable_id
+        grade_report = DeliverableGradeReport(
+            deliverable_id=deliverable_id,
+            total_tests=total,
+            passed_tests=passed,
+            failed_tests=failed,
+            pass_rate=pass_rate,
+            status=overall,
+            results=results,
+        )
+        review_area = ReviewAreaGradeReport(
+            deliverable_id=deliverable_id,
+            title=deliverable.title,
+            objective=deliverable.objective,
+            deliverable_index=deliverable.deliverable_index,
+            grade_report=grade_report,
+            feedback=None,
+        )
+        assignment_report = AssignmentGradeReport(
+            total_tests=total,
+            passed_tests=passed,
+            failed_tests=failed,
+            pass_rate=pass_rate,
+            status=overall,
+            review_areas=[review_area],
+        )
+
+        submission_group_id = f"submission_{uuid4().hex[:12]}"
+        created_at = datetime.now(UTC)
+        submission = LearnerSubmissionRecord(
+            id=f"{submission_group_id}_{deliverable_id.replace('/', '_')}",
+            submission_group_id=submission_group_id,
+            enrollment_id=enrollment.id,
+            deliverable_id=deliverable_id,
+            created_at=created_at,
+            status=overall.value,
+            passed_tests=passed,
+            total_tests=total,
+            pass_rate=pass_rate,
+            grade_report=grade_report,
+            assignment_report=assignment_report,
+        )
+        self.store.save_learner_submission(submission)
+
+        refreshed = enrollment.model_copy(deep=True)
+        for item in refreshed.deliverables:
+            if item.deliverable_id == deliverable_id:
+                item.latest_submission = submission
+                item.status = (
+                    LearnerDeliverableStatus.passed
+                    if overall == GradeStatus.passed
+                    else LearnerDeliverableStatus.available
+                )
+        if overall == GradeStatus.passed:
+            refreshed.current_deliverable_id = None
+            refreshed.status = LearnerEnrollmentStatus.completed
+        else:
+            refreshed.current_deliverable_id = deliverable_id
+            refreshed.status = LearnerEnrollmentStatus.active
+        refreshed.updated_at = datetime.now(UTC)
+        self.store.save_learner_enrollment(refreshed)
+        return self.get_deliverable_experience(refreshed.id, deliverable_id)
 
     def _workspace_root(self, enrollment: LearnerEnrollment) -> Path:
         return self.base_dir / enrollment.id / "workspace"
