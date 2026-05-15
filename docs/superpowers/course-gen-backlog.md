@@ -147,6 +147,76 @@ delete-and-stub step is mechanical.
 
 ---
 
+## 10. Benchmark data is loaded but dropped before grading [HIGH PRIORITY]
+
+**Status:** Backlog. Surfaced 2026-05-15 when the user questioned why
+a 80-line `set(question) & set(sentence)` retriever scores 17/18 on a
+course tagged "BM25 / FAISS / Pinecone" over the Quivr/CRAG benchmark.
+
+**Originating direct fix:** None — this is a pipeline bug, not a
+per-course one.
+
+**The flow that's broken:**
+
+1. ✅ Spec selects `Quivr/CRAG` with `max_queries=20`, `use_split=validation`
+2. ✅ `benchmark_loader.load_crag_benchmark` fetches the real dataset.
+   Proof: `public/examples/sample_queries.json` carries through real
+   CRAG `query_id` UUIDs ("4afd82c6-af57-41b2-9848-f0ec9479efd5"),
+   real questions ("can you tell me what the lodger title was originally?"),
+   and real domain tags (movie / finance / sports).
+3. ✅ `oracle_authoring.py:570` calls `_crag_bundle_to_setup_files(hidden_crag)`
+   which returns 3 `GeneratedSetupFile` entries:
+   `queries.jsonl` / `gold_answers.json` / `search_results_index.json`.
+4. ✅ `oracle_authoring.py:1023` merge: if `benchmark_setup_files`
+   non-empty, those win over LLM-emitted setup files.
+5. ❌ **On disk we see**: `queries.json` (not `.jsonl`),
+   `gold_supports.json` (not `search_results_index.json`),
+   `gold_answers.json` with **scenario IDs** (`happy_valid_q1`) as
+   keys instead of CRAG `query_id` UUIDs. The hidden CRAG bundle
+   never reached `_setup/`.
+6. ❌ Scenarios were authored against an LLM-invented "Acme Corp" /
+   "Globex" world with 1-4 hand-crafted passages each, not against
+   real CRAG queries. All `passage_id`s are fictional (`acme_buyback`,
+   `gb_fy23_margin`, `qt1`, `m1`).
+7. ❌ Grading runs against the toy scenarios. Boolean set intersection
+   clears 15-17/18. The advertised techniques are never required.
+
+**Where the bug likely sits** (need to trace, didn't fully verify):
+
+- `node_grader_repair` calls `author_oracle(spec)` again on each
+  repair iteration. Possibly `benchmark_setup_files` lost on repair?
+- Or `OracleAuthor.author_oracle` returns a result where the merge
+  silently bypassed the benchmark bundle (empty queries from a stale
+  filter, dataset-load failure that didn't raise, etc.).
+- Or `materialize_oracle_bundle` wiping `_setup/` between attempts
+  on a path where the second attempt had `benchmark_setup_files=[]`.
+
+**Reproducer:**
+
+  ```bash
+  ls workspaces/outcome/course_f918e889a33c/private/grader/_setup/
+  # gold_answers.json  gold_supports.json  queries.json
+  # (should be: queries.jsonl, gold_answers.json, search_results_index.json)
+
+  python -c "import json; q = json.load(open('.../queries.json')); print(list(q.keys())[:3])"
+  # ['happy_valid_q1', 'happy_valid_q2', 'happy_valid_q3']
+  # (should be CRAG UUIDs like '4afd82c6-af57-41b2-9848-f0ec9479efd5')
+  ```
+
+**Generalization:** add a post-author check in `node_oracle_authoring`
+that asserts when `spec.benchmark` is set:
+  - `_setup/` contains the loader's expected file names (`queries.jsonl`,
+    `search_results_index.json`)
+  - Top-level keys in setup files match the benchmark's id namespace
+    (UUIDs for CRAG, BeIR ids for BeIR), NOT scenario_ids
+  - Each scenario references `setup_data.search_results_index.<id>`
+    for retrieval, doesn't inline its own `passage_id`s
+
+Fail publish if these don't hold. The current pipeline silently
+permits the LLM to ignore the loaded benchmark.
+
+---
+
 ## 9. Scenarios don't validate the skills the course advertises
 
 **Status:** Backlog. Surfaced while comparing the V3 BM25 starter (80
