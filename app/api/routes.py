@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.api.deps import current_user, require_role
+from app.api.deps import current_user, require_role, verify_enrollment_owner
 from app.domain.auth import Role, User
 
 from app.domain.assets import (
@@ -824,7 +824,7 @@ def create_lms_enrollment(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollment:
     service = _lms_service(request)
     try:
@@ -833,7 +833,7 @@ def get_lms_enrollment(enrollment_id: str, request: Request) -> LearnerEnrollmen
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}/experience", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def get_lms_deliverable_experience(
     enrollment_id: str,
     request: Request,
@@ -848,7 +848,7 @@ def get_lms_deliverable_experience(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/learner-view", response_model=LearnerTestingView, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}/learner-view", response_model=LearnerTestingView, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def get_lms_learner_view(
     enrollment_id: str,
     request: Request,
@@ -863,7 +863,7 @@ def get_lms_learner_view(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackList, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def list_lms_feedback(enrollment_id: str, request: Request) -> LearnerFeedbackList:
     service = _lms_service(request)
     try:
@@ -872,7 +872,7 @@ def list_lms_feedback(enrollment_id: str, request: Request) -> LearnerFeedbackLi
         raise HTTPException(status_code=404, detail=f"Unknown enrollment '{enrollment_id}'.") from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackRecord, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.post("/v1/lms/enrollments/{enrollment_id}/feedback", response_model=LearnerFeedbackRecord, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def create_lms_feedback(
     enrollment_id: str,
     payload: CreateLearnerFeedbackRequest,
@@ -887,7 +887,7 @@ def create_lms_feedback(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/workspace", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.post("/v1/lms/enrollments/{enrollment_id}/workspace", response_model=LearnerEnrollment, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def launch_lms_workspace(
     enrollment_id: str,
     payload: LaunchWorkspaceRequest,
@@ -904,7 +904,7 @@ def launch_lms_workspace(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/files", response_model=LearnerWorkspaceFileList, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/files", response_model=LearnerWorkspaceFileList, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def list_lms_workspace_files(
     enrollment_id: str,
     request: Request,
@@ -919,7 +919,7 @@ def list_lms_workspace_files(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileContent, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.get("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileContent, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def read_lms_workspace_file(
     enrollment_id: str,
     request: Request,
@@ -937,7 +937,7 @@ def read_lms_workspace_file(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.put("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileWriteResult, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.put("/v1/lms/enrollments/{enrollment_id}/workspace/file", response_model=LearnerWorkspaceFileWriteResult, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def write_lms_workspace_file(
     enrollment_id: str,
     payload: WriteLearnerWorkspaceFileRequest,
@@ -952,7 +952,7 @@ def write_lms_workspace_file(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+@router.post("/v1/lms/enrollments/{enrollment_id}/submit", response_model=LearnerDeliverableExperience, tags=["lms"], dependencies=[Depends(require_role(Role.learner)), Depends(verify_enrollment_owner)])
 def submit_lms_deliverable(
     enrollment_id: str,
     payload: SubmitDeliverableRequest,

@@ -37,3 +37,17 @@ def require_role(*roles: Role):
         return user
 
     return dep
+
+
+def verify_enrollment_owner(enrollment_id: str, request: Request, user: User = Depends(current_user)) -> None:
+    """Path-parameter dependency that 404s if the enrollment doesn't exist OR isn't owned by the caller.
+
+    Returning 404 (not 403) on a foreign enrollment is deliberate — it prevents
+    a learner from probing the existence of other learners' enrollment ids.
+    """
+    workflow_service = getattr(request.app.state, "workflow_service", None)
+    if workflow_service is None:
+        raise RuntimeError("workflow_service is not attached to app.state")
+    enrollment = workflow_service.store.get_learner_enrollment(enrollment_id)
+    if enrollment is None or enrollment.learner_id != str(user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown enrollment '{enrollment_id}'.")
