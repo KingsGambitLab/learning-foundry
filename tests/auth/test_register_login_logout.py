@@ -103,8 +103,12 @@ def test_logout_revokes_session(client: TestClient) -> None:
     client.post("/auth/register", json={
         "email": "dave@example.com", "password": "hunter2!!",
     })
-    resp = client.post("/auth/logout")
-    assert resp.status_code == 204
+    # Logout is a form-POST from the nav; it 303-redirects to the login
+    # form and clears the cookie. Don't auto-follow so we can assert the
+    # redirect target.
+    resp = client.post("/auth/logout", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
     # cookie cleared via Set-Cookie; subsequent /auth/me must 401
     me = client.get("/auth/me")
     assert me.status_code == 401

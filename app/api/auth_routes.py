@@ -4,6 +4,7 @@ import ipaddress
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 
 from app.api.deps import current_user
 from app.domain.auth import AuthResponse, LoginRequest, RegisterRequest, Role, User
@@ -86,12 +87,31 @@ def login(payload: LoginRequest, request: Request, response: Response) -> AuthRe
     return AuthResponse(user_id=user.id, role=user.role, display_name=user.display_name)
 
 
-@router.post("/logout", status_code=204)
-def logout(request: Request, response: Response) -> None:
+@router.post("/logout")
+def logout(request: Request) -> RedirectResponse:
+    """Revoke the session and bounce back to the login form.
+
+    The nav "Log out" is a plain HTML form POST. Returning 204 left the
+    browser sitting on an empty response (looked like logout did
+    nothing). A 303 redirect to /login navigates the browser away AND
+    carries the cookie-clear, so the user visibly lands on the sign-in
+    page logged out. The Set-Cookie deletion uses the same attributes
+    the cookie was set with (path=/, samesite=lax, matching Secure) so
+    every browser actually drops it.
+    """
     token = request.cookies.get(COOKIE_NAME)
     if token:
         _session_service(request).revoke(token)
-    response.delete_cookie(COOKIE_NAME)
+    redirect = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    secure = os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true"
+    redirect.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        samesite="lax",
+        secure=secure,
+        httponly=True,
+    )
+    return redirect
 
 
 @router.get("/me", response_model=User)
