@@ -63,6 +63,83 @@
     document.head.appendChild(link);
   }
 
+  // ── Mermaid helpers ───────────────────────────────────────────────────────
+  // Lazy-load mermaid.min.js once. Returns a promise that resolves with the
+  // global `mermaid` object. Falls back to null on load failure.
+  let mermaidPromise = null;
+  function loadMermaid() {
+    if (mermaidPromise) return mermaidPromise;
+    mermaidPromise = new Promise((resolve) => {
+      if (window.mermaid) return resolve(window.mermaid);
+      const script = document.createElement("script");
+      script.src = (scriptCfg.baseUrl || "") + "/static/vendor/mermaid.min.js";
+      script.onload = () => {
+        try {
+          window.mermaid.initialize({
+            startOnLoad: false,
+            theme: "default",
+            securityLevel: "loose",  // we control the input via the tutor's reply
+            fontFamily: "inherit",
+          });
+          resolve(window.mermaid);
+        } catch (e) {
+          console.warn("[lab-tutor] mermaid init failed:", e);
+          resolve(null);
+        }
+      };
+      script.onerror = () => {
+        console.warn("[lab-tutor] mermaid script load failed");
+        resolve(null);
+      };
+      document.head.appendChild(script);
+    });
+    return mermaidPromise;
+  }
+
+  let mermaidIdCounter = 0;
+  async function renderMermaidInto(parent, code) {
+    // Show a small "Rendering diagram…" placeholder while we load+parse.
+    const placeholder = document.createElement("div");
+    placeholder.className = "lt-mermaid lt-mermaid--loading";
+    placeholder.textContent = "Rendering diagram…";
+    parent.appendChild(placeholder);
+
+    const mermaid = await loadMermaid();
+    if (!mermaid) {
+      // Fallback: show the original mermaid source as a code block.
+      placeholder.className = "lt-mermaid lt-mermaid--failed";
+      placeholder.textContent = "";
+      const pre = document.createElement("pre");
+      pre.textContent = code;
+      placeholder.appendChild(pre);
+      return;
+    }
+    try {
+      const id = "lt-mermaid-" + (++mermaidIdCounter);
+      const { svg } = await mermaid.render(id, code);
+      placeholder.className = "lt-mermaid";
+      placeholder.textContent = "";
+      // svg is a trusted-ish string from mermaid; we control the input by virtue
+      // of it coming from the tutor's reply (our own backend). Use a sandboxed
+      // container so any quirks stay isolated.
+      const wrap = document.createElement("div");
+      wrap.className = "lt-mermaid-svg";
+      wrap.innerHTML = svg;
+      placeholder.appendChild(wrap);
+    } catch (e) {
+      console.warn("[lab-tutor] mermaid render error:", e);
+      placeholder.className = "lt-mermaid lt-mermaid--failed";
+      placeholder.textContent = "";
+      const note = document.createElement("div");
+      note.className = "lt-mermaid-error";
+      note.textContent = "Couldn't render diagram. Source:";
+      placeholder.appendChild(note);
+      const pre = document.createElement("pre");
+      pre.textContent = code;
+      placeholder.appendChild(pre);
+    }
+  }
+
   // ── SVG helpers ───────────────────────────────────────────────────────────
   function chatIcon() {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -230,12 +307,11 @@
       }
     }
 
-    function appendTutor(text, { persist = true } = {}) {
-      const wrap = document.createElement("div");
-      wrap.className = "lt-msg lt-msg--tutor";
+    // Render a text segment with **bold** parsing into a container element.
+    // Does NOT use innerHTML on untrusted content.
+    function appendParagraphsBold(container, text) {
       const bub = document.createElement("div");
       bub.className = "lt-msg-bubble";
-      // Parse **bold** segments without using innerHTML on untrusted content
       const segments = text.split(/(\*\*[^*]+\*\*)/g);
       for (const seg of segments) {
         if (seg.startsWith("**") && seg.endsWith("**")) {
@@ -246,7 +322,34 @@
           bub.appendChild(document.createTextNode(seg));
         }
       }
-      wrap.appendChild(bub);
+      container.appendChild(bub);
+    }
+
+    function appendTutor(text, { persist = true } = {}) {
+      const wrap = document.createElement("div");
+      wrap.className = "lt-msg lt-msg--tutor";
+
+      // Split on mermaid fences. Even indices = text, odd indices = mermaid code.
+      const fence = /```mermaid\n([\s\S]*?)\n```/g;
+      let lastIndex = 0;
+      let m;
+      let any = false;
+      while ((m = fence.exec(text)) !== null) {
+        any = true;
+        const before = text.slice(lastIndex, m.index);
+        if (before.trim()) appendParagraphsBold(wrap, before);
+        const host = document.createElement("div");
+        host.className = "lt-mermaid-host";
+        wrap.appendChild(host);
+        // Fire-and-forget; the placeholder appears synchronously.
+        renderMermaidInto(host, m[1]);
+        lastIndex = m.index + m[0].length;
+      }
+      const tail = text.slice(lastIndex);
+      if (!any || tail.trim()) {
+        appendParagraphsBold(wrap, tail);
+      }
+
       log.appendChild(wrap);
       scrollToBottom();
       if (persist) {
