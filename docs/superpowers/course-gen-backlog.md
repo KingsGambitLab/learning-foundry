@@ -444,6 +444,156 @@ a default of 45 and per-category quotas (e.g. 15 happy + 6 boundary
 
 ---
 
+## 16. Visible samples ship with empty retrieval pools
+
+**Status:** Backlog. Surfaced 2026-05-15 while answering the user's
+question "can a learner run public checks themselves?".
+
+**Originating direct fix:** `scripts/repair_bm25_course_visible_samples.py`
+manually populated `public/examples/sample_queries.json` for the BM25
+RAG course with real BeIR/fiqa passages.
+
+**The bug:** The CRAG visibility splitter
+(`split_crag_for_visibility`) correctly strips `search_results` from
+visible queries (so the corpus isn't leaked to learners). But
+nothing populates a development pool in its place. Every shipped
+visible sample on the BM25 course had `"search_results": []`. A
+learner can't develop retrieval against empty arrays — they'd have
+to download a benchmark themselves to test locally.
+
+This blocks the entire dev iteration loop the LMS advertises (the
+visible checks runner that ships in `public/checks/run_visible_checks.py`
+is functionally a no-op without samples to fire).
+
+**Generalization:** For every benchmark-backed course, the authoring
+stage must populate `public/examples/sample_queries.json` with a
+small (≤5) but COMPLETE per-query retrieval pool — gold passages
+plus a few topical distractors, with the labels marked for learner
+iteration. The visibility splitter should produce this pool by
+construction, not just leave search_results empty.
+
+Cost is trivial: 5 × 10 passages = 50 corpus rows shipped to disk.
+
+---
+
+## 17. Authoring emits citation recall rubric but never the matching precision rubric
+
+**Status:** Backlog. Surfaced 2026-05-15.
+
+**Originating direct fix:** `scripts/repair_bm25_course_citation_precision.py`
+added 11 `subset_match` rubrics to the BM25 course scenarios.
+
+**The bug:** The scenario-authoring stage emits `oracle_set_overlap`
+(citation recall: gold passages must appear in `body.citations`) but
+never the corresponding `subset_match` rubric (citation precision:
+every value in `body.citations` must be a `passage_id` present in
+the request's `search_results`).
+
+Without precision, a learner can pass by returning every passage_id
+in the request (over-citing) — or even by fabricating IDs entirely
+(no check that cited values trace back to the request). The course
+markets "citation grounding" as a skill but the grader doesn't enforce
+the grounding half.
+
+**Generalization:** the scenario-authoring prompt should treat
+recall + precision as a PAIR on any field that carries citations.
+Concretely: when authoring a scenario with `kind: oracle_set_overlap`
+on `body.citations`, the author must also emit
+`kind: subset_match  target: <same>  acceptable_source: <step>.request.body.<corpus_field>`
+with `min_overlap: 1.0`.
+
+Could be enforced by a post-author validator that scans every
+scenario YAML and flags missing precision-pair rubrics before
+publish.
+
+---
+
+## 18. Learner-facing docs drift from the spec contract (README / deliverables.md)
+
+**Status:** Backlog. Surfaced 2026-05-15 when the user asked
+"Does the grader today check for `cited_chunks: list[str]`?"
+
+**Originating direct fix:** `scripts/repair_bm25_course_readme.py`
+rewrote the BM25 course's `README.md` to match the actual contract;
+also patched `deliverables.md` and `publish_snapshot.workspace_seed_files`.
+
+**The bug:** The original course shipped a README and `deliverables.md`
+with a citation contract that didn't match the code. README promised:
+
+  - `cited_chunks: list[str]` (URL-shaped) — code uses
+    `citations: list[str]` (passage_id-shaped)
+  - `page_url` / `page_snippet` / `page_result` fields on search_results
+    — code uses `passage_id` / `text` / `title` / `source`
+  - HTML parsing helpers at `app/utils/html_parsing.py` — file
+    doesn't exist
+
+`deliverables.md` had a stale 5-skill list ("Span extraction by...")
+that didn't match the actual quality bars or the updated course
+summary I patched earlier.
+
+So the learner reading the docs was being lied to. They could try
+to implement the documented contract and fail every scenario because
+the rubrics check different field names.
+
+**Generalization:** all learner-facing docs should be generated from
+the authoritative spec at materialize time, not authored as
+free-form prose that can drift:
+
+- `README.md` — generated from `spec.endpoints` (request/response
+  schemas), `spec.quality_bars` (the rubrics that will fire), and
+  the calibration data (V1 baseline / V5 reference scores).
+- `deliverables.md` — generated from `spec.learning_path` (skill
+  bullets) + the same quality bars.
+- The `cited_chunks` / `page_url` text in the BM25 README looks
+  like it was copy-pasted from a different course's template (or
+  from an early prompt iteration). Either way it's evidence that
+  the authoring loop doesn't validate doc-text against the actual
+  spec before publish.
+
+Concrete next step: add a publish-time validator that asserts
+every field name appearing in a fenced code block in README.md
+also appears in `spec.endpoints[*].request_schema_json` /
+`response_schema_json`. Fail publish on mismatch.
+
+---
+
+## 19. README is missing the step-by-step learner journey
+
+**Status:** Backlog. Surfaced 2026-05-15.
+
+**Originating direct fix:** Manually wrote a "How to solve this
+assignment (step by step)" section into the BM25 course README,
+plus a worked example walking through `sample_queries.json` with a
+concrete sample + a 6-line Python dev loop the learner can copy.
+
+**The bug:** A fresh learner who clicks "Open VS Code workspace"
+gets dropped into a tree with `README.md` / `project_brief.md` /
+`deliverables.md` / `public/` and no instructions on what to read
+first, how to iterate locally, or when they're "done". The
+implicit assumption is that the learner figures out the journey
+themselves; in practice they get stuck at step ~5 (boot service,
+realize sample queries are empty, can't develop).
+
+**Generalization:** authoring should always emit a learner-journey
+section in the README, with at minimum:
+
+1. Read-order for the orientation files
+2. Boot command for the local service
+3. Visible-checks command + how to interpret results
+4. When to submit + what the scorecard means
+5. Green-band threshold (e.g. "≥15/18 turns the panel green")
+
+Plus a worked example of the dev artifact (in this course,
+`sample_queries.json` — what its fields mean + a snippet showing
+how to fire one sample at the local service). This is template-able
+across courses: the artifact path varies, the journey shape doesn't.
+
+The current `outcome_artifact_materializer` writes `README.md`
+from `spec.goal` + endpoint schemas. Extend it to ALSO write the
+journey + walkthrough sections.
+
+---
+
 ## 15. Visible samples expose `gold_passage_ids` labels
 
 **Status:** Backlog. Same audit as #12.
