@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api.auth_routes import router as auth_router
-from app.api.deps import current_user, current_user_optional
+from app.api.deps import current_user, current_user_optional, require_role
 from app.api.routes import router
 from app.domain.auth import Role, User
 from app.domain.course import CourseRunStatus
@@ -175,7 +175,16 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templat
 
 
 @app.get("/create-course", tags=["system"], include_in_schema=False)
-def create_course(request: Request) -> HTMLResponse:
+def create_course(
+    request: Request,
+    _user: User = Depends(require_role(Role.creator)),
+) -> HTMLResponse:
+    """Creator-only dashboard.
+
+    P0-C fix (codex pass 7): previously anonymous GET returned 200 and
+    serialized internal config (`env_file`, generation status) into the
+    HTML. Now requires an authenticated creator.
+    """
     dashboard_state = build_dashboard_state(
         generation_status=request.app.state.course_generation_service.status(),
     )
@@ -183,7 +192,12 @@ def create_course(request: Request) -> HTMLResponse:
 
 
 @app.get("/draft-timeline", tags=["system"], include_in_schema=False)
-def draft_timeline(request: Request, draft: str | None = None) -> HTMLResponse:
+def draft_timeline(
+    request: Request,
+    draft: str | None = None,
+    _user: User = Depends(require_role(Role.creator)),
+) -> HTMLResponse:
+    """Creator-only draft timeline (P0-C fix: was anonymous)."""
     return HTMLResponse(
         render_draft_timeline_page(
             build_draft_timeline_state(draft_id=draft)

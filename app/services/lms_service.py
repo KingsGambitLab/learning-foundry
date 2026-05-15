@@ -594,6 +594,12 @@ class LMSService:
         submissions = self.store.list_learner_submissions(enrollment.id)
         sessions = self.store.list_learner_workspace_sessions(enrollment.id)
         latest_session = sessions[0] if sessions else None
+        # P0-A: redact server-internal workspace path/container fields
+        # before they reach a learner client. `editor_url` and `status`
+        # remain (the JS frontend needs both to render the launch UI).
+        latest_session_redacted = (
+            latest_session.redact_for_learner() if latest_session is not None else None
+        )
         latest_submissions: dict[str, LearnerSubmissionRecord] = {}
         for submission in submissions:
             current = latest_submissions.get(submission.deliverable_id)
@@ -611,7 +617,7 @@ class LMSService:
                     and latest_submission.grade_report.status == GradeStatus.passed
                     else LearnerDeliverableStatus.available
                 )
-            deliverable.workspace_session = latest_session
+            deliverable.workspace_session = latest_session_redacted
         if all(deliverable.status == LearnerDeliverableStatus.passed for deliverable in refreshed.deliverables):
             refreshed.status = LearnerEnrollmentStatus.completed
             refreshed.current_deliverable_id = None
@@ -628,7 +634,10 @@ class LMSService:
         snapshot = self._require_snapshot(enrollment.publish_snapshot_id)
         self._ensure_workspace_seeded(enrollment, snapshot)
         latest_session = self.store.list_learner_workspace_sessions(enrollment.id)
-        workspace_session = latest_session[0] if latest_session else None
+        # P0-A: redact server-internal fields before returning to learners.
+        workspace_session = (
+            latest_session[0].redact_for_learner() if latest_session else None
+        )
         project_brief_markdown = self._project_brief_markdown(snapshot)
         return LearnerDeliverableExperience(
             enrollment=LearnerEnrollmentSummary.from_enrollment(enrollment),
@@ -715,7 +724,9 @@ class LMSService:
         return LearnerWorkspaceFileList(
             enrollment_id=enrollment.id,
             deliverable_id=deliverable.deliverable_id,
-            workspace_root=str(root),
+            # workspace_root left empty — internal server path, not for
+            # learner clients (P0-A: workspace internals leak).
+            workspace_root="",
             files=files,
         )
 
@@ -733,7 +744,7 @@ class LMSService:
         return LearnerWorkspaceFileContent(
             enrollment_id=enrollment.id,
             deliverable_id=deliverable.deliverable_id,
-            workspace_root=str(root),
+            workspace_root="",
             relative_path=target.relative_to(root).as_posix(),
             media_type=self._guess_media_type(target),
             content=target.read_text(encoding="utf-8"),
@@ -754,7 +765,7 @@ class LMSService:
         return LearnerWorkspaceFileWriteResult(
             enrollment_id=enrollment.id,
             deliverable_id=deliverable.deliverable_id,
-            workspace_root=str(root),
+            workspace_root="",
             relative_path=target.relative_to(root).as_posix(),
             media_type=self._guess_media_type(target),
             size_bytes=target.stat().st_size,
@@ -879,8 +890,19 @@ class LMSService:
         scenarios_dir = grader_root / "scenarios"
         setup_dir = grader_root / "_setup"
         if not scenarios_dir.exists():
+            # P0-B: do NOT leak the authoring filesystem path in the
+            # learner-facing 409 detail. Log it server-side so operators
+            # can still trace the issue.
+            import logging
+            logging.getLogger("course_gen.lms.submit").error(
+                "outcome_submit.missing_scenarios_dir",
+                extra={
+                    "course_run_id": course_run.id,
+                    "scenarios_dir": str(scenarios_dir),
+                },
+            )
             raise LMSConflictError(
-                f"Outcome grader bundle missing scenarios directory at {scenarios_dir}."
+                "Grader bundle for this course is unavailable. Contact the course author."
             )
 
         # P0 #4 audit: the grader bundle today lives at the mutable

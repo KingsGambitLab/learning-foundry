@@ -79,6 +79,13 @@ class PublishedCourseCatalog(BaseModel):
 
 
 class LearnerWorkspaceSession(BaseModel):
+    """Workspace session record.
+
+    Internal fields (server-side authoring/runtime paths and ports) are
+    typed optional so the API layer can null them out before returning
+    to a learner client. Only `editor_url` is meant to be learner-facing.
+    """
+
     id: str
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
@@ -86,12 +93,28 @@ class LearnerWorkspaceSession(BaseModel):
     created_at: datetime
     updated_at: datetime
     status: LearnerWorkspaceSessionStatus
-    workspace_root: str
+    workspace_root: str | None = None
     container_name: str | None = None
     host_port: int | None = None
     editor_url: str | None = None
     image_name: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+    def redact_for_learner(self) -> "LearnerWorkspaceSession":
+        """Return a copy without server-internal paths/ports.
+
+        Learners only need `editor_url` + `status` to render the editor
+        launch button; the workspace_root / container_name / host_port /
+        image_name fields are operator-only.
+        """
+        return self.model_copy(
+            update={
+                "workspace_root": None,
+                "container_name": None,
+                "host_port": None,
+                "image_name": None,
+            }
+        )
 
 
 class LearnerSubmissionRecord(BaseModel):
@@ -231,14 +254,17 @@ class LearnerWorkspaceFileSummary(BaseModel):
 class LearnerWorkspaceFileList(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    # `workspace_root` is the absolute server path. It is internal —
+    # learners get an empty string. Operators/creators see the real path
+    # via creator-side audit tools, not this learner-facing API.
+    workspace_root: str = ""
     files: list[LearnerWorkspaceFileSummary] = Field(default_factory=list)
 
 
 class LearnerWorkspaceFileContent(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    workspace_root: str = ""
     relative_path: str
     media_type: str
     content: str
@@ -253,7 +279,7 @@ class WriteLearnerWorkspaceFileRequest(BaseModel):
 class LearnerWorkspaceFileWriteResult(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    workspace_root: str = ""
     relative_path: str
     media_type: str
     size_bytes: int = Field(ge=0)
