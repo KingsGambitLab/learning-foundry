@@ -118,8 +118,8 @@ list and render whatever prose the UI wants.
 
 ## 7. Starter authoring is producing over-complete starters
 
-**Status:** Identified during current session. Backlog item — direct fix
-in progress for the BM25 course (calibrating skeleton → partial → good).
+**Status:** Backlog. Direct fix shipped for the BM25 course as 3 demo
+states (skeleton / partial / good).
 
 **Originating direct fix:** The BM25 course's authored starter at
 `workspaces/outcome/course_f918e889a33c/public/starter/app.py` is 220 lines
@@ -144,6 +144,45 @@ near a full reference implementation. Either:
 
 (c) is the cleanest because the upstream tests still pin the contract; the
 delete-and-stub step is mechanical.
+
+---
+
+## 8. Scenario sets have binary difficulty cliffs
+
+**Status:** Backlog. Surfaced while calibrating the BM25 RAG starter.
+
+**Originating direct fix:** None — couldn't make this course's scenarios
+hit the user's intended "partial 5-10/18" band. The course has three
+score levels:
+
+- 3/18 — skeleton returns wrong shape; only Pydantic-validated malformed
+  inputs pass
+- 15/18 — any reasonable retrieval (passage-level overlap is enough); the
+  LLM-judge rubrics abstain in the no-router env, which inflates the
+  middle of the curve
+- 18/18 — retrieval + abstention
+
+There's no natural 5-10 band because:
+- `oracle_set_overlap` uses `min_recall=0.5` — tolerates over-citation
+  (citing all passages always passes)
+- `llm_judge_semantic_eq` abstains without an LLM router, so wrong
+  answers don't fail
+- `schema_match` is binary (shape OR not), no partial credit
+
+The user expected a smooth learner-progression gradient. The scenarios
+as authored don't produce one.
+
+**Generalization options:**
+- (a) Authoring guideline: scenarios should be authored at multiple
+  precision tiers. Some rubrics tight (literal_match), some loose
+  (recall threshold). Tighten 2-3 scenarios per category so partial
+  implementations land mid-band.
+- (b) Spec stage emits a target difficulty distribution (e.g., 30%
+  scenarios passable with response-shape only, 40% need correct
+  retrieval, 30% need full feature). Authoring verifies this before
+  publish.
+- (c) Accept that with abstained-LLM-judges, the scoring will always
+  cliff, and document the calibration assumes a live judge.
 
 ---
 
