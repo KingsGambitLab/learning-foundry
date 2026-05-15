@@ -631,6 +631,55 @@
     `;
   }
 
+  function renderTestResults(gradeReport) {
+    // Render per-test results from a DeliverableGradeReport. Used by the
+    // outcome-mode (scenario-driven) grader where there's no separate
+    // ``feedback`` block — the actionable signal lives in each
+    // TestGradeResult's ``summary`` + ``diagnostics``. Failed tests
+    // open by default so the learner sees them immediately; passed
+    // tests stay collapsed to keep the scorecard readable when most
+    // scenarios are green.
+    const results = Array.isArray(gradeReport?.results) ? gradeReport.results : [];
+    if (!results.length) return "";
+    const failed = results.filter((r) => r.status !== "passed");
+    const passed = results.filter((r) => r.status === "passed");
+
+    const renderOne = (result) => {
+      const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
+      const statusKind = result.status === "passed" ? "passed" : "blocked";
+      return `
+        <li class="test-result test-result-${escapeHtml(statusKind)}">
+          <div class="test-result-head">
+            ${renderStatusPill(statusKind, titleCase(result.status))}
+            <strong>${escapeHtml(result.test_id)}</strong>
+            ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
+          </div>
+          ${result.summary ? `<p class="test-result-summary">${escapeHtml(result.summary)}</p>` : ""}
+          ${diagnostics.length ? `
+            <ul class="test-result-diagnostics">
+              ${diagnostics.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
+            </ul>
+          ` : ""}
+        </li>
+      `;
+    };
+
+    return `
+      ${failed.length ? `
+        <details class="review-guidance" open>
+          <summary>${escapeHtml(`${failed.length} check${failed.length === 1 ? "" : "s"} need attention`)}</summary>
+          <ul class="test-result-list">${failed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
+      ${passed.length ? `
+        <details class="review-guidance">
+          <summary>${escapeHtml(`${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
+          <ul class="test-result-list">${passed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
+    `;
+  }
+
   function renderWorkspaceStatusInline(experience) {
     const session = experience?.workspace_session;
     if (!experience) {
@@ -922,6 +971,7 @@
                   ${renderInfoPill("Checks", `${reviewArea.grade_report.passed_tests}/${reviewArea.grade_report.total_tests}`)}
                 </div>
                 ${reviewArea.feedback && reviewArea.grade_report.status !== "passed" ? renderLearnerGuidance(reviewArea.feedback) : ""}
+                ${renderTestResults(reviewArea.grade_report)}
               </div>
             `).join("")}
           </div>
