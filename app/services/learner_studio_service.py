@@ -126,8 +126,14 @@ class LearnerStudioService:
             "-d",
             "--name",
             container_name,
+            # Bind to `self.host` (default 127.0.0.1) on the host so the
+            # code-server port is never world-reachable from the EC2
+            # public interface. Without this prefix, docker publishes to
+            # 0.0.0.0 and `code-server --auth none` would be unauth'd
+            # over the internet. The app-level reverse proxy fronts the
+            # editor on staging/prod.
             "-p",
-            f"{host_port}:8080",
+            f"{self.host}:{host_port}:8080",
             "-v",
             f"{workspace_path}:/workspace",
             "-w",
@@ -281,8 +287,11 @@ class LearnerStudioService:
                     "-d",
                     "--name",
                     container_name,
+                    # Bind grading sandbox to loopback only (see editor
+                    # launch above for rationale — never publish 0.0.0.0
+                    # on a public EC2 interface).
                     "-p",
-                    f"{host_port}:8000",
+                    f"{self.host}:{host_port}:8000",
                     "-v",
                     f"{runtime_workspace}:/workspace",
                     "-w",

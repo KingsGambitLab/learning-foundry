@@ -297,8 +297,11 @@ def _start_container(
         "run",
         "-d",
         "--rm",
+        # Bind to loopback only. Workspace-boot sandboxes are
+        # short-lived test containers; even on staging EC2 they must
+        # never be reachable from the public interface.
         "-p",
-        f"{host_port}:{container_port}",
+        f"{HOST}:{host_port}:{container_port}",
     ]
     if data_volume_host_dir is not None:
         data_volume_host_dir.mkdir(parents=True, exist_ok=True)
