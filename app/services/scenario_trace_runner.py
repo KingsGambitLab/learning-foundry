@@ -72,7 +72,14 @@ class InterpolationError(Exception):
     """
 
 
-_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
+# Accept both ``${X.Y}`` (canonical) and ``{X.Y}`` (FastAPI / OpenAPI path-
+# param convention the scenario-author LLM keeps reaching for). The
+# bare ``{...}`` form is admitted only when the contents look like a
+# dotted expression (contains a dot) to avoid mis-firing on literal
+# braces in JSON / regex / curly-set URL syntax.
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\$\{(?P<dollar>[^}]+)\}|\{(?P<bare>[A-Za-z_][\w.\[\]]*\.[\w.\[\]]+)\}"
+)
 _CAPTURE_PARTS = frozenset({"status", "headers", "body"})
 
 
@@ -176,7 +183,13 @@ def interpolate(
     """
 
     def _sub(match: re.Match[str]) -> str:
-        expression = match.group(1).strip()
+        # The pattern has two alternatives — ``${...}`` (named group
+        # ``dollar``) and bare ``{X.Y}`` (named group ``bare``). Whichever
+        # alternative matched is non-None; the other is None.
+        raw = match.group("dollar")
+        if raw is None:
+            raw = match.group("bare")
+        expression = raw.strip()
         return str(
             _resolve_one_placeholder(
                 expression,
@@ -215,8 +228,11 @@ def _interpolate_body(
         stripped = body.strip()
         match = _PLACEHOLDER_PATTERN.fullmatch(stripped)
         if match is not None:
+            raw = match.group("dollar")
+            if raw is None:
+                raw = match.group("bare")
             return _resolve_one_placeholder(
-                match.group(1).strip(),
+                raw.strip(),
                 captures,
                 setup_data=setup_data,
                 course_meta=course_meta,
