@@ -674,13 +674,17 @@
     //   <overview paragraph(s)>
     //
     //   Skills you'll learn:
-    //   - skill bullet 1
-    //   - skill bullet 2
+    //   - skill bullet 1       OR    1. skill bullet 1
+    //   - skill bullet 2              2. skill bullet 2
     //   ...
     //
-    // Split on the skills header so we can show the overview as prose
-    // and the skills as visual chips. If no header is found we treat
-    // the whole text as the overview and return no skills.
+    //   <optional trailing paragraph(s)>
+    //
+    // We pull skills from the bullet block ONLY — lines that don't
+    // start with a bullet marker (``-``/``*``/``•``) or a numeric
+    // ordinal (``1.``/``2.``) are skipped, so post-bullet paragraphs
+    // like "Graded against 18 hidden scenarios..." don't pollute the
+    // skill list.
     if (!text) return { overview: "", skills: [] };
     const trimmed = String(text).trim();
     const headerMatch = trimmed.match(/^([\s\S]*?)\n+\s*skills you('?ll)? learn:?\s*\n([\s\S]*)$/i);
@@ -689,10 +693,20 @@
     }
     const overview = headerMatch[1].trim();
     const skillsBlock = headerMatch[3] || "";
-    const skills = skillsBlock
-      .split(/\n+/)
-      .map((line) => line.replace(/^\s*[-*•]\s+/, "").trim())
-      .filter(Boolean);
+
+    const bulletPattern = /^\s*(?:[-*•]|\d+[.)])\s+/;
+    const skills = [];
+    for (const rawLine of skillsBlock.split(/\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (!bulletPattern.test(line)) {
+        // First non-bullet line ends the skills block — anything after
+        // is descriptive trailing prose, not a skill.
+        break;
+      }
+      const cleaned = line.replace(bulletPattern, "").trim();
+      if (cleaned) skills.push(cleaned);
+    }
     return { overview, skills };
   }
 
@@ -707,21 +721,32 @@
   }
 
   function skillTagLabel(skill) {
-    // The bullet sentence is long ("Semantic versioning and lifecycle
-    // management for prompt artifacts, including ..."). Show just the
-    // headline noun phrase before the first connector word so the tag
-    // stays compact; the full sentence is preserved in the hover title.
+    // The bullet sentence is long. Show just the headline noun phrase
+    // so the tag stays compact; the full sentence is preserved in the
+    // hover title.
     if (!skill) return "";
     const cleaned = skill.trim();
-    // Cut at the first connector word — these reliably mark the end of
-    // the skill's headline noun phrase and the start of its explanation.
+    // Strategy 1 (most reliable): courses written as
+    //   ``Name - Description`` / ``Name — Description`` / ``Name: Description``
+    // — split on the FIRST separator and use the left as the label.
+    // Cap the label at 80 chars so a hyphen buried deep in prose can't
+    // sneak through; that's enough room for any reasonable skill name
+    // (longest seen in published courses: ~60 chars).
+    const sepMatch = cleaned.match(/^(.{1,80}?)\s+[-–—:]\s+/);
+    if (sepMatch && sepMatch[1]) {
+      return sepMatch[1].trim();
+    }
+    // Strategy 2 (no explicit separator): cut at the first connector
+    // word — these mark the end of the skill's headline noun phrase
+    // and the start of its explanation. The character class includes
+    // ``.`` so prefixes like ``Foo (Okapi)`` don't break the regex.
     const connectorMatch = cleaned.match(
-      /^([\w\s\-/'&]+?)\s+(?:for|using|across|with|so|that|including|which|where|based|of|to|via|by|when)\b/i
+      /^([\w\s\-/().'&]+?)\s+(?:for|using|across|with|so|that|including|which|where|based|of|to|via|by|when)\b/i
     );
     if (connectorMatch && connectorMatch[1]) {
       return connectorMatch[1].trim();
     }
-    // No connector found — fall back to the first 4 words.
+    // Strategy 3 (fallback): first 4 words.
     const words = cleaned.split(/\s+/);
     if (words.length <= 4) return cleaned;
     return words.slice(0, 4).join(" ");
