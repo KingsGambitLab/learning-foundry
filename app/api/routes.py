@@ -796,7 +796,12 @@ def read_workflow_bundle_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/v1/lms/catalog", response_model=PublishedCourseCatalog, tags=["lms"], dependencies=[Depends(require_role(Role.learner))])
+# The published-course catalog is not learner-exclusive — creators browse
+# it too (e.g. to preview what learners see). Gate on authentication only,
+# not role. Previously this required Role.learner, which 403'd logged-in
+# creators and produced the UI's "couldn't refresh the published course
+# catalog" error.
+@router.get("/v1/lms/catalog", response_model=PublishedCourseCatalog, tags=["lms"], dependencies=[Depends(current_user)])
 def list_lms_catalog(request: Request) -> PublishedCourseCatalog:
     return _lms_service(request).list_catalog()
 

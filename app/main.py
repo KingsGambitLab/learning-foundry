@@ -1,10 +1,74 @@
 from __future__ import annotations
 
+import logging
+import logging.handlers
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
+
+
+def _configure_logging() -> Path:
+    """Send all stdlib logging (uvicorn, app, our `getLogger(...)` calls)
+    to a rotating file under <repo>/logs/app.log AND keep stderr so
+    journalctl still captures it.
+
+    Idempotent — safe to call on every import / worker boot. The log
+    directory + level are env-overridable so the EC2 deploy can crank
+    verbosity without a code change:
+      COURSE_GEN_LOG_DIR   (default <repo>/logs)
+      COURSE_GEN_LOG_LEVEL (default INFO)
+    """
+    log_dir = Path(
+        os.environ.get(
+            "COURSE_GEN_LOG_DIR",
+            str(Path(__file__).resolve().parents[1] / "logs"),
+        )
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "app.log"
+    level = getattr(
+        logging, os.environ.get("COURSE_GEN_LOG_LEVEL", "INFO").upper(), logging.INFO
+    )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Don't double-add handlers if uvicorn reload / re-import re-runs this.
+    has_our_file = any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        and getattr(h, "_coursegen", False)
+        for h in root.handlers
+    )
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    )
+    if not has_our_file:
+        fh = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        fh.setFormatter(fmt)
+        fh._coursegen = True  # type: ignore[attr-defined]
+        root.addHandler(fh)
+    has_stream = any(
+        isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    )
+    if not has_stream:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+    # Make sure uvicorn's own loggers propagate to root (so they hit
+    # the file handler too).
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers = []
+        lg.propagate = True
+    return log_path
+
+
+_LOG_PATH = _configure_logging()
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
