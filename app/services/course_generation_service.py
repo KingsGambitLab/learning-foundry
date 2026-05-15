@@ -752,14 +752,29 @@ class CourseGenerationService:
                     publish_snapshot_id=saved.id,
                 )
             except Exception as exc:  # noqa: BLE001 — defensive boundary
-                # We surface but don't fail the persist — the course is
-                # already at status=published; LMS readiness can be
-                # repaired by re-running this path later.
+                # Codex pass 5 P0: previously we swallowed snapshot
+                # synthesis failures and still persisted the course as
+                # `published`. That left the LMS catalog unable to
+                # surface the course (no snapshot id) while
+                # course_run.status said "published" — a confusing
+                # half-state. Demote the run to `awaiting_human` so the
+                # operator sees a clear failure and the run isn't
+                # claimed-but-broken in the catalog.
                 log_coursegen_event(
                     "outcome_publish_snapshot_failed",
                     course_run_id=course_run.id,
                     error=str(exc),
                 )
+                course_run.status = CourseRunStatus.awaiting_human
+                outcome_state = dict(course_run.payload_json.get("outcome_state") or {})
+                outcome_state["status"] = "blocked"
+                outcome_state["last_error"] = (
+                    "Outcome publish snapshot synthesis failed: " + str(exc)
+                )
+                course_run.payload_json = {
+                    **course_run.payload_json,
+                    "outcome_state": outcome_state,
+                }
         course_run.updated_at = datetime.now(UTC)
         self.course_workflow_service.store.save_course_run(course_run)
         return course_run
