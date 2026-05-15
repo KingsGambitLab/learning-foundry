@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -61,6 +62,86 @@ def default_learner_workspace_dir() -> Path:
 
 class LMSConflictError(ValueError):
     """Raised when an LMS action is invalid for the current course or enrollment state."""
+
+
+# ---------------- Rubric diagnostic humanizer ----------------
+
+# Translate scenario-rubric diagnostic strings into plain-English advice the
+# learner can act on. The raw diagnostics are mechanically correct but use
+# rubric-implementation vocabulary ("not found in captures", "target dict
+# failed schema check") that doesn't tell the learner WHAT TO FIX. Rules
+# are regex-based, ordered most-specific first.
+
+_RUBRIC_PREFIX_RE = re.compile(r"^\s*[a-z_]+\s*\((fail|abstain)\):\s*", re.IGNORECASE)
+
+
+def _strip_rubric_prefix(text: str) -> str:
+    """Drop the leading ``rubric_kind (fail): `` prefix the aggregation
+    layer adds. Learners care about WHAT broke, not which rubric class
+    reported it."""
+    return _RUBRIC_PREFIX_RE.sub("", text, count=1)
+
+
+def humanize_diagnostic(raw: str) -> str:
+    """Convert one rubric diagnostic into plain-English advice.
+
+    Unrecognized inputs pass through unchanged — better the learner
+    sees raw text than nothing at all when a new rubric kind ships.
+    """
+    if not raw:
+        return ""
+    body = _strip_rubric_prefix(raw)
+
+    # ``target path 'X' not found/present in captures`` — by far the most
+    # common pattern. Show the path as the missing field.
+    m = re.match(
+        r"target path ['\"]([^'\"]+)['\"] not (?:found|present) in captures$",
+        body,
+    )
+    if m:
+        return f"Response is missing field `{m.group(1)}`"
+
+    # ``expected R at 'X', got G`` — comparison failure.
+    m = re.match(r"expected (.+?) at ['\"]([^'\"]+)['\"], got (.+)$", body)
+    if m:
+        expected, path, got = m.group(1).strip(), m.group(2), m.group(3).strip()
+        return f"Expected `{path}` to be `{expected}`, got `{got}`"
+
+    # ``target dict failed schema check`` — structural mismatch with no
+    # specific path. Most common when the whole response body doesn't
+    # match the expected schema shape.
+    if body.strip() == "target dict failed schema check":
+        return "Response shape doesn't match the required schema"
+
+    # ``recall A < threshold B (N/M gold items found)`` — retrieval rubric.
+    m = re.match(
+        r"recall ([0-9.]+) < threshold ([0-9.]+) \((\d+)/(\d+) gold items found\)$",
+        body,
+    )
+    if m:
+        a, b, found, total = m.group(1), m.group(2), m.group(3), m.group(4)
+        return (
+            f"Retrieval recall {a} is below threshold {b} "
+            f"(matched {found} of {total} expected items)"
+        )
+
+    # ``X not found in captures`` (no ``target path`` prefix) — produced
+    # by structural rubrics like schema_match / literal_match / numeric_range
+    # when their named target isn't present. Keep the prefix from the raw
+    # original ONLY when it tells us about the field type
+    # (``numeric_range`` -> "numeric field").
+    m = re.match(r"([\w.\[\]]+) not found in captures$", body)
+    if m:
+        path = m.group(1)
+        # Look at the original to recover the rubric kind for typed phrasing.
+        kind_match = re.match(r"^\s*([a-z_]+)\s*\(", raw)
+        kind = kind_match.group(1) if kind_match else ""
+        if kind == "numeric_range":
+            return f"Response is missing numeric field `{path}`"
+        return f"Response is missing field `{path}`"
+
+    # Unrecognized — pass through. Better than losing signal.
+    return raw
 
 
 class LMSService:
@@ -514,17 +595,27 @@ class LMSService:
         # for an infra concern would be wrong; we surface the abstain
         # rationale in diagnostics so they can still see what wasn't
         # judged.
+        # Look up scenarios by id so we can surface the scenario's prose
+        # ``description`` as each test's summary — that's the "WHAT was
+        # being tested" line learners need. The bundle is the source of
+        # truth, not the oracle output (which only carries id/category).
+        scenario_by_id = {s.id: s for s in scenarios}
+
         results: list[TestGradeResult] = []
         for output in pass_result.scenario_outputs:
             verdict_statuses: list[str] = []
-            diagnostics: list[str] = []
+            raw_diagnostics: list[str] = []
             if output.aborted and output.abort_reason:
-                diagnostics.append(output.abort_reason)
+                raw_diagnostics.append(output.abort_reason)
             for kind, verdict_dump in output.verdicts:
                 verdict = Verdict.model_validate(verdict_dump)
                 verdict_statuses.append(verdict.status)
-                if verdict.status != "pass" and verdict.rationale:
-                    diagnostics.append(f"{kind} ({verdict.status}): {verdict.rationale}")
+                # ``abstain`` rationales are infrastructure noise ("no LLM
+                # router configured") — we treat abstain as pass anyway,
+                # so drop them from the surfaced diagnostics. Only ``fail``
+                # verdicts get translated and surfaced to the learner.
+                if verdict.status == "fail" and verdict.rationale:
+                    raw_diagnostics.append(f"{kind} ({verdict.status}): {verdict.rationale}")
 
             if output.aborted:
                 scenario_passed = False
@@ -536,15 +627,25 @@ class LMSService:
                 # all pass, or mix of pass + abstain
                 scenario_passed = True
 
-            if scenario_passed and "abstain" in verdict_statuses:
-                summary = (
-                    f"Scenario `{output.scenario_id}` passed structural rubrics; "
-                    f"{verdict_statuses.count('abstain')} LLM-judge rubric(s) abstained"
-                )
-            elif scenario_passed:
-                summary = f"Scenario `{output.scenario_id}` passed"
+            # Summary = the scenario's own prose description (tells the
+            # learner WHAT behavior is being tested), with a status
+            # prefix for skimmability.
+            scenario = scenario_by_id.get(output.scenario_id)
+            description = (scenario.description if scenario else "").strip()
+            if scenario_passed:
+                summary = description or f"Scenario `{output.scenario_id}` passed"
             else:
-                summary = f"Scenario `{output.scenario_id}` failed"
+                summary = description or f"Scenario `{output.scenario_id}` failed"
+
+            # Translate diagnostics into plain-English advice. Drop
+            # duplicates (two rubrics emitting identical text).
+            seen: set[str] = set()
+            diagnostics: list[str] = []
+            for raw in raw_diagnostics:
+                advice = humanize_diagnostic(raw)
+                if advice and advice not in seen:
+                    seen.add(advice)
+                    diagnostics.append(advice)
 
             results.append(
                 TestGradeResult(
