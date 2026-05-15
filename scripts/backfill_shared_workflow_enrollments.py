@@ -139,22 +139,35 @@ def main() -> int:
         if args.dry_run:
             continue
 
-        # 1. Filesystem cutover (only if needed).
+        # 1. Filesystem cutover (only if needed). Atomic copy: copy into
+        # a sibling temp dir first, then `os.rename` it into place once
+        # the copy is fully done. A SIGKILL mid-copy leaves only the
+        # temp dir behind, which subsequent runs identify and clean.
         copied_now = False
         if old_workspace.exists() and not new_workspace.exists():
             new_workspace.parent.mkdir(parents=True, exist_ok=True)
+            tmp_workspace = new_workspace.with_name(
+                new_workspace.name + f".tmp_{os.getpid()}"
+            )
+            # Sweep stale temp dirs from prior crashed runs.
+            for stale in new_workspace.parent.glob(new_workspace.name + ".tmp_*"):
+                shutil.rmtree(stale, ignore_errors=True)
             try:
-                shutil.copytree(old_workspace, new_workspace)
+                shutil.copytree(old_workspace, tmp_workspace)
+                # Atomic publish — same filesystem, so rename is atomic.
+                os.rename(tmp_workspace, new_workspace)
                 copied_now = True
                 fs_copies += 1
             except Exception as exc:
-                # Roll back the partial copy and leave the DB untouched.
                 aborted_copies += 1
                 print(
                     f"    ERROR copying workspace, leaving DB unchanged: {exc!r}",
                     file=sys.stderr,
                 )
+                if tmp_workspace.exists():
+                    shutil.rmtree(tmp_workspace, ignore_errors=True)
                 if new_workspace.exists():
+                    # Belt-and-braces: if a partial rename ever lands, clean.
                     shutil.rmtree(new_workspace, ignore_errors=True)
                 continue
         else:

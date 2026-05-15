@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -179,7 +180,12 @@ def rename_workspaces(*, engine: Engine, old_base: Path, new_base: Path) -> None
     Behavior:
     - If the old workspace doesn't exist, skip silently.
     - If the new workspace already exists, skip (idempotent).
-    - Uses shutil.copytree (copy, not move) so the source server's directory tree stays intact.
+    - Uses shutil.copytree (copy, not move) so the source server's
+      directory tree stays intact.
+    - Atomic publish: copies into `<new>.tmp_<pid>` first and renames
+      into place only after the copy fully completes, so a crash
+      mid-copy leaves only the temp dir behind (which subsequent
+      runs sweep) and never a truncated final workspace.
     """
     with engine.begin() as conn:
         rows = conn.execute(
@@ -204,7 +210,19 @@ def rename_workspaces(*, engine: Engine, old_base: Path, new_base: Path) -> None
         if new.exists():
             continue
         new.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(old, new)
+        # Sweep stale temp dirs from prior crashed runs.
+        for stale in new.parent.glob(new.name + ".tmp_*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        tmp = new.with_name(new.name + f".tmp_{os.getpid()}")
+        try:
+            shutil.copytree(old, tmp)
+            os.rename(tmp, new)
+        except Exception:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+            if new.exists():
+                shutil.rmtree(new, ignore_errors=True)
+            raise
         print(f"  Copied workspace: {old} → {new}")
 
 
