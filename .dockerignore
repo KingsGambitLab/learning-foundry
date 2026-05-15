@@ -1,0 +1,38 @@
+# Source control / IDE
+.git
+.github
+.claude
+.vscode
+.idea
+.cursor
+
+# Build artifacts and caches
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox
+.venv
+venv
+
+# Local runtime state
+logs
+tmp
+learner_workspaces
+workspaces
+
+# Node / extension build outputs
+extensions/*/node_modules
+extensions/*/dist
+extensions/*/out
+extensions/*/test-out
+extensions/*/*.vsix
+
+# Plan / docs the image doesn't need
+docs
+
+# OS noise
+.DS_Store

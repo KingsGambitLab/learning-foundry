@@ -537,6 +537,7 @@ class LMSService:
                     support_reason=reason,
                     publish_snapshot_id=snapshot.id if snapshot is not None else run.latest_publish_snapshot_id,
                     published_at=snapshot.created_at if snapshot is not None else run.updated_at,
+                    lab_tutor_enabled=run.lab_tutor_enabled,
                 )
             )
         courses.sort(key=lambda item: item.published_at, reverse=True)
@@ -695,12 +696,17 @@ class LMSService:
 
         existing_sessions = self.store.list_learner_workspace_sessions(enrollment.id)
         latest_session = existing_sessions[0] if existing_sessions else None
+        course_run = self.store.get_course_run(enrollment.course_run_id)
+        lab_tutor_enabled = bool(course_run.lab_tutor_enabled) if course_run is not None else False
+        assignment_title = course_run.title if course_run is not None else None
         session = self.learner_studio_service.launch_editor(
             enrollment_id=enrollment.id,
             deliverable_id=deliverable.deliverable_id,
             workspace_root=workspace_root,
             scope=enrollment.workspace_scope,
             existing_session=latest_session,
+            lab_tutor_enabled=lab_tutor_enabled,
+            assignment_title=assignment_title,
         )
         self.store.save_learner_workspace_session(session)
         if enrollment.current_deliverable_id != deliverable.deliverable_id:

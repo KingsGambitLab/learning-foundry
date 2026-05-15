@@ -73,6 +73,7 @@ class LearnerStudioService:
         host: str = "127.0.0.1",
         minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
+        tutor_base_url: str | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.image_name = image_name or default_learner_studio_image()
@@ -81,6 +82,29 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
+        # The widget runs in the learner's browser (on the host), not inside
+        # the container, so the URL must be host-reachable from the browser.
+        # `127.0.0.1` is correct for local dev; in production this should be
+        # the public hostname of the FastAPI service.
+        self._tutor_base_url = tutor_base_url or os.environ.get(
+            "LAB_TUTOR_BASE_URL", "http://127.0.0.1:8012"
+        )
+
+    def _tutor_environment(
+        self,
+        session_id: str,
+        assignment_title: str | None,
+        enrollment_id: str | None = None,
+    ) -> dict[str, str]:
+        env: dict[str, str] = {
+            "LAB_TUTOR_BASE_URL": self._tutor_base_url,
+            "LAB_TUTOR_SESSION_ID": session_id,
+        }
+        if assignment_title:
+            env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
+        if enrollment_id:
+            env["LAB_TUTOR_ENROLLMENT_ID"] = enrollment_id
+        return env
 
     def launch_editor(
         self,
@@ -91,6 +115,8 @@ class LearnerStudioService:
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
+        lab_tutor_enabled: bool = False,
+        assignment_title: str | None = None,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -150,6 +176,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
+            *(self._docker_env_args(self._tutor_environment(session_id, assignment_title, enrollment_id)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",

@@ -348,6 +348,7 @@ class CourseWorkflowService:
         course_run.notes = list(dict.fromkeys(notes))
         course_run.goal = existing.goal
         course_run.requested_learning_outcomes = existing.requested_learning_outcomes
+        course_run.lab_tutor_enabled = existing.lab_tutor_enabled
         course_run.generated_plan = self.generated_plan_from_run(course_run, notes=plan.notes)
         course_run.generation_source = source
         course_run.generation_status = generation_status

@@ -17,3 +17,9 @@ logs/
 uv.lock
 .env
 .env.local
+
+extensions/*/node_modules/
+extensions/*/dist/
+extensions/*/out/
+extensions/*/test-out/
+extensions/*/*.vsix

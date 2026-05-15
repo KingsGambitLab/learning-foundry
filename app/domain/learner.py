@@ -44,6 +44,7 @@ class PublishedCourseSummary(BaseModel):
     support_reason: str | None = None
     course_run_status: CourseRunStatus
     published_at: datetime
+    lab_tutor_enabled: bool = False
 
     @classmethod
     def from_run(
@@ -58,6 +59,7 @@ class PublishedCourseSummary(BaseModel):
         support_reason: str | None,
         publish_snapshot_id: str | None,
         published_at: datetime | None = None,
+        lab_tutor_enabled: bool = False,
     ) -> "PublishedCourseSummary":
         return cls(
             course_run_id=run.id,
@@ -71,6 +73,7 @@ class PublishedCourseSummary(BaseModel):
             support_reason=support_reason,
             course_run_status=run.status,
             published_at=published_at or run.updated_at,
+            lab_tutor_enabled=lab_tutor_enabled,
         )
 
 

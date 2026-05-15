@@ -76,6 +76,7 @@ from fastapi.templating import Jinja2Templates
 from app.api.auth_routes import router as auth_router
 from app.api.deps import current_user, current_user_optional, require_role
 from app.api.routes import router
+from app.api.tutor import router as tutor_router
 from app.domain.auth import Role, User
 from app.domain.course import CourseRunStatus
 from app.services.artifact_materializer import ArtifactMaterializer
@@ -96,6 +97,7 @@ from app.services.learner_studio_service import LearnerStudioService
 from app.services.openai_learner_feedback import OpenAILearnerFeedbackService
 from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner
 from app.services.auth_session import SessionService
+from app.services.tutor_service import TutorService
 from app.services.workflow_service import WorkflowService
 from app.storage.postgres_store import PostgresWorkflowStore
 
@@ -167,6 +169,7 @@ async def lifespan(app: FastAPI):
             publish_certification_service=PublishLearnerCertificationService(
                 learner_studio_service=app.state.learner_studio_service,
                 enabled=True,
+                store=app.state.workflow_service.store,
             ),
             creator_asset_service=app.state.creator_asset_service,
         )
@@ -217,6 +220,11 @@ async def lifespan(app: FastAPI):
             learner_studio_service=app.state.learner_studio_service,
             learner_feedback_service=app.state.learner_feedback_service,
         )
+    if not hasattr(app.state, "tutor_service"):
+        app.state.tutor_service = TutorService(
+            anthropic_env_file=os.environ.get("COURSE_GEN_ANTHROPIC_ENV_FILE"),
+            store=app.state.workflow_service.store,
+        )
     yield
 
 app = FastAPI(
@@ -232,8 +240,23 @@ app.mount(
     StaticFiles(directory=Path(__file__).resolve().parent / "static"),
     name="static",
 )
+
+# CORS for the page-embedded tutor widget — when the widget is loaded into
+# code-server (a different origin from the FastAPI app), the browser blocks
+# its fetch() to /v1/tutor/* without these headers. Dev-wide "*" is fine
+# locally; tighten to specific origins for production.
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 app.include_router(router)
 app.include_router(auth_router)
+app.include_router(tutor_router)
 
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
