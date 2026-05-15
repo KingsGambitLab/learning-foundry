@@ -35,14 +35,6 @@ from app.domain.course import (
 )
 from app.domain.publish import PublishedVersionList
 from app.domain.grader import DeliverableGraderPlan, TaskAgentGraderPlanCollection
-from app.domain.grading import (
-    GradeTaskAgentRequest,
-    LiveGradeTaskAgentRequest,
-    LiveGradeTaskAgentSpecRequest,
-    LiveTaskAgentGradeReport,
-    DeliverableGradeReport,
-    TaskAgentSubmission,
-)
 from app.domain.learner import (
     CreateEnrollmentRequest,
     LaunchWorkspaceRequest,
@@ -92,11 +84,12 @@ from app.services.course_workflow_service import CourseWorkflowConflictError, Co
 from app.services.docker_sandbox_runner import DockerSandboxRunner
 from app.services.grader_planner import build_all_task_agent_grader_plans, build_task_agent_grader_plan
 from app.services.lms_service import LMSConflictError, LMSService
-from app.services.openai_task_agent_authoring import TaskAgentAuthoringStatus
 from app.services.spec_validation import ValidationResult, compute_task_agent_gate, validate_task_agent_spec
-from app.services.task_agent_blackbox_runner import TaskAgentBlackBoxRunner, TaskAgentRunnerError
-from app.services.task_agent_grader import grade_task_agent_submission
-from app.services.workflow_service import WorkflowConflictError, WorkflowService
+from app.services.workflow_service import (
+    WorkflowConflictError,
+    WorkflowGateRefused,
+    WorkflowService,
+)
 
 router = APIRouter()
 
@@ -117,10 +110,6 @@ def _creator_asset_service(request: Request) -> CreatorAssetService:
     return request.app.state.creator_asset_service
 
 
-def _task_agent_blackbox_runner(request: Request) -> TaskAgentBlackBoxRunner:
-    return request.app.state.task_agent_blackbox_runner
-
-
 def _docker_sandbox_runner(request: Request) -> DockerSandboxRunner:
     return request.app.state.docker_sandbox_runner
 
@@ -137,11 +126,6 @@ def health() -> dict[str, str]:
 @router.get("/v1/sandbox/status", response_model=SandboxAvailability, tags=["system"], dependencies=[Depends(require_role(Role.creator))])
 def sandbox_status(request: Request) -> SandboxAvailability:
     return _docker_sandbox_runner(request).status()
-
-
-@router.get("/v1/task-agent-authoring/status", response_model=TaskAgentAuthoringStatus, tags=["system"], dependencies=[Depends(require_role(Role.creator))])
-def task_agent_authoring_status(request: Request) -> TaskAgentAuthoringStatus:
-    return _workflow_service(request).task_agent_authoring_status()
 
 
 @router.get("/v1/registry", tags=["registry"], dependencies=[Depends(require_role(Role.creator))])
@@ -224,29 +208,6 @@ def build_task_agent_grader_plan_for_deliverable(deliverable_id: str, spec: Task
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/v1/specs/task-agent/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["grading"], dependencies=[Depends(require_role(Role.creator))])
-def grade_task_agent_spec(deliverable_id: str, payload: GradeTaskAgentRequest) -> DeliverableGradeReport:
-    try:
-        return grade_task_agent_submission(payload.spec, deliverable_id, payload.submission)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/v1/specs/task-agent/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["grading"], dependencies=[Depends(require_role(Role.creator))])
-def grade_task_agent_spec_live(
-    deliverable_id: str,
-    payload: LiveGradeTaskAgentSpecRequest,
-    request: Request,
-) -> LiveTaskAgentGradeReport:
-    runner = _task_agent_blackbox_runner(request)
-    try:
-        return runner.grade_live(payload.spec, deliverable_id, payload.live)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except TaskAgentRunnerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
 @router.get("/v1/workflow-runs", response_model=WorkflowRunList, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
 def list_workflow_runs(request: Request) -> WorkflowRunList:
     return _workflow_service(request).list_runs()
@@ -323,84 +284,29 @@ def get_workflow_workspace_file(
 
 
 @router.post("/v1/workflow-runs/{run_id}/nodes/execute", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def execute_workflow_nodes(run_id: str, request: Request) -> WorkflowRun:
-    service = _workflow_service(request)
-    try:
-        return service.execute_langgraph_nodes(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.get("/v1/workflow-runs/{run_id}/grader-plans", response_model=TaskAgentGraderPlanCollection, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def list_workflow_grader_plans(run_id: str, request: Request) -> TaskAgentGraderPlanCollection:
-    service = _workflow_service(request)
-    try:
-        return service.list_task_agent_grader_plans(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.get("/v1/workflow-runs/{run_id}/grader-plans/{deliverable_id}", response_model=DeliverableGraderPlan, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def get_workflow_grader_plan(run_id: str, deliverable_id: str, request: Request) -> DeliverableGraderPlan:
-    service = _workflow_service(request)
-    try:
-        return service.get_task_agent_grader_plan(run_id, deliverable_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/v1/workflow-runs/{run_id}/grade/{deliverable_id}", response_model=DeliverableGradeReport, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def grade_workflow_submission(run_id: str, deliverable_id: str, submission: TaskAgentSubmission, request: Request) -> DeliverableGradeReport:
-    service = _workflow_service(request)
-    try:
-        return service.grade_task_agent_run(run_id, deliverable_id, submission)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/v1/workflow-runs/{run_id}/grade-live/{deliverable_id}", response_model=LiveTaskAgentGradeReport, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def grade_workflow_submission_live(
+def execute_workflow_nodes(
     run_id: str,
-    deliverable_id: str,
-    payload: LiveGradeTaskAgentRequest,
     request: Request,
-) -> LiveTaskAgentGradeReport:
-    service = _workflow_service(request)
-    try:
-        return service.grade_task_agent_run_live(run_id, deliverable_id, payload)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except TaskAgentRunnerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    start_node: str | None = None,
+) -> WorkflowRun:
+    """Legacy LangGraph node-loop trigger — retired in Wave 5b.
 
-
-@router.put("/v1/workflow-runs/{run_id}/task-agent-spec", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
-def update_task_agent_workflow_spec(run_id: str, spec: TaskAgentServiceSpec, request: Request) -> WorkflowRun:
+    The per-deliverable authoring/reviewer loop was removed when the
+    outcome-mode graph became the only live generation path. The route
+    is preserved for API stability but always returns ``409`` so any
+    surviving caller fails loudly rather than silently no-oping.
+    """
+    del start_node
     service = _workflow_service(request)
-    try:
-        return service.update_task_agent_spec(run_id, spec)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
-    except WorkflowConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if service.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.")
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "The per-deliverable LangGraph node loop is retired; outcome-mode "
+            "generation drives the live pipeline."
+        ),
+    )
 
 
 @router.post("/v1/workflow-runs/{run_id}/decisions", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])
@@ -410,8 +316,90 @@ def decide_workflow_gate(run_id: str, decision: GateDecisionRequest, request: Re
         return service.apply_gate_decision(run_id, decision)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown workflow run '{run_id}'.") from exc
+    except WorkflowGateRefused as exc:
+        # Codex review #7: refusing to advance a legacy run without
+        # execution evidence is a conflict (state, not validation), so
+        # 409 matches how WorkflowConflictError is already surfaced.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except WorkflowConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/v1/course-runs/{course_run_id}/decisions",
+    response_model=GenerateCourseFromBriefResponse,
+    tags=["course"],
+    dependencies=[Depends(require_role(Role.creator))],
+)
+def decide_course_run_gate(
+    course_run_id: str,
+    decision: GateDecisionRequest,
+    request: Request,
+) -> GenerateCourseFromBriefResponse:
+    """Apply a gate decision to an outcome-mode course run.
+
+    Codex review #6 finding #1: outcome runs are course-run-scoped and
+    were unreachable via the legacy ``/v1/workflow-runs/.../decisions``
+    route. This endpoint dispatches the decision to
+    ``CourseGenerationService.resume_outcome_workflow_after_gate``.
+
+    Returns
+    -------
+    The adapted ``GenerateCourseFromBriefResponse`` describing the
+    post-decision state (next pending gate, blocking reasons, etc.).
+
+    Errors
+    ------
+    * 404 — the course_run_id is unknown OR the row does not carry an
+      ``outcome_state`` (i.e. it's a legacy workflow run and the
+      caller should hit ``/v1/workflow-runs/{run_id}/decisions``).
+    * 409 — the run is not currently paused at a gate awaiting human.
+    * 400 — the gate/decision payload is structurally invalid.
+    """
+    course_workflow = _course_workflow_service(request)
+    course_run = course_workflow.store.get_course_run(course_run_id)
+    if course_run is None:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown course run '{course_run_id}'."
+        )
+    # Legacy workflow runs persist their state through
+    # ``WorkflowService.apply_gate_decision``; the course-run route is
+    # outcome-specific. A 404 here points the caller at the right
+    # endpoint without leaking the row's existence.
+    if not (course_run.payload_json or {}).get("outcome_state"):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Course run '{course_run_id}' is not an outcome-mode run; "
+                "use POST /v1/workflow-runs/<id>/decisions for legacy runs."
+            ),
+        )
+
+    # Conflict check: the run must be paused at a gate awaiting human.
+    outcome_state = course_run.payload_json["outcome_state"]
+    if outcome_state.get("status") != "awaiting_human":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Course run '{course_run_id}' is not awaiting a gate decision "
+                f"(status={outcome_state.get('status')!r}, "
+                f"stage={outcome_state.get('stage')!r})."
+            ),
+        )
+
+    service = _course_generation_service(request)
+    try:
+        return service.resume_outcome_workflow_after_gate(
+            course_run_id,
+            gate=decision.gate,
+            decision=decision.decision,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown course run '{course_run_id}'."
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/v1/workflow-runs/{run_id}/materialize", response_model=WorkflowRun, tags=["workflow"], dependencies=[Depends(require_role(Role.creator))])

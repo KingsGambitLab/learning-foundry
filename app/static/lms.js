@@ -587,15 +587,16 @@
     `;
   }
 
-  function renderLearnerGuidance(feedback) {
+  function renderLearnerGuidance(feedback, opts) {
     if (!feedback) return "";
     const strengths = Array.isArray(feedback.strengths) ? feedback.strengths.filter(Boolean) : [];
     const whyItMatters = Array.isArray(feedback.why_it_matters) ? feedback.why_it_matters.filter(Boolean) : [];
     const likelyRootCause = Array.isArray(feedback.likely_root_cause) ? feedback.likely_root_cause.filter(Boolean) : [];
     const investigationSteps = Array.isArray(feedback.investigation_steps) ? feedback.investigation_steps.filter(Boolean) : [];
+    const strongClass = opts && opts.isStrong ? " is-strong" : "";
     return `
-      <details class="review-guidance" open>
-        <summary>Tech lead feedback</summary>
+      <details class="review-guidance${strongClass}" open>
+        <summary>Summary feedback</summary>
         ${feedback.learner_feedback ? `<p class="review-guidance-summary">${escapeHtml(feedback.learner_feedback)}</p>` : ""}
         ${feedback.fundamental_gap ? `
           <div class="review-guidance-section">
@@ -628,6 +629,207 @@
           </div>
         ` : ""}
       </details>
+    `;
+  }
+
+  function summarizeDiagnostics(diagnostics) {
+    // Compress the per-rubric diagnostic list into a SHORT one-line
+    // headline + a cleaned-up tail. The dominant noise pattern when a
+    // scenario fails early is N rubrics independently reporting
+    // "<some.path> not found in captures" — all cascading from the
+    // same first failure. Detect that cluster, surface one path with
+    // "+N more", and keep other rubric kinds intact.
+    if (!Array.isArray(diagnostics) || !diagnostics.length) return { headline: "", details: [] };
+    const cleanedRaw = diagnostics.map((d) => String(d).trim()).filter(Boolean);
+    if (!cleanedRaw.length) return { headline: "", details: [] };
+    // Exact dedupe: when two rubrics emit identical diagnostic text
+    // (e.g. two ``schema_match`` instances both report
+    // "target dict failed schema check"), show it once.
+    const seen = new Set();
+    const cleaned = cleanedRaw.filter((d) => {
+      if (seen.has(d)) return false;
+      seen.add(d);
+      return true;
+    });
+
+    // Group "not found in captures" / "not present in captures" diagnostics.
+    const missingPathRe = /not (?:found|present) in captures/i;
+    const missing = cleaned.filter((d) => missingPathRe.test(d));
+    const other = cleaned.filter((d) => !missingPathRe.test(d));
+
+    const details = [...other];
+    if (missing.length) {
+      const first = missing[0];
+      if (missing.length === 1) {
+        details.push(first);
+      } else {
+        details.push(`${first} (+${missing.length - 1} more missing path${missing.length - 1 === 1 ? "" : "s"})`);
+      }
+    }
+    return { headline: details[0] || cleaned[0], details };
+  }
+
+  function parseCourseSummary(text) {
+    // Course summaries follow a stable shape:
+    //
+    //   <overview paragraph(s)>
+    //
+    //   Skills you'll learn:
+    //   - skill bullet 1       OR    1. skill bullet 1
+    //   - skill bullet 2              2. skill bullet 2
+    //   ...
+    //
+    //   <optional trailing paragraph(s)>
+    //
+    // We pull skills from the bullet block ONLY — lines that don't
+    // start with a bullet marker (``-``/``*``/``•``) or a numeric
+    // ordinal (``1.``/``2.``) are skipped, so post-bullet paragraphs
+    // like "Graded against 18 hidden scenarios..." don't pollute the
+    // skill list.
+    if (!text) return { overview: "", skills: [] };
+    const trimmed = String(text).trim();
+    const headerMatch = trimmed.match(/^([\s\S]*?)\n+\s*skills you('?ll)? learn:?\s*\n([\s\S]*)$/i);
+    if (!headerMatch) {
+      return { overview: trimmed, skills: [] };
+    }
+    const overview = headerMatch[1].trim();
+    const skillsBlock = headerMatch[3] || "";
+
+    const bulletPattern = /^\s*(?:[-*•]|\d+[.)])\s+/;
+    const skills = [];
+    for (const rawLine of skillsBlock.split(/\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (!bulletPattern.test(line)) {
+        // First non-bullet line ends the skills block — anything after
+        // is descriptive trailing prose, not a skill.
+        break;
+      }
+      const cleaned = line.replace(bulletPattern, "").trim();
+      if (cleaned) skills.push(cleaned);
+    }
+    return { overview, skills };
+  }
+
+  function shortenOverview(text, maxSentences = 1) {
+    // The first 1-2 sentences carry the elevator pitch; later sentences
+    // ("It is interesting because...") are usually marketing prose.
+    // Trim conservatively so we never cut mid-sentence.
+    if (!text) return "";
+    const sentences = text.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+    if (!sentences || !sentences.length) return text.trim();
+    return sentences.slice(0, maxSentences).join("").trim();
+  }
+
+  function skillTagLabel(skill) {
+    // The bullet sentence is long. Show just the headline noun phrase
+    // so the tag stays compact; the full sentence is preserved in the
+    // hover title.
+    if (!skill) return "";
+    const cleaned = skill.trim();
+    // Strategy 1 (most reliable): courses written as
+    //   ``Name - Description`` / ``Name — Description`` / ``Name: Description``
+    // — split on the FIRST separator and use the left as the label.
+    // Cap the label at 80 chars so a hyphen buried deep in prose can't
+    // sneak through; that's enough room for any reasonable skill name
+    // (longest seen in published courses: ~60 chars).
+    const sepMatch = cleaned.match(/^(.{1,80}?)\s+[-–—:]\s+/);
+    if (sepMatch && sepMatch[1]) {
+      return sepMatch[1].trim();
+    }
+    // Strategy 2 (no explicit separator): cut at the first connector
+    // word — these mark the end of the skill's headline noun phrase
+    // and the start of its explanation. The character class includes
+    // ``.`` so prefixes like ``Foo (Okapi)`` don't break the regex.
+    const connectorMatch = cleaned.match(
+      /^([\w\s\-/().'&]+?)\s+(?:for|using|across|with|so|that|including|which|where|based|of|to|via|by|when)\b/i
+    );
+    if (connectorMatch && connectorMatch[1]) {
+      return connectorMatch[1].trim();
+    }
+    // Strategy 3 (fallback): first 4 words.
+    const words = cleaned.split(/\s+/);
+    if (words.length <= 4) return cleaned;
+    return words.slice(0, 4).join(" ");
+  }
+
+  function renderSkillTags(skills) {
+    if (!skills || !skills.length) return "";
+    const chips = skills.map((skill) => {
+      const label = skillTagLabel(skill);
+      // Full sentence stays accessible as the hover tooltip — no data lost.
+      return `<span class="skill-tag" title="${escapeHtml(skill)}">${escapeHtml(label)}</span>`;
+    });
+    return `<div class="skill-tags" aria-label="Skills you'll learn">${chips.join("")}</div>`;
+  }
+
+  function renderTestResults(gradeReport) {
+    // Render per-test results from a DeliverableGradeReport. Outcome-mode
+    // graders set ``feedback=None`` on the ReviewArea — the actionable
+    // signal lives in each TestGradeResult's diagnostics. We keep the
+    // top-level "N checks need attention" container open by default but
+    // collapse each individual scenario's diagnostics behind a
+    // per-row <details>, with the headline (first / deduped diagnostic)
+    // shown alongside the scenario name. Cascading "not found in
+    // captures" diagnostics get folded into one line "+N more".
+    const results = Array.isArray(gradeReport?.results) ? gradeReport.results : [];
+    if (!results.length) return "";
+    const failed = results.filter((r) => r.status !== "passed");
+    const passed = results.filter((r) => r.status === "passed");
+
+    const renderOne = (result) => {
+      const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
+      const { headline, details } = summarizeDiagnostics(diagnostics);
+      const statusKind = result.status === "passed" ? "passed" : "blocked";
+      const hasMoreDetails = details.length > 1;
+      const countLabel = details.length
+        ? `${details.length} diagnostic${details.length === 1 ? "" : "s"}`
+        : "";
+      // Each test is a <details> whose summary carries the head row + the
+      // one-line headline. The diagnostic count sits on the right of the
+      // head row (uses the previously-dead space) and doubles as the
+      // expand affordance. Body is the full deduped diagnostic list.
+      return `
+        <li class="test-result test-result-${escapeHtml(statusKind)}">
+          <details class="test-result-row" ${hasMoreDetails ? "" : ""}>
+            <summary class="test-result-summary-row">
+              <div class="test-result-head">
+                <span class="test-result-head-left">
+                  ${renderStatusPill(statusKind, titleCase(result.status))}
+                  <strong class="test-result-name">${escapeHtml(result.test_id)}</strong>
+                  ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
+                </span>
+                ${countLabel ? `<span class="test-result-count">${escapeHtml(countLabel)}</span>` : ""}
+              </div>
+              ${headline ? `<p class="test-result-headline">${escapeHtml(headline)}</p>` : ""}
+            </summary>
+            ${hasMoreDetails ? `
+              <ul class="test-result-diagnostics">
+                ${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
+              </ul>
+            ` : ""}
+          </details>
+        </li>
+      `;
+    };
+
+    // Per-scenario detail collapses by default. The headline summary
+    // (rendered by ``renderLearnerGuidance`` from the populated
+    // ``feedback`` object) is the primary view; drill into the full
+    // list only when the learner wants to see every scenario.
+    return `
+      ${failed.length ? `
+        <details class="review-guidance">
+          <summary>${escapeHtml(`See all ${failed.length} failing check${failed.length === 1 ? "" : "s"}`)}</summary>
+          <ul class="test-result-list">${failed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
+      ${passed.length ? `
+        <details class="review-guidance">
+          <summary>${escapeHtml(`See all ${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
+          <ul class="test-result-list">${passed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
     `;
   }
 
@@ -735,13 +937,18 @@
       ? `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed`
       : "Not submitted yet";
 
+    const parsedSummary = parseCourseSummary(enrollment.course_summary);
+    const shortOverview = shortenOverview(parsedSummary.overview)
+      || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.";
+
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
           <p class="course-chip">${escapeHtml(enrollment.course_title)}</p>
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
           <h1>${escapeHtml(enrollment.course_title)}</h1>
-          <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.")}</p>
+          <p class="focus-subcopy">${escapeHtml(shortOverview)}</p>
+          ${renderSkillTags(parsedSummary.skills)}
 
           <dl class="deliverable-quickref" aria-label="Project at a glance">
             <div class="quickref-row">
@@ -844,7 +1051,19 @@
     const latestReport = experience.latest_assignment_report;
     const latestSubmission = experience.latest_assignment_submission;
 
-    deliverablesPanel.classList.remove("hidden");
+    // Outcome-mode courses always ship a single ``outcome_main``
+    // deliverable; in that case the per-deliverable Project Review
+    // panel is redundant with the header (which already shows the
+    // latest score) and the Summary feedback panel below (which
+    // surfaces the actionable detail). Hide it so the page reads
+    // cleanly. Multi-deliverable legacy courses keep the panel
+    // because it's the only place the per-deliverable scorecard
+    // lives.
+    if (deliverables.length <= 1) {
+      deliverablesPanel.classList.add("hidden");
+    } else {
+      deliverablesPanel.classList.remove("hidden");
+    }
     submissionHistory.classList.remove("hidden");
     deliverablesTitle.textContent = `${progress.total} deliverable${progress.total === 1 ? "" : "s"}`;
     deliverablesCaption.textContent = latestReport
@@ -913,17 +1132,29 @@
         <p>Each submission reviews the whole project, then groups the findings by deliverable.</p>
         ${latestReport ? `
           <div class="submission-list review-area-list">
-            ${latestReport.review_areas.map((reviewArea) => `
-              <div class="submission-item">
+            ${latestReport.review_areas.map((reviewArea) => {
+              const gr = reviewArea.grade_report;
+              // Tri-state status: passed (100%), strong (>=83%), needs-work.
+              // 83% matches the user's "15+/18 turns green" calibration —
+              // captures "good solution" without requiring perfection.
+              const passRate = gr.total_tests ? (gr.passed_tests / gr.total_tests) : 0;
+              const isPassed = gr.status === "passed";
+              const isStrong = !isPassed && passRate >= 0.83;
+              const pillKind = isPassed ? "passed" : (isStrong ? "passed" : "blocked");
+              const pillLabel = isPassed ? "Ready" : (isStrong ? "Strong" : "Needs work");
+              return `
+              <div class="submission-item ${isStrong ? "is-strong" : ""} ${isPassed ? "is-ready" : ""}">
                 <strong>${escapeHtml(reviewArea.title)}</strong>
                 <p>${escapeHtml(reviewArea.objective)}</p>
                 <div class="submission-item-meta">
-                  ${renderStatusPill(reviewArea.grade_report.status === "passed" ? "passed" : "blocked", reviewArea.grade_report.status === "passed" ? "Ready" : "Needs work")}
-                  ${renderInfoPill("Checks", `${reviewArea.grade_report.passed_tests}/${reviewArea.grade_report.total_tests}`)}
+                  ${renderStatusPill(pillKind, pillLabel)}
+                  ${renderInfoPill("Checks", `${gr.passed_tests}/${gr.total_tests}`)}
                 </div>
-                ${reviewArea.feedback && reviewArea.grade_report.status !== "passed" ? renderLearnerGuidance(reviewArea.feedback) : ""}
+                ${reviewArea.feedback ? renderLearnerGuidance(reviewArea.feedback, { isStrong }) : ""}
+                ${renderTestResults(gr)}
               </div>
-            `).join("")}
+              `;
+            }).join("")}
           </div>
         ` : ""}
         <div class="submission-list">
