@@ -587,15 +587,16 @@
     `;
   }
 
-  function renderLearnerGuidance(feedback) {
+  function renderLearnerGuidance(feedback, opts) {
     if (!feedback) return "";
     const strengths = Array.isArray(feedback.strengths) ? feedback.strengths.filter(Boolean) : [];
     const whyItMatters = Array.isArray(feedback.why_it_matters) ? feedback.why_it_matters.filter(Boolean) : [];
     const likelyRootCause = Array.isArray(feedback.likely_root_cause) ? feedback.likely_root_cause.filter(Boolean) : [];
     const investigationSteps = Array.isArray(feedback.investigation_steps) ? feedback.investigation_steps.filter(Boolean) : [];
+    const strongClass = opts && opts.isStrong ? " is-strong" : "";
     return `
-      <details class="review-guidance" open>
-        <summary>Tech lead feedback</summary>
+      <details class="review-guidance${strongClass}" open>
+        <summary>Summary feedback</summary>
         ${feedback.learner_feedback ? `<p class="review-guidance-summary">${escapeHtml(feedback.learner_feedback)}</p>` : ""}
         ${feedback.fundamental_gap ? `
           <div class="review-guidance-section">
@@ -780,23 +781,34 @@
       const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
       const { headline, details } = summarizeDiagnostics(diagnostics);
       const statusKind = result.status === "passed" ? "passed" : "blocked";
-      const showDetails = details.length > 1;
+      const hasMoreDetails = details.length > 1;
+      const countLabel = details.length
+        ? `${details.length} diagnostic${details.length === 1 ? "" : "s"}`
+        : "";
+      // Each test is a <details> whose summary carries the head row + the
+      // one-line headline. The diagnostic count sits on the right of the
+      // head row (uses the previously-dead space) and doubles as the
+      // expand affordance. Body is the full deduped diagnostic list.
       return `
         <li class="test-result test-result-${escapeHtml(statusKind)}">
-          <div class="test-result-head">
-            ${renderStatusPill(statusKind, titleCase(result.status))}
-            <strong>${escapeHtml(result.test_id)}</strong>
-            ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
-          </div>
-          ${headline ? `<p class="test-result-summary">${escapeHtml(headline)}</p>` : ""}
-          ${showDetails ? `
-            <details class="test-result-details">
-              <summary>${escapeHtml(`${details.length} diagnostic${details.length === 1 ? "" : "s"}`)}</summary>
+          <details class="test-result-row" ${hasMoreDetails ? "" : ""}>
+            <summary class="test-result-summary-row">
+              <div class="test-result-head">
+                <span class="test-result-head-left">
+                  ${renderStatusPill(statusKind, titleCase(result.status))}
+                  <strong class="test-result-name">${escapeHtml(result.test_id)}</strong>
+                  ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
+                </span>
+                ${countLabel ? `<span class="test-result-count">${escapeHtml(countLabel)}</span>` : ""}
+              </div>
+              ${headline ? `<p class="test-result-headline">${escapeHtml(headline)}</p>` : ""}
+            </summary>
+            ${hasMoreDetails ? `
               <ul class="test-result-diagnostics">
                 ${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
               </ul>
-            </details>
-          ` : ""}
+            ` : ""}
+          </details>
         </li>
       `;
     };
@@ -1108,18 +1120,29 @@
         <p>Each submission reviews the whole project, then groups the findings by deliverable.</p>
         ${latestReport ? `
           <div class="submission-list review-area-list">
-            ${latestReport.review_areas.map((reviewArea) => `
-              <div class="submission-item">
+            ${latestReport.review_areas.map((reviewArea) => {
+              const gr = reviewArea.grade_report;
+              // Tri-state status: passed (100%), strong (>=83%), needs-work.
+              // 83% matches the user's "15+/18 turns green" calibration —
+              // captures "good solution" without requiring perfection.
+              const passRate = gr.total_tests ? (gr.passed_tests / gr.total_tests) : 0;
+              const isPassed = gr.status === "passed";
+              const isStrong = !isPassed && passRate >= 0.83;
+              const pillKind = isPassed ? "passed" : (isStrong ? "passed" : "blocked");
+              const pillLabel = isPassed ? "Ready" : (isStrong ? "Strong" : "Needs work");
+              return `
+              <div class="submission-item ${isStrong ? "is-strong" : ""} ${isPassed ? "is-ready" : ""}">
                 <strong>${escapeHtml(reviewArea.title)}</strong>
                 <p>${escapeHtml(reviewArea.objective)}</p>
                 <div class="submission-item-meta">
-                  ${renderStatusPill(reviewArea.grade_report.status === "passed" ? "passed" : "blocked", reviewArea.grade_report.status === "passed" ? "Ready" : "Needs work")}
-                  ${renderInfoPill("Checks", `${reviewArea.grade_report.passed_tests}/${reviewArea.grade_report.total_tests}`)}
+                  ${renderStatusPill(pillKind, pillLabel)}
+                  ${renderInfoPill("Checks", `${gr.passed_tests}/${gr.total_tests}`)}
                 </div>
-                ${reviewArea.feedback && reviewArea.grade_report.status !== "passed" ? renderLearnerGuidance(reviewArea.feedback) : ""}
-                ${renderTestResults(reviewArea.grade_report)}
+                ${reviewArea.feedback ? renderLearnerGuidance(reviewArea.feedback, { isStrong }) : ""}
+                ${renderTestResults(gr)}
               </div>
-            `).join("")}
+              `;
+            }).join("")}
           </div>
         ` : ""}
         <div class="submission-list">
