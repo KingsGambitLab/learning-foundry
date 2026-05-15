@@ -825,7 +825,7 @@
         </details>
       ` : ""}
       ${passed.length ? `
-        <details class="review-guidance">
+        <details class="review-guidance is-strong">
           <summary>${escapeHtml(`See all ${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
           <ul class="test-result-list">${passed.map(renderOne).join("")}</ul>
         </details>
