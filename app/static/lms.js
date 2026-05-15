@@ -631,14 +631,52 @@
     `;
   }
 
+  function summarizeDiagnostics(diagnostics) {
+    // Compress the per-rubric diagnostic list into a SHORT one-line
+    // headline + a cleaned-up tail. The dominant noise pattern when a
+    // scenario fails early is N rubrics independently reporting
+    // "<some.path> not found in captures" — all cascading from the
+    // same first failure. Detect that cluster, surface one path with
+    // "+N more", and keep other rubric kinds intact.
+    if (!Array.isArray(diagnostics) || !diagnostics.length) return { headline: "", details: [] };
+    const cleanedRaw = diagnostics.map((d) => String(d).trim()).filter(Boolean);
+    if (!cleanedRaw.length) return { headline: "", details: [] };
+    // Exact dedupe: when two rubrics emit identical diagnostic text
+    // (e.g. two ``schema_match`` instances both report
+    // "target dict failed schema check"), show it once.
+    const seen = new Set();
+    const cleaned = cleanedRaw.filter((d) => {
+      if (seen.has(d)) return false;
+      seen.add(d);
+      return true;
+    });
+
+    // Group "not found in captures" / "not present in captures" diagnostics.
+    const missingPathRe = /not (?:found|present) in captures/i;
+    const missing = cleaned.filter((d) => missingPathRe.test(d));
+    const other = cleaned.filter((d) => !missingPathRe.test(d));
+
+    const details = [...other];
+    if (missing.length) {
+      const first = missing[0];
+      if (missing.length === 1) {
+        details.push(first);
+      } else {
+        details.push(`${first} (+${missing.length - 1} more missing path${missing.length - 1 === 1 ? "" : "s"})`);
+      }
+    }
+    return { headline: details[0] || cleaned[0], details };
+  }
+
   function renderTestResults(gradeReport) {
-    // Render per-test results from a DeliverableGradeReport. Used by the
-    // outcome-mode (scenario-driven) grader where there's no separate
-    // ``feedback`` block — the actionable signal lives in each
-    // TestGradeResult's ``summary`` + ``diagnostics``. Failed tests
-    // open by default so the learner sees them immediately; passed
-    // tests stay collapsed to keep the scorecard readable when most
-    // scenarios are green.
+    // Render per-test results from a DeliverableGradeReport. Outcome-mode
+    // graders set ``feedback=None`` on the ReviewArea — the actionable
+    // signal lives in each TestGradeResult's diagnostics. We keep the
+    // top-level "N checks need attention" container open by default but
+    // collapse each individual scenario's diagnostics behind a
+    // per-row <details>, with the headline (first / deduped diagnostic)
+    // shown alongside the scenario name. Cascading "not found in
+    // captures" diagnostics get folded into one line "+N more".
     const results = Array.isArray(gradeReport?.results) ? gradeReport.results : [];
     if (!results.length) return "";
     const failed = results.filter((r) => r.status !== "passed");
@@ -646,7 +684,9 @@
 
     const renderOne = (result) => {
       const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
+      const { headline, details } = summarizeDiagnostics(diagnostics);
       const statusKind = result.status === "passed" ? "passed" : "blocked";
+      const showDetails = details.length > 1;
       return `
         <li class="test-result test-result-${escapeHtml(statusKind)}">
           <div class="test-result-head">
@@ -654,11 +694,14 @@
             <strong>${escapeHtml(result.test_id)}</strong>
             ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
           </div>
-          ${result.summary ? `<p class="test-result-summary">${escapeHtml(result.summary)}</p>` : ""}
-          ${diagnostics.length ? `
-            <ul class="test-result-diagnostics">
-              ${diagnostics.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
-            </ul>
+          ${headline ? `<p class="test-result-summary">${escapeHtml(headline)}</p>` : ""}
+          ${showDetails ? `
+            <details class="test-result-details">
+              <summary>${escapeHtml(`${details.length} diagnostic${details.length === 1 ? "" : "s"}`)}</summary>
+              <ul class="test-result-diagnostics">
+                ${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
+              </ul>
+            </details>
           ` : ""}
         </li>
       `;
