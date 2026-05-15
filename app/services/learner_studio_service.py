@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
