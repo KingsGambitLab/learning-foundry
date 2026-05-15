@@ -496,10 +496,25 @@ def _execute_step(
     # so rubrics can compute things like "every cited passage_id was in
     # the request's search_results" (subset_match) without inlining the
     # request body twice.
+    # ``raw`` (added 2026-05-15): the response body re-serialized as a
+    # JSON string when the body is dict/list, or the body verbatim when
+    # it's already a string. LLM-authored scenarios reference paths like
+    # ``<step>.raw`` for regex_match rubrics that want to assert on the
+    # JSON text of an API response (e.g., a specific field name
+    # appearing in the output regardless of nesting depth).
+    if isinstance(resp_body, (dict, list)):
+        raw_text = json.dumps(resp_body, sort_keys=False)
+    elif isinstance(resp_body, (bytes, bytearray)):
+        raw_text = bytes(resp_body).decode("utf-8", errors="replace")
+    elif resp_body is None:
+        raw_text = ""
+    else:
+        raw_text = str(resp_body)
     capture_entry = {
         "status": status,
         "headers": resp_headers,
         "body": resp_body,
+        "raw": raw_text,
         "request": {
             "method": step.method,
             "path": step.path,
