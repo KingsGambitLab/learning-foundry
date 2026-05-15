@@ -1051,7 +1051,19 @@
     const latestReport = experience.latest_assignment_report;
     const latestSubmission = experience.latest_assignment_submission;
 
-    deliverablesPanel.classList.remove("hidden");
+    // Outcome-mode courses always ship a single ``outcome_main``
+    // deliverable; in that case the per-deliverable Project Review
+    // panel is redundant with the header (which already shows the
+    // latest score) and the Summary feedback panel below (which
+    // surfaces the actionable detail). Hide it so the page reads
+    // cleanly. Multi-deliverable legacy courses keep the panel
+    // because it's the only place the per-deliverable scorecard
+    // lives.
+    if (deliverables.length <= 1) {
+      deliverablesPanel.classList.add("hidden");
+    } else {
+      deliverablesPanel.classList.remove("hidden");
+    }
     submissionHistory.classList.remove("hidden");
     deliverablesTitle.textContent = `${progress.total} deliverable${progress.total === 1 ? "" : "s"}`;
     deliverablesCaption.textContent = latestReport
