@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Course LMS</title>
+    <title>__BRAND_NAME__</title>
+    <link rel="icon" href="__BRAND_ICON_URL__" />
     <link rel="stylesheet" href="/static/app-shell.css?v=__LMS_ASSET_VERSION__" />
     <link rel="stylesheet" href="/static/lms.css?v=__LMS_ASSET_VERSION__" />
   </head>
@@ -11,19 +12,13 @@
     <div class="page">
       <div class="page-shell">
         <header class="topbar">
-          <a class="brand" href="/">
-            <span class="brand-mark">CG</span>
+          <a class="brand" href="/courses">
+            <img class="brand-mark-img" src="__BRAND_ICON_URL__" alt="Scaler" />
             <span class="brand-copy">
-              <span class="brand-label">Learner experience</span>
-              <span class="brand-title">Course Gen Codex</span>
+              <span class="brand-title">__BRAND_NAME__</span>
             </span>
           </a>
-          <nav class="topnav" aria-label="Primary">
-            <a class="topnav-link active" href="/">Learner LMS</a>
-            <a class="topnav-link" href="/courses">Courses</a>
-            <a class="topnav-link" href="/create-course">Course builder</a>
-            <a class="topnav-link" href="/docs">API docs</a>
-          </nav>
+          __LMS_NAV__
         </header>
 
         <main class="container">

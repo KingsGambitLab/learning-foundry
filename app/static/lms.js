@@ -333,7 +333,7 @@
   function updateDocumentTitle() {
     const experience = uiState.currentExperience;
     if (!experience?.enrollment) {
-      document.title = "Learner LMS · Course Gen Codex";
+      document.title = "Scaler Labs";
       return;
     }
     const courseTitle = experience.enrollment.course_title || "Learner LMS";

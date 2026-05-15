@@ -69,7 +69,7 @@ def _configure_logging() -> Path:
 
 
 _LOG_PATH = _configure_logging()
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -220,7 +220,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="Course Gen Codex",
+    title="Scaler Labs",
     version="0.1.0",
     summary="Archetype-driven assignment generation MVP for engineering projects.",
     lifespan=lifespan,
@@ -269,36 +269,60 @@ def draft_timeline(
     )
 
 
+def _user_state(user) -> dict | None:
+    if user is None:
+        return None
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "display_name": user.display_name,
+        "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+    }
+
+
 @app.get("/", tags=["system"], include_in_schema=False)
-def root(request: Request) -> HTMLResponse:
+def root(request: Request):
     user = current_user_optional(request)
+    # Logged-out experience is just the login form.
+    if user is None:
+        return RedirectResponse(url="/login", status_code=302)
     svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
         catalog=svc.list_catalog(),
-        enrollments=svc.list_enrollments(learner_id=str(user.id)) if user is not None else svc.list_enrollments(learner_id=""),
+        enrollments=svc.list_enrollments(learner_id=str(user.id)),
+        user=_user_state(user),
     )
     return HTMLResponse(render_lms_home(lms_state))
 
 
 @app.get("/courses", tags=["system"], include_in_schema=False)
-def courses(request: Request) -> HTMLResponse:
+def courses(request: Request):
     user = current_user_optional(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=302)
     svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
         catalog=svc.list_catalog(),
-        enrollments=svc.list_enrollments(learner_id=str(user.id)) if user is not None else svc.list_enrollments(learner_id=""),
+        enrollments=svc.list_enrollments(learner_id=str(user.id)),
+        user=_user_state(user),
     )
     return HTMLResponse(render_lms_courses_page(lms_state))
 
 
 @app.get("/login", response_class=HTMLResponse, tags=["system"], include_in_schema=False)
-def login_page(request: Request) -> HTMLResponse:
+def login_page(request: Request):
+    # Already signed in → straight to Labs.
+    if current_user_optional(request) is not None:
+        return RedirectResponse(url="/courses", status_code=302)
     return templates.TemplateResponse(request, "login.html", {})
 
 
+# /register is intentionally removed. Public self-serve sign-up is closed;
+# learner accounts are provisioned out-of-band and creators via
+# scripts/bootstrap_creator.py. Any old link → the login form.
 @app.get("/register", response_class=HTMLResponse, tags=["system"], include_in_schema=False)
-def register_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "register.html", {})
+def register_page(request: Request):
+    return RedirectResponse(url="/login", status_code=302)
 
 
 @app.get("/lms/courses/{course_run_id}", tags=["system"], include_in_schema=False)

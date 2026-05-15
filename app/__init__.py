@@ -1,1 +1,1 @@
-"""Course Gen Codex application package."""
+"""Scaler Labs application package."""

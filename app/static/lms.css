@@ -1517,3 +1517,81 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Scaler Labs UI (brand mark, merged Labs list, nav identity) ── */
+.brand-mark-img {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: block;
+  object-fit: contain;
+  background: #fff;
+  padding: 3px;
+  box-sizing: border-box;
+}
+.topnav-user {
+  color: var(--muted, #8b97a6);
+  font-size: 0.85rem;
+  padding: 0 0.4rem;
+}
+.topnav-logout {
+  display: inline;
+  margin: 0;
+}
+.topnav-logout-btn {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+}
+.lab-section-title {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted, #8b97a6);
+  margin: 1.6rem 0 0.75rem;
+}
+.lab-section-title:first-child { margin-top: 0; }
+.lab-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 0.7rem;
+  border: 1px solid var(--border, #2a3441);
+  border-radius: 12px;
+  background: var(--surface, #161c25);
+  transition: border-color 0.15s, transform 0.05s, box-shadow 0.15s;
+}
+.lab-card.is-clickable { cursor: pointer; }
+.lab-card.is-clickable:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 1px 0 rgba(59, 130, 246, 0.25), 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+.lab-card.is-clickable:active { transform: translateY(1px); }
+.lab-card.is-clickable:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.lab-card.is-enrolled { border-left: 3px solid #22c55e; }
+.lab-card.is-blocked { opacity: 0.6; }
+.lab-card-main { min-width: 0; flex: 1; }
+.lab-card-main h3 {
+  margin: 0.5rem 0 0.35rem;
+  font-size: 1.02rem;
+  font-weight: 620;
+}
+.lab-card-main p {
+  margin: 0;
+  color: var(--muted, #8b97a6);
+  font-size: 0.88rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lab-card-cta { flex-shrink: 0; }
+.lab-card-cta .button { pointer-events: none; }
+.lab-card-cta .button.is-busy { opacity: 0.7; }

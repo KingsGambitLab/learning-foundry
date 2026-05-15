@@ -47,7 +47,7 @@
   }
 
   function updateChromeCopy() {
-    const productTitle = state.info?.title || "Course Gen Codex";
+    const productTitle = state.info?.title || "Scaler Labs";
     const version = state.info?.version ? ` · ${state.info.version}` : "";
     document.title = `API Docs · ${productTitle}`;
     if (panelTitle) {
