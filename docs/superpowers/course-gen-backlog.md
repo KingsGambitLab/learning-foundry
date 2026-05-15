@@ -217,7 +217,55 @@ permits the LLM to ignore the loaded benchmark.
 
 ---
 
-## 9. Scenarios don't validate the skills the course advertises
+## 11. Calibration check: weak-baseline-runs as a publish gate
+
+**Status:** Backlog. Surfaced during the BM25 RAG course direct-fix
+work — once the grader bundle was anchored in real BeIR/fiqa data
+(commit `8ec99202`), four implementations were submitted to verify
+the difficulty gradient matches the advertised skills:
+
+| Implementation                          | Score | Technique                           |
+|-----------------------------------------|-------|-------------------------------------|
+| V1 skeleton (placeholder return)        | 4/18  | none                                |
+| V3 baseline                             | 5/18  | ``set(question) & set(passage)``    |
+| V4 BM25                                 | 7/18  | ``rank_bm25`` Okapi (k1=1.5, b=.75) |
+| V5 dense                                | 9/18  | sentence-transformers + FAISS       |
+
+Each advertised technique buys ~2 scenarios over the previous tier.
+The course's claim ("BM25 / FAISS / Pinecone") is now backed by a
+test set where these techniques actually unlock specific scenarios.
+
+What V5 still fails (the next pedagogical steps):
+- 5 happy_path/boundary: retrieval finds the right passage but
+  returns the WHOLE passage; judge says "answer extends far beyond
+  the primary point". Span extraction is the missing skill.
+- 3 out_of_scope: cosine-similarity-threshold abstention doesn't
+  fire because hard distractors still have cosine > 0.30. Smart
+  abstention (whether the question's specific concept is in any
+  passage) is the next step.
+- 1 adversarial: reorder + paraphrase breaks even dense retrieval.
+
+**Generalization:** the publish gate should automatically run a
+weak-baseline check before any course is marked publishable.
+Concretely:
+
+1. After scenarios are authored, materialize a deliberate baseline
+   starter (the V3 pattern: 80 lines of bag-of-words intersection).
+2. Run the grader against that baseline. Score it.
+3. If the baseline scores >= ``starter_target_max`` (e.g. 0.3 of
+   scenarios), the scenario set is too easy: either re-author
+   harder scenarios or downgrade the spec's advertised skills.
+4. If the baseline scores < ``starter_target_min`` (e.g. 0 of
+   scenarios), the scenarios are unreachable — likely a
+   contract/shape mismatch rather than a hard problem.
+
+This catches both BM25-style courses that secretly need none of
+their advertised techniques AND course generations where the
+scenarios were authored against a broken spec.
+
+---
+
+## 10. Benchmark data is loaded but dropped before grading [HIGH PRIORITY]
 
 **Status:** Backlog. Surfaced while comparing the V3 BM25 starter (80
 lines of `set(question) & set(sentence)`) against the course's
