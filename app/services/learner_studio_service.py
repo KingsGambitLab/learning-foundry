@@ -172,12 +172,23 @@ class LearnerStudioService:
                 (result.stderr or result.stdout).strip() or "Could not start learner editor container."
             )
 
-        editor_url = f"http://{self.host}:{host_port}/"
+        # Health-check the container on its loopback port directly.
+        local_editor_url = f"http://{self.host}:{host_port}/"
         try:
-            self._wait_for_http(editor_url, container_name=container_name)
+            self._wait_for_http(local_editor_url, container_name=container_name)
         except Exception:
             self._remove_runtime_support(workspace_path, network_name=network_name, container_prefix=container_name)
             raise
+        # The URL handed to the learner's browser. On a deployed host the
+        # code-server port is loopback-bound (M13 security fix), so we
+        # publish a reverse-proxy path instead of the raw 127.0.0.1 URL.
+        # COURSE_GEN_EDITOR_PUBLIC_BASE (e.g. "http://18.236.242.248")
+        # is set on staging; nginx maps /editor/<port>/ → the container.
+        editor_public_base = os.environ.get("COURSE_GEN_EDITOR_PUBLIC_BASE")
+        if editor_public_base:
+            editor_url = f"{editor_public_base.rstrip('/')}/editor/{host_port}/"
+        else:
+            editor_url = local_editor_url
         return LearnerWorkspaceSession(
             id=session_id,
             enrollment_id=enrollment_id,
