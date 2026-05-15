@@ -147,6 +147,57 @@ delete-and-stub step is mechanical.
 
 ---
 
+## 9. Scenarios don't validate the skills the course advertises
+
+**Status:** Backlog. Surfaced while comparing the V3 BM25 starter (80
+lines of `set(question) & set(sentence)`) against the course's
+advertised skill set (BM25 IDF, FAISS, Pinecone/pgvector, span
+extraction).
+
+**Originating direct fix:** None — this is a course-design gap.
+
+**The pattern:** A learner can pass the BM25 RAG course's 18 scenarios
+with boolean set intersection retrieval. None of the advertised
+techniques are required:
+
+- BM25 IDF/k1/b — not needed; corpora are 1-4 passages
+- FAISS / dense embeddings — not needed; lexical overlap is enough
+- Pinecone/pgvector — not needed; no vector store touched
+- Span extraction by question intent — not needed; whole-sentence
+  responses pass under `strictness: lenient`
+
+The scenarios test the I/O contract (response shape, citation recall
+≥50%, abstain on out-of-scope) but not the retrieval/extraction
+quality. The course markets skills the grader doesn't enforce.
+
+**What would close the gap (per skill):**
+
+| Skill | Scenario shape that would enforce it |
+|-------|--------------------------------------|
+| BM25 | 20+ passages sharing the question's keywords, gold disambiguated only by IDF weighting; assert `min_precision=0.8` not `min_recall=0.5` |
+| Embeddings/FAISS | Question paraphrased with zero lexical overlap to gold passage (synonyms, abbrevs); assert correct retrieval despite zero overlap |
+| Span extraction | `strictness: strict` on LLM judge so sentence-with-cruft answers fail |
+| Citation grounding | `min_precision` assertion, not just recall — over-citation should fail |
+
+**Generalization:** The scenario-authoring stage needs to ground each
+scenario in a SPECIFIC skill from `spec.learning_path` and verify that
+naive baselines fail it. Concrete option:
+
+(a) After scenario authoring, run the scenario set against a
+    deliberate baseline (set-overlap retriever, ~20 lines). Any
+    scenario the baseline passes either:
+    - Gets re-authored harder (more distractors / paraphrased question / tighter rubric)
+    - Gets reclassified as a `smoke_test` and excluded from skill-bar scoring
+
+(b) Have the scenario-authoring prompt receive the spec's advertised
+    skills and explicitly require each scenario to be "the kind of
+    test that fails if the learner only does <weak baseline>".
+
+Without one of these, the scorecard greenlights starters that don't
+demonstrate the skills the course is sold on.
+
+---
+
 ## 8. Scenario sets have binary difficulty cliffs
 
 **Status:** Backlog. Surfaced while calibrating the BM25 RAG starter.
