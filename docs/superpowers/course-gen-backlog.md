@@ -444,6 +444,78 @@ a default of 45 and per-category quotas (e.g. 15 happy + 6 boundary
 
 ---
 
+## 20. Course teaches re-ranking, not full-stack RAG (chunking + indexing + retrieval done upstream)
+
+**Status:** Backlog. Surfaced 2026-05-15 when the user asked
+"Where did chunking happen? And how was the search-result pool
+selected?".
+
+**Originating direct fix:** None — this is a scope/calibration gap
+in the course design.
+
+**The gap:** The BM25 RAG course markets five RAG skills:
+BM25 retrieval, dense embeddings (FAISS/Pinecone), span extraction,
+citation grounding, false-premise abstention. But the dataset
+pipeline (FiQA-2018 + our repair script) does TWO of the five
+upstream:
+
+  1. **Chunking** — FiQA shipped pre-chunked passages
+     (1 Stack Exchange answer = 1 retrievable unit). The learner
+     never sees raw documents or decides chunk boundaries.
+  2. **First-pass retrieval** — our
+     ``scripts/repair_bm25_course_fiqa.py`` scores the full 57K-passage
+     corpus by token overlap, then ships only the top 10 per query
+     (gold + hard distractors) to the learner. The learner never
+     queries a 1K+ corpus.
+
+So when a learner implements "BM25" against 10 in-request passages,
+they're not actually exercising production BM25 — they're rebuilding
+the index per request over a tiny pool that's already been
+ground-truthed by us. The IDF term in BM25 is computed over 10
+documents instead of 57K; the document-length normalization is
+operating on hand-picked similar-length passages; etc.
+
+Same for FAISS: embedding 10 passages and doing a flat-IP search
+is functionally identical to cosine-sort. The FAISS-specific value
+(IVF / HNSW indexing, billion-scale ANN, persistence) never enters
+the picture.
+
+**What the course actually teaches:** RE-ranking, span extraction,
+citation grounding, abstention. Reasonable scope for an
+intermediate course; just doesn't match the marketed skills.
+
+**Generalization options:**
+
+(a) Rename/reframe the course. Title becomes "RAG re-ranking +
+    extraction + grounding" instead of "BM25 retrieval + FAISS
+    indexing". Drop the misleading skills tags.
+
+(b) Expand scope: ship the FULL 57K-passage corpus to the learner
+    and have them build the index themselves. First-pass retrieval
+    becomes a learner concern. Per-scenario passage pool becomes
+    "all 57K passages — you decide which 10 to consider".
+    Significantly harder course; would need different scoring
+    (recall@K with the learner's own retrieval, not just citation
+    recall on a hand-picked pool).
+
+(c) Add a SECOND deliverable: a chunking + indexing prerequisite
+    where the learner builds a corpus index over a small documents
+    dump, then deliverable 2 (current course) becomes the
+    re-rank/extract layer.
+
+(b) and (c) are the honest-to-the-marketing options. (a) is the
+honest-to-the-current-scope option.
+
+The pipeline pattern this reveals: when spec authoring lists a
+skill, the materializer should mechanically check that the
+scenarios test that skill in a way the dataset structure
+ENABLES. If FiQA ships pre-chunked passages, "chunking" can't
+be a skill in a FiQA-backed course. The spec validator should
+reject `learning_path` entries that the chosen benchmark can't
+support.
+
+---
+
 ## 16. Visible samples ship with empty retrieval pools
 
 **Status:** Backlog. Surfaced 2026-05-15 while answering the user's
