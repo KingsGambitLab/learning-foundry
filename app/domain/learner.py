@@ -106,6 +106,12 @@ class LearnerSubmissionRecord(BaseModel):
     pass_rate: float = Field(ge=0.0, le=1.0)
     grade_report: DeliverableGradeReport
     assignment_report: AssignmentGradeReport | None = None
+    # SHA-256 of the grader bundle that was used to grade this submission.
+    # Populated for outcome-mode submissions so post-hoc drift detection
+    # is possible if a course author modifies the bundle between
+    # submissions against the same publish snapshot. None for legacy or
+    # non-outcome submissions.
+    grader_bundle_digest: str | None = None
 
 
 class LearnerDeliverableProgress(BaseModel):

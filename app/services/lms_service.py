@@ -1125,6 +1125,12 @@ class LMSService:
 
         submission_group_id = f"submission_{uuid4().hex[:12]}"
         created_at = datetime.now(UTC)
+        # P0 #4 audit: persist the grader-bundle fingerprint on the
+        # submission row so any post-hoc drift between two submissions
+        # against the same publish snapshot is recoverable. The bundle
+        # lives at a mutable authoring path today; until that bundle
+        # ships inside the immutable publish snapshot, this is the
+        # durable audit trail.
         submission = LearnerSubmissionRecord(
             id=f"{submission_group_id}_{deliverable_id.replace('/', '_')}",
             submission_group_id=submission_group_id,
@@ -1137,27 +1143,8 @@ class LMSService:
             pass_rate=pass_rate,
             grade_report=grade_report,
             assignment_report=assignment_report,
+            grader_bundle_digest=grader_bundle_digest,
         )
-        # P0 #4 audit log: pin the grader-bundle fingerprint to this
-        # submission row so any post-hoc drift between two submissions
-        # against the same publish snapshot is recoverable. Long-term
-        # fix is to embed the bundle inside the immutable publish
-        # snapshot — until that ships, this is the audit trail.
-        try:
-            import logging
-            logging.getLogger("course_gen.lms.submit").info(
-                "outcome_submit.bundle_digest",
-                extra={
-                    "submission_id": submission.id,
-                    "enrollment_id": enrollment.id,
-                    "publish_snapshot_id": enrollment.publish_snapshot_id,
-                    "course_run_id": course_run.id,
-                    "grader_bundle_digest": grader_bundle_digest,
-                    "authoring_root": str(authoring_root),
-                },
-            )
-        except Exception:
-            pass
         self.store.save_learner_submission(submission)
 
         refreshed = enrollment.model_copy(deep=True)
