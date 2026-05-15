@@ -1029,6 +1029,20 @@
   overflow: hidden;
 }
 
+/* Passing rows: green border + faint green tint so they read as
+   "this one's fine, you don't need to look here" inside an otherwise
+   red Summary feedback container. */
+.test-result-passed > .test-result-row {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(240, 253, 244, 0.6);
+}
+
+/* Failing rows keep the default gray-on-white card but get a subtle
+   red left border so they're scannable in a long list. */
+.test-result-blocked > .test-result-row {
+  border-left: 3px solid rgba(248, 113, 113, 0.65);
+}
+
 .test-result-row > summary {
   list-style: none;
   cursor: pointer;
