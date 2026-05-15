@@ -13,6 +13,7 @@ from app.domain.grading import (
     AssignmentGradeReport,
     DeliverableGradeReport,
     GradeStatus,
+    LearnerReviewGuidance,
     ReviewAreaGradeReport,
     TestGradeResult,
 )
@@ -142,6 +143,174 @@ def humanize_diagnostic(raw: str) -> str:
 
     # Unrecognized — pass through. Better than losing signal.
     return raw
+
+
+# ---------------- Outcome-mode feedback clustering ----------------
+
+# Group humanized diagnostics into root-cause clusters so the scorecard
+# can surface "fix this first, it blocks 8 scenarios" instead of a flat
+# list of 19 equally-weighted failures.
+
+_MAX_CAUSES = 5  # top-N clusters shown in priority list
+
+
+def _cluster_key(diagnostic: str) -> tuple[str, str]:
+    """Return ``(cluster_key, root_path)`` for a humanized diagnostic.
+
+    The cluster key is what we group by; the root path is what we show
+    to the learner. Cascading sub-field misses collapse under their
+    parent (``eval.regression_diff.baseline_present`` → root
+    ``eval.regression_diff``).
+    """
+    m = re.match(r"Response is missing (?:numeric )?field `([^`]+)`", diagnostic)
+    if m:
+        path = m.group(1)
+        segments = path.split(".")
+        # Use first two segments as the root — captures the
+        # ``<top_namespace>.<block>`` shape we keep seeing
+        # (``eval.regression_diff``, ``eval.summary``).
+        root = ".".join(segments[:2]) if len(segments) >= 2 else segments[0]
+        return f"missing_field:{root}", root
+    if diagnostic == "Response shape doesn't match the required schema":
+        return "schema_mismatch", "response schema"
+    m = re.match(r"Expected `([^`]+)` to be", diagnostic)
+    if m:
+        return f"wrong_value:{m.group(1)}", m.group(1)
+    if diagnostic.startswith("Retrieval recall"):
+        return "retrieval_recall", "retrieval recall"
+    # Fallback: each unique diagnostic is its own cluster.
+    return f"other:{diagnostic}", diagnostic
+
+
+def _describe_cluster(
+    cluster_key: str, root: str, scenario_count: int, exemplar: str
+) -> str:
+    """Render a single cluster as a one-line root-cause description.
+
+    ``exemplar`` is the first humanized diagnostic the cluster saw; we
+    parse it for the value-detail (e.g. expected ``422``, got ``400``)
+    so the priority line is genuinely actionable rather than a path
+    name in isolation.
+    """
+    plural = "scenarios" if scenario_count != 1 else "scenario"
+    if cluster_key.startswith("missing_field:"):
+        return (
+            f"Add the `{root}` block to your response — "
+            f"{scenario_count} {plural} check for it"
+        )
+    if cluster_key == "schema_mismatch":
+        return (
+            f"Response shape doesn't match the required schema — "
+            f"affects {scenario_count} {plural}"
+        )
+    if cluster_key.startswith("wrong_value:"):
+        # Pull expected/got out of the exemplar so the actionable hint
+        # is visible without expanding the per-scenario detail.
+        m = re.match(r"Expected `[^`]+` to be `([^`]+)`, got `([^`]+)`", exemplar)
+        if m:
+            expected, got = m.group(1), m.group(2)
+            return (
+                f"`{root}` should be `{expected}` but is `{got}` — "
+                f"affects {scenario_count} {plural}"
+            )
+        return (
+            f"Wrong value at `{root}` — "
+            f"affects {scenario_count} {plural}"
+        )
+    if cluster_key == "retrieval_recall":
+        return (
+            f"Retrieval recall below threshold — "
+            f"affects {scenario_count} {plural}"
+        )
+    # Fallback to the raw diagnostic.
+    return f"{root} — {scenario_count} {plural}"
+
+
+def build_outcome_feedback(
+    results: list[TestGradeResult],
+) -> LearnerReviewGuidance | None:
+    """Synthesize a tech-lead-style review from per-scenario test results.
+
+    Returns ``None`` when there's nothing to fix. Otherwise populates a
+    :class:`LearnerReviewGuidance` whose fields drive the existing
+    ``renderLearnerGuidance`` block in the UI:
+
+    - ``learner_feedback`` — one-line headline ("X of N passing, most
+      failures cluster around Y").
+    - ``fundamental_gap`` — the single top blocker as a sentence.
+    - ``likely_root_cause`` — top N clusters, each as a one-line advice
+      string with impact count.
+    """
+    failed = [r for r in results if r.status != GradeStatus.passed]
+    if not failed:
+        return None
+
+    total = len(results)
+    passed = total - len(failed)
+
+    # Build clusters: cluster_key -> {scenarios: set[str], root: str,
+    # exemplar: str}. ``exemplar`` is the first humanized diagnostic
+    # the cluster saw — used to render value-detail in the descriptor.
+    clusters: dict[str, dict[str, Any]] = {}
+    for result in failed:
+        for diagnostic in result.diagnostics or []:
+            key, root = _cluster_key(diagnostic)
+            entry = clusters.setdefault(
+                key, {"scenarios": set(), "root": root, "exemplar": diagnostic}
+            )
+            entry["scenarios"].add(result.test_id)
+
+    if not clusters:
+        # Scenarios failed but produced no diagnostics — unusual. Surface
+        # what we can.
+        return LearnerReviewGuidance(
+            learner_feedback=(
+                f"{passed} of {total} checks passing. "
+                f"{len(failed)} scenarios failed without a structured diagnostic — "
+                f"see the per-scenario detail for what was checked."
+            ),
+        )
+
+    # Rank clusters by scenario-impact desc, then by key for stable order.
+    ranked = sorted(
+        clusters.items(),
+        key=lambda kv: (-len(kv[1]["scenarios"]), kv[0]),
+    )
+    top = ranked[:_MAX_CAUSES]
+
+    likely_root_cause = [
+        _describe_cluster(
+            key, entry["root"], len(entry["scenarios"]), entry["exemplar"]
+        )
+        for key, entry in top
+    ]
+
+    top_key, top_entry = top[0]
+    top_count = len(top_entry["scenarios"])
+    top_root = top_entry["root"]
+    top_exemplar = top_entry["exemplar"]
+
+    # Headline: one line that names the top cluster.
+    if len(top) == 1:
+        headline = (
+            f"{passed} of {total} checks passing. "
+            f"The remaining failures all trace back to `{top_root}`."
+        )
+    else:
+        headline = (
+            f"{passed} of {total} checks passing. "
+            f"Most failures cluster around `{top_root}` "
+            f"({top_count} scenario{'s' if top_count != 1 else ''}) — "
+            f"fix that first, then work down the list below."
+        )
+
+    fundamental_gap = _describe_cluster(top_key, top_root, top_count, top_exemplar)
+
+    return LearnerReviewGuidance(
+        learner_feedback=headline,
+        fundamental_gap=fundamental_gap,
+        likely_root_cause=likely_root_cause,
+    )
 
 
 class LMSService:
@@ -681,7 +850,7 @@ class LMSService:
             objective=deliverable.objective,
             deliverable_index=deliverable.deliverable_index,
             grade_report=grade_report,
-            feedback=None,
+            feedback=build_outcome_feedback(results),
         )
         assignment_report = AssignmentGradeReport(
             total_tests=total,

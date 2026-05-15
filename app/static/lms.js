@@ -707,16 +707,20 @@
       `;
     };
 
+    // Per-scenario detail collapses by default. The headline summary
+    // (rendered by ``renderLearnerGuidance`` from the populated
+    // ``feedback`` object) is the primary view; drill into the full
+    // list only when the learner wants to see every scenario.
     return `
       ${failed.length ? `
-        <details class="review-guidance" open>
-          <summary>${escapeHtml(`${failed.length} check${failed.length === 1 ? "" : "s"} need attention`)}</summary>
+        <details class="review-guidance">
+          <summary>${escapeHtml(`See all ${failed.length} failing check${failed.length === 1 ? "" : "s"}`)}</summary>
           <ul class="test-result-list">${failed.map(renderOne).join("")}</ul>
         </details>
       ` : ""}
       ${passed.length ? `
         <details class="review-guidance">
-          <summary>${escapeHtml(`${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
+          <summary>${escapeHtml(`See all ${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
           <ul class="test-result-list">${passed.map(renderOne).join("")}</ul>
         </details>
       ` : ""}
