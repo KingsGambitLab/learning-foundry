@@ -4,14 +4,16 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api.auth_routes import router as auth_router
-from app.api.deps import current_user_optional
+from app.api.deps import current_user, current_user_optional
 from app.api.routes import router
+from app.domain.auth import Role, User
+from app.domain.course import CourseRunStatus
 from app.services.artifact_materializer import ArtifactMaterializer
 from app.services.assignment_workspace_manager import AssignmentWorkspaceManager
 from app.services.course_artifact_materializer import CourseArtifactMaterializer
@@ -222,7 +224,11 @@ def register_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/lms/courses/{course_run_id}", tags=["system"], include_in_schema=False)
-def lms_course_detail(course_run_id: str, request: Request) -> HTMLResponse:
+def lms_course_detail(
+    course_run_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+) -> HTMLResponse:
     """Outcome-mode learner-preview page.
 
     The legacy LMS flow assumes a ``publish_snapshot`` with a
@@ -230,9 +236,14 @@ def lms_course_detail(course_run_id: str, request: Request) -> HTMLResponse:
     courses don't (yet) emit a snapshot — ``node_publish`` only writes
     the README + course_spec + grader runner. This route renders a thin
     page that surfaces what the published outcome bundle DOES carry:
-    title, goal, capability flags, endpoint contracts, quality bars,
-    and the on-disk workspace path so the operator can inspect the
-    artifacts.
+    title, goal, capability flags, endpoint contracts, quality bars.
+
+    Auth model (codex P0 pass 6 fix):
+    - Authentication is required; anonymous viewers get redirected to
+      ``/login`` by the ``current_user`` dependency.
+    - The internal authoring artifact path (``outcome_state.workspace_root``)
+      is creator-only. Learners see the published bundle's
+      learner-facing facets but never the on-disk authoring path.
 
     Returns 404 only when the course_run is unknown.
     """
@@ -244,9 +255,19 @@ def lms_course_detail(course_run_id: str, request: Request) -> HTMLResponse:
             f"<code>{course_run_id}</code>.</p>",
             status_code=404,
         )
+    is_creator = user.role == Role.creator
+    # Learners should only see published / learner-ready courses. Creators
+    # can preview any course they have visibility into.
+    if not is_creator and course_run.status != CourseRunStatus.published:
+        return HTMLResponse(
+            "<h1>404 — Course not available</h1>"
+            "<p>This course is not yet published for learners.</p>",
+            status_code=404,
+        )
     outcome_state = (course_run.payload_json or {}).get("outcome_state") or {}
     spec = outcome_state.get("spec") or {}
-    workspace_root = outcome_state.get("workspace_root") or "?"
+    # Internal: only creators see the authoring workspace path.
+    workspace_root = (outcome_state.get("workspace_root") or "?") if is_creator else None
     endpoints = spec.get("endpoints") or []
     quality_bars = spec.get("quality_bars") or []
     learning_path = spec.get("learning_path") or []
@@ -305,15 +326,19 @@ def lms_course_detail(course_run_id: str, request: Request) -> HTMLResponse:
         f"<dt>Oracle source</dt><dd><code>{_esc(spec.get('oracle_source'))}</code></dd>"
         f"{benchmark_html}"
         f"<dt>Capabilities</dt><dd>{_esc(caps)}</dd>"
-        f"<dt>Workspace</dt><dd><code>{_esc(workspace_root)}</code></dd>"
-        f"</dl>"
+        + (f"<dt>Workspace</dt><dd><code>{_esc(workspace_root)}</code></dd>" if is_creator else "")
+        + "</dl>"
         f"<h2>Endpoint contracts</h2><ul>{endpoints_html}</ul>"
         f"<h2>Quality bars ({len(quality_bars)})</h2><ul>{bars_html}</ul>"
         f"<h2>Learning path</h2><ul>{hints_html or '<li class=muted>none</li>'}</ul>"
-        f"<h2>Inspect raw state</h2>"
-        f"<p><a href='/v1/course-runs/{_esc(course_run_id)}'>"
-        f"GET /v1/course-runs/{_esc(course_run_id)}</a></p>"
-        "</body></html>"
+        + (
+            f"<h2>Inspect raw state</h2>"
+            f"<p><a href='/v1/course-runs/{_esc(course_run_id)}'>"
+            f"GET /v1/course-runs/{_esc(course_run_id)}</a></p>"
+            if is_creator
+            else ""
+        )
+        + "</body></html>"
     )
     return HTMLResponse(body)
 
