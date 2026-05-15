@@ -798,6 +798,8 @@ def run_scenario(
                 captures=captures,
                 http_client=client,
                 timeout=timeout,
+                setup_data=setup_data,
+                course_meta=course_meta,
             )
             trace_results.append(result)
             if not result.expect_passed:
