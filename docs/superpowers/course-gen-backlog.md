@@ -265,7 +265,7 @@ scenarios were authored against a broken spec.
 
 ---
 
-## 10. Benchmark data is loaded but dropped before grading [HIGH PRIORITY]
+## 9. Scenarios don't validate the skills the course advertises
 
 **Status:** Backlog. Surfaced while comparing the V3 BM25 starter (80
 lines of `set(question) & set(sentence)`) against the course's
@@ -352,6 +352,124 @@ as authored don't produce one.
   publish.
 - (c) Accept that with abstained-LLM-judges, the scoring will always
   cliff, and document the calibration assumes a live judge.
+
+---
+
+## 12. Visible/hidden corpus passage leakage
+
+**Status:** Backlog. Surfaced 2026-05-15 during a passage-overlap audit
+of the BM25 RAG course (commit `c84ac7c5`).
+
+**Originating direct fix:** None yet — the audit found leakage; this
+item tracks the systematic fix.
+
+**The bug:** The repair scripts pick visible queries and hidden queries
+from disjoint `query_id` sets. But each query's 10-passage pool is
+selected independently by token overlap with the query, sampled from
+the same 57K-passage BeIR/fiqa corpus. Audit shows **2 of 50 visible
+passages also appear in the hidden pool**:
+
+  ```
+  VISIBLE: 5 queries, 50 unique passages
+  HIDDEN:  20 queries, 186 unique passages
+  qid overlap:     0  (clean)
+  passage overlap: 2  (leak — same passages in visible+hidden)
+  ```
+
+That's 4% leakage on visible passages. Marginal for this course, but
+the leakage rate scales with topical similarity between visible and
+hidden queries. A learner who memorizes those passages could over-fit.
+
+**Generalization:** the visible-sample picker should:
+- Track every passage_id allocated to the hidden pool first
+- Exclude those passage_ids from the candidate set when picking
+  distractors for visible queries
+- Assert at the end that ``visible_pids ∩ hidden_pids == ∅`` and
+  fail publish otherwise
+
+Implement in ``benchmark_loader.split_crag_for_visibility`` /
+``split_beir_for_visibility`` so future benchmark-backed courses get
+clean splits by construction.
+
+---
+
+## 13. Visible samples lack scenario-category coverage
+
+**Status:** Backlog. Same audit as #12.
+
+**The bug:** The 18 hidden scenarios span 5 categories — happy_path,
+boundary, malformed_input, out_of_scope, idempotency, adversarial.
+The 5 visible samples are all "general queries" (~happy_path shape).
+A learner can develop and verify retrieval/extraction locally, but
+has no visible example for:
+- abstention on false-premise / out-of-scope questions
+- distractor injection / passage reordering robustness
+- malformed-input validation responses
+
+So learners can't iterate on those skills locally — they have to
+guess what the hidden grader expects, submit, and iterate against
+the scorecard.
+
+**Generalization:** visible-sample picker should include at least one
+example per scenario CATEGORY (out_of_scope, adversarial, etc.) with
+its expected behavior labeled, so the learner has a worked example
+for each skill the grader tests.
+
+---
+
+## 14. Hidden test set is too small relative to available data
+
+**Status:** Backlog. User suggestion 2026-05-15 — "if we have 50
+examples from the repo, maybe share 5 with learner and keep 45
+hidden for private evaluation".
+
+**The bug:** Current ratio is 5 visible : 20 hidden (1:4). User
+suggests 1:9 (5 visible : 45 hidden). Today we use **0.30%** of
+BeIR/fiqa's 6,648 queries — there's plenty of headroom.
+
+**Concerns balancing this:**
+- Each hidden scenario = ~1 haiku call for the LLM judge = ~$0.0017.
+  18 → 45 scenarios = ~$0.08/submit, vs ~$0.03 today. Cost scales.
+- Wall-clock: 18 scenarios takes ~30s today (per submit). 45 would be
+  ~75s. Still fine.
+- Statistical signal: 18 binary trials gives ±12% confidence interval
+  around the true pass rate. 45 trials drops it to ±7%. Materially
+  more accurate calibration.
+
+**Generalization:** target a 1:9 visible/hidden ratio in the
+benchmark-backed authoring path. Make the hidden set size a
+spec-level parameter (``spec.benchmark.hidden_query_count``) with
+a default of 45 and per-category quotas (e.g. 15 happy + 6 boundary
++ 6 malformed + 6 out_of_scope + 3 idempotency + 9 adversarial).
+
+---
+
+## 15. Visible samples expose `gold_passage_ids` labels
+
+**Status:** Backlog. Same audit as #12.
+
+**The current behavior:** Each visible sample includes
+``gold_passage_ids`` — explicitly labels which passage in the pool
+contains the answer. This is the same convention real research
+benchmarks use for DEV splits: labeled gold to help iteration.
+
+**The concern:** If the visible samples are used as a "training
+set" and the learner over-fits to the labeled gold (e.g., hard-codes
+"return passage 0" assuming gold is always first), the hidden set's
+unlabeled gold won't match the assumption.
+
+**Two possible directions:**
+(a) Keep gold_passage_ids visible (learner needs a dev signal to
+    iterate); label clearly in the README that "real submission
+    gold is hidden — don't hard-code positions or IDs from these
+    samples".
+(b) Strip gold_passage_ids from visible; provide a `dev_check`
+    endpoint or local utility that scores a learner-submitted answer
+    against unlabeled gold. Closer to a real benchmark dev split.
+
+(a) is faster to ship; (b) is more pedagogically honest. Either way
+the **course brief must explicitly document the visible/hidden
+convention** so a learner doesn't accidentally over-fit.
 
 ---
 
