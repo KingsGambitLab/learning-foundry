@@ -159,6 +159,26 @@
     return svg;
   }
 
+  function expandIcon() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
+    // Four corner arrows pointing outward — "maximise" glyph
+    svg.innerHTML = `<polyline points="4 10 4 4 10 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="20 10 20 4 14 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="4 14 4 20 10 20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="20 14 20 20 14 20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    return svg;
+  }
+
+  function collapseIcon() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
+    // Four corner arrows pointing inward — "minimise" glyph
+    svg.innerHTML = `<polyline points="10 4 10 10 4 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="14 4 14 10 20 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="10 20 10 14 4 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="14 20 14 14 20 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    return svg;
+  }
+
   // ── Widget factory ────────────────────────────────────────────────────────
   // Called once; returns mount/unmount/update handles.
   function createWidget(initialCfg) {
@@ -198,14 +218,41 @@
     headerTitle.className = "lt-header-title";
     headerTitle.textContent = cfg.assignmentTitle || "Lab Tutor";
 
+    const expandBtn = document.createElement("button");
+    expandBtn.className = "lt-icon-btn lt-expand";
+    expandBtn.type = "button";
+    expandBtn.setAttribute("aria-label", "Maximise Lab Tutor");
+    expandBtn.appendChild(expandIcon());
+
     const closeBtn = document.createElement("button");
-    closeBtn.className = "lt-close";
+    closeBtn.className = "lt-icon-btn lt-close";
     closeBtn.type = "button";
     closeBtn.setAttribute("aria-label", "Close Lab Tutor");
     closeBtn.appendChild(closeIcon());
 
+    const headerActions = document.createElement("div");
+    headerActions.className = "lt-header-actions";
+    headerActions.appendChild(expandBtn);
+    headerActions.appendChild(closeBtn);
+
     header.appendChild(headerTitle);
-    header.appendChild(closeBtn);
+    header.appendChild(headerActions);
+
+    let expanded = false;
+    function toggleExpanded(force) {
+      const next = typeof force === "boolean" ? force : !expanded;
+      if (next === expanded) return;
+      expanded = next;
+      panel.classList.toggle("lt-panel--expanded", expanded);
+      // Swap the button icon + label so the affordance reflects the next action.
+      expandBtn.innerHTML = "";
+      expandBtn.appendChild(expanded ? collapseIcon() : expandIcon());
+      expandBtn.setAttribute(
+        "aria-label",
+        expanded ? "Minimise Lab Tutor" : "Maximise Lab Tutor"
+      );
+    }
+    expandBtn.addEventListener("click", () => toggleExpanded());
 
     // Message log
     const log = document.createElement("div");

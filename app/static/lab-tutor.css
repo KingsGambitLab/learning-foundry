@@ -101,10 +101,27 @@
   display: none;
 }
 
+/* Expanded ("maximised") mode — gives diagrams + long replies room to breathe.
+   Anchored bottom-right like the default, but grows toward the top-left so the
+   bubble stays put. Sized to leave ~24px gutters; capped so it never feels
+   modal-glued-edge-to-edge. */
+.lt-panel.lt-panel--expanded {
+  width: min(820px, calc(100vw - 48px));
+  height: min(820px, calc(100vh - 120px));
+  bottom: 92px;
+  right: 24px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24);
+}
+
 /* Narrow viewport override */
 @media (max-width: 420px) {
   .lt-panel {
     width: calc(100vw - 24px);
+    right: 12px;
+  }
+  .lt-panel.lt-panel--expanded {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 120px);
     right: 12px;
   }
   .lt-bubble {
@@ -133,6 +150,15 @@
   min-width: 0;
 }
 
+.lt-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* Shared icon-button style (used by both maximise and close). */
+.lt-icon-btn,
 .lt-close {
   flex-shrink: 0;
   width: 28px;
@@ -149,11 +175,13 @@
   transition: background 0.1s ease, color 0.1s ease;
 }
 
+.lt-icon-btn:hover,
 .lt-close:hover {
   background: var(--lt-surface-2);
   color: var(--lt-text);
 }
 
+.lt-icon-btn svg,
 .lt-close svg {
   width: 16px;
   height: 16px;
