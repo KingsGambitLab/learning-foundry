@@ -733,20 +733,42 @@ class LMSService:
         grader = self._outcome_grader or OraclePass(
             sandbox_runner=WorkspaceBootSandboxAdapter()
         )
+
+        # Live LLM judge (haiku tier) when the env is configured. The
+        # judge rubrics call ``router.parse_structured(tier=haiku, ...)``
+        # — a missing/misconfigured router falls back to the abstain
+        # path so grading still completes. Best-effort: any router-init
+        # exception is logged and we proceed without the judge.
+        router: Any | None = None
+        try:
+            from app.services.llm_router import get_default_router
+            router = get_default_router()
+        except Exception:
+            router = None
+
         try:
             pass_result = grader.run(
                 scenarios=scenarios,
                 reference_impl_dir=learner_starter,
                 setup_data_dir=setup_data_dir,
+                router=router,
                 capabilities=capabilities,
             )
         except TypeError:
-            # Fake graders without the ``capabilities`` kwarg.
-            pass_result = grader.run(
-                scenarios=scenarios,
-                reference_impl_dir=learner_starter,
-                setup_data_dir=setup_data_dir,
-            )
+            # Fake graders without ``capabilities`` / ``router`` kwargs.
+            try:
+                pass_result = grader.run(
+                    scenarios=scenarios,
+                    reference_impl_dir=learner_starter,
+                    setup_data_dir=setup_data_dir,
+                    router=router,
+                )
+            except TypeError:
+                pass_result = grader.run(
+                    scenarios=scenarios,
+                    reference_impl_dir=learner_starter,
+                    setup_data_dir=setup_data_dir,
+                )
 
         # Aggregate per-scenario verdicts into the legacy GradeReport
         # shape so the existing experience / scorecard UI rendering
