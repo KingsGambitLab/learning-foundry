@@ -44,8 +44,8 @@ All skills below are **gating** (must pass to score) except S8.
 - **S7 — Contract & reliability:** strict response schema; **decision idempotency** (same request → same decision); degrade gracefully if the LLM is down.
 - **S8 — LLM answer quality (bonus, non-gating):** use the proxy to phrase a grounded, concise reply.
 
-The green bar (≥ 15 / 22) is reachable with **S1–S7 and the free core
-libraries only** — no LLM required for any decision. S8 adds polish/score
+Passing the review (≥ 15 / 22 checks) is reachable with **S1–S7 and the
+free core libraries only** — no LLM required for any decision. S8 adds polish/score
 but never blocks.
 
 ## Tools (fixed, pre-installed — use only these)
@@ -77,7 +77,7 @@ langfuse) is deliberately not installed to keep submission builds fast.
 ## Using an LLM (only S8 — optional)
 
 - **S1–S7 need no LLM.** Build them with plain deterministic code; that
-  alone reaches the green bar.
+  alone passes the review.
 - **S8 is the only place an LLM helps** (bonus, non-gating) — to phrase
   a nicer grounded reply. A ready-to-use LLM endpoint is provided to you
   via the `LAB_LLM_BASE_URL` / `LAB_LLM_TOKEN` environment variables; the

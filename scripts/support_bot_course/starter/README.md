@@ -23,6 +23,6 @@ feedback on **what works and what to improve**, useful to iterate — and
 you can **submit as many times as you need** to solve the assignment.
 Use the visible checks above to iterate fast locally between submissions.
 
-The green bar (≥ 15 / 22) is reachable with the pre-installed core
-libraries and **no LLM**. The LLM (S8) only polishes the reply and is a
-non-gating bonus — see `project_brief.md`.
+Passing the review (≥ 15 / 22 checks) is reachable with the pre-installed
+core libraries and **no LLM**. The LLM (S8) only polishes the reply and is
+a non-gating bonus — see `project_brief.md`.

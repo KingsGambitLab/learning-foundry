@@ -6,7 +6,7 @@ Contract:  POST /support/answer
   response: {reply, action, citations:[article_id], redactions:int,
              abstained:bool, escalation_reason?}
 
-You are graded on the skills in project_brief.md. The green bar is
+You are graded on the skills in project_brief.md. Passing the review is
 reachable with the free core libs (no LLM needed for the decisions);
 the LLM (via the platform proxy at env LAB_LLM_BASE_URL, token
 LAB_LLM_TOKEN) only polishes `reply` and is a non-gating bonus.

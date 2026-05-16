@@ -15,7 +15,7 @@ uvicorn==0.30.6
 pydantic==2.9.2
 httpx==0.28.1
 
-# Retrieval / reliability (green bar reachable with rank_bm25 + numpy;
+# Retrieval / reliability (passing the review needs only rank_bm25 + numpy;
 # sentence-transformers + faiss is the illustrative dense path — its
 # model is baked into the image at build time, see Dockerfile).
 numpy==1.26.4
