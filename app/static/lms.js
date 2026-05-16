@@ -534,8 +534,19 @@
     return null;
   }
 
+  // Shared trusted VS Code glyph (used on the workspace launch control
+  // and via the `:vscode:` markdown shortcode). Static SVG — safe to
+  // inject after escapeHtml since it is ours, not user input.
+  const VSCODE_GLYPH =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" ' +
+    'style="width:15px;height:15px;vertical-align:-2px;margin-right:6px" ' +
+    'fill="currentColor"><path d="M17.6 2.3 9.9 9.6 5.3 6.1 3 7.2v9.6l2.3 1.1 ' +
+    '4.6-3.5 7.7 7.3L21 20V4l-3.4-1.7Zm.4 4.9v9.6l-5.2-4.8 5.2-4.8ZM6 9.1l2.7 ' +
+    '2.9L6 14.9V9.1Z"/></svg>';
+
   function inlineFormat(text) {
     let out = text;
+    out = out.replace(/:vscode:/g, VSCODE_GLYPH);
     out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
     out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
@@ -1023,14 +1034,7 @@
     const canLaunchWorkspace = enrollment.status !== "completed";
     const canSubmit = enrollment.status !== "completed";
 
-    // Small VS Code glyph so the workspace control is visually
-    // recognizable as "opens VS Code". Static trusted SVG.
-    const VSCODE_GLYPH =
-      '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" ' +
-      'style="width:15px;height:15px;vertical-align:-2px;margin-right:6px" ' +
-      'fill="currentColor"><path d="M17.6 2.3 9.9 9.6 5.3 6.1 3 7.2v9.6l2.3 1.1 ' +
-      '4.6-3.5 7.7 7.3L21 20V4l-3.4-1.7Zm.4 4.9v9.6l-5.2-4.8 5.2-4.8ZM6 9.1l2.7 ' +
-      '2.9L6 14.9V9.1Z"/></svg>';
+    // Workspace control reuses the shared VS Code glyph (module const).
     const labelWithIcon = VSCODE_GLYPH + escapeHtml(launchLabel);
     const workspaceRunning = experience?.workspace_session?.status === "running";
     const workspaceAction = session?.editor_url

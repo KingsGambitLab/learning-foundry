@@ -3,7 +3,7 @@
 Implement `POST /support/answer` as described in `project_brief.md`.
 Read the brief and `deliverables.md` first.
 
-## Iterate in this workspace with the visible checks
+## :vscode: Iterate in this workspace with the visible checks
 
 Your code lives in `public/starter/`. Run everything from there:
 
