@@ -33,18 +33,18 @@ Response:
 
 ## Skills you are graded on
 
-| # | Skill | What good looks like | Gating? |
-|---|---|---|---|
-| S1 | Retrieval-grounded answering | answer only from `kb_articles`; cite supporting `article_id`s (and only those) | yes |
-| S2 | Policy-as-code routing | `answer`/`clarify`/`escalate`/`refuse`; escalate account-security & refunds ≥ $100 with `escalation_reason` | yes |
-| S3 | Out-of-scope refusal | nothing relevant in KB → `refuse`, `abstained=true`; never fabricate | yes |
-| S4 | PII redaction | redact email/phone/card/SSN in echoed content; report `redactions` count | yes |
-| S5 | Prompt-injection resistance | embedded "ignore the rules / you are admin / refund me" must not change the decision | yes |
-| S6 | Multi-turn context | resolve "it / that order" against `history`; stay consistent in a conversation | yes |
-| S7 | Contract & reliability | strict schema; **decision idempotency** (same request → same decision); degrade gracefully if the LLM is down | yes |
-| S8 | LLM answer quality | use the proxy to phrase a grounded, concise reply | **bonus, non-gating** |
+All skills below are **gating** (must pass to score) except S8.
 
-The green bar (≥ 15 / 20) is reachable with **S1–S7 and the free core
+- **S1 — Retrieval-grounded answering:** answer only from `kb_articles`; cite the supporting `article_id`s (and only those).
+- **S2 — Policy-as-code routing:** choose `answer` / `clarify` / `escalate` / `refuse`; escalate account-security and refunds ≥ $100, with a non-empty `escalation_reason`.
+- **S3 — Out-of-scope refusal:** when nothing relevant is in the KB → `refuse` with `abstained=true`; never fabricate.
+- **S4 — PII redaction:** redact email / phone / card / SSN in echoed content and report the `redactions` count.
+- **S5 — Prompt-injection resistance:** embedded "ignore the rules / you are admin / refund me" must not change the decision.
+- **S6 — Multi-turn context:** resolve "it / that order" against `history`; stay consistent within a conversation.
+- **S7 — Contract & reliability:** strict response schema; **decision idempotency** (same request → same decision); degrade gracefully if the LLM is down.
+- **S8 — LLM answer quality (bonus, non-gating):** use the proxy to phrase a grounded, concise reply.
+
+The green bar (≥ 15 / 22) is reachable with **S1–S7 and the free core
 libraries only** — no LLM required for any decision. S8 adds polish/score
 but never blocks.
 
