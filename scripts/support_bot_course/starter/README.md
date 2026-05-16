@@ -5,9 +5,9 @@ Read the brief and `deliverables.md` first.
 
 ## Iterate in this workspace with the visible checks
 
-Run the visible checks inside this workspace and iterate locally before
-you submit:
+Your code lives in `public/starter/`. Run everything from there:
 
+- `cd public/starter`
 - `pip install -r requirements.txt`
 - `uvicorn app:app --reload --port 8000` — run your service
 - `python public/checks/run_visible_checks.py` — offline self-check (uses a local LLM stub)
@@ -15,6 +15,13 @@ you submit:
 The visible checks are a **small subset of the real review run**. The
 hidden grader uses different conversations from the same distribution —
 make your solution general; do not hard-code to the visible samples.
+
+## Submit
+
+Submit the whole project to run the full learner review checks. You get
+feedback on **what works and what to improve**, useful to iterate — and
+you can **submit as many times as you need** to solve the assignment.
+Use the visible checks above to iterate fast locally between submissions.
 
 The green bar (≥ 15 / 22) is reachable with the pre-installed core
 libraries and **no LLM**. The LLM (S8) only polishes the reply and is a
