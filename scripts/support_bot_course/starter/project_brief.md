@@ -76,18 +76,9 @@ langfuse) is deliberately not installed to keep submission builds fast.
 
 ## Using an LLM (only S8 — optional)
 
-- **S1–S7 need no LLM.** Build them with plain deterministic code; that
-  alone passes the review.
-- **S8 is the only place an LLM helps** (bonus, non-gating) — to phrase
-  a nicer grounded reply. A ready-to-use LLM endpoint is provided to you
-  via the `LAB_LLM_BASE_URL` / `LAB_LLM_TOKEN` environment variables; the
-  exact call is already written in the S8 helper stub in `app.py` —
-  just use it. It runs on a small, fast model.
-- Your LLM usage is **capped at ~60,000 tokens per submission** (enough
-  for roughly one or two short calls). Plan accordingly: keep prompts
-  and replies short, call it at most once or twice, and if it is slow or
-  unavailable just return your plain templated reply — never block a
-  decision on the LLM.
+- **S1–S7 need no LLM** — build them with plain deterministic code; that alone passes the review.
+- **S8 is the only place an LLM helps** (bonus, non-gating) — a ready-to-use endpoint is provided via the `LAB_LLM_BASE_URL` / `LAB_LLM_TOKEN` env vars and the exact call is already written in the `call_llm()` helper in `app.py` (small, fast model — just use it).
+- **LLM usage is capped at ~60,000 tokens per submission** (about 1–2 short calls) — keep prompts/replies short, call it at most once or twice, and if it is slow or unavailable just return your plain templated reply (never block a decision on the LLM).
 
 ## Observability (context only — nothing to build here)
 

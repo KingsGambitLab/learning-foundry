@@ -189,7 +189,11 @@ These are acceptable for a *teaching* grader; they are not a credible
   renderMarkdown`): it supports only headings-from-bold, paragraphs,
   `- ` bullet lists, and inline `code`/**bold**. **No pipe tables, no
   fenced code blocks, no numbered lists** — they render as run-on text.
-  A GFM table in the Skills/contract section shipped broken.
+  A GFM table in the Skills/contract section shipped broken. **List
+  items must each be a single physical line** — hard-wrapped
+  continuation lines are flushed as stray out-of-order paragraphs (the
+  "Using an LLM" bullets shipped broken this way). A safe `:vscode:`
+  shortcode exists for the editor glyph; raw HTML/SVG is escaped.
 - **Fixed, fully pre-installed toolset; forbid learner deps edits.** A
   "comment out / uncomment to use" requirements pattern means any learner
   edit busts the Docker deps-cache → a multi-minute reinstall on *every*
