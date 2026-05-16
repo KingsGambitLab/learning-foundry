@@ -127,6 +127,16 @@ for c in C:
     req = dict(c["request"])
     req["kb_articles"] = KB
     r = decide(req)
+    # #4: `_PII_SPEC` here is the SINGLE canonical PII authority for
+    # gold. The reference ships its own (intentionally independent)
+    # redactor — to stop the two silently drifting, fail the build if
+    # the reference can't satisfy its own spec-derived S4 bound.
+    if c["skill"] == "S4":
+        need = _pii_min(c["request"]["message"])
+        assert r["redactions"] >= need, (
+            f"PII spec drift: {c['id']} reference redactions={r['redactions']} "
+            f"< spec categories={need}; reconcile _PII_SPEC vs the reference."
+        )
     GOLD[c["id"]] = {
         "action": r["action"],
         "citations": r["citations"],
@@ -232,6 +242,15 @@ def scenario_yaml(c: dict) -> str:
         f"  target: {sid}.body.abstained",
         f"  expected: {str(g['abstained']).lower()}",
     ]
+    # #3: project_brief promises escalation_reason is REQUIRED when
+    # action=escalate — grade it (regex_match on a missing/empty field
+    # fails). Closes the brief↔grader inconsistency.
+    if g["action"] == "escalate":
+        lines += [
+            "- kind: regex_match",
+            f"  target: {sid}.body.escalation_reason",
+            r'  pattern: "(?s).+"',
+        ]
     if c["skill"] == "S1" or (c["skill"] == "S6" and g["citations"]):
         # FIX 1: recall (>=0.5 of gold cited) AND precision (every cited
         # id must be a GOLD id, not just any KB id) — so "cite all

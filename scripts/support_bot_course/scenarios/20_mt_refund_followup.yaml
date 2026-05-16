@@ -23,3 +23,6 @@ rubrics:
 - kind: literal_match
   target: call_mt_refund_followup.body.abstained
   expected: false
+- kind: regex_match
+  target: call_mt_refund_followup.body.escalation_reason
+  pattern: "(?s).+"

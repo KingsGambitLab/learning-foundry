@@ -157,6 +157,32 @@ and a **skill-correct concept hint**. Verified requirements:
 - Back up any DB payload before editing (course/snapshot edits).
 - "Check logs always; verify before spend; don't hand-wave."
 
+## 10b. Honest limitations — document, don't over-engineer
+
+A deterministic, no-LLM grader whose gold is derived from a heuristic
+reference has *inherent* limits. State them; don't paper over them.
+
+- **Citation precision is reference-tie-break-overfit.** `subset_match
+  min_overlap: 1.0` vs the gold set means a learner must cite *exactly*
+  the reference's chosen supporting subset. A learner who cites a
+  *defensible superset* (an extra genuinely-supporting article) false-
+  fails. This is the unavoidable flip side of killing the "cite-all"
+  false-pass — precision vs. over-fit. Mitigation: keep S1/S6 queries
+  unambiguous (one clearly-supporting doc per query) so the gold subset
+  is uncontroversial; only loosen to a Jaccard/precision-floor if
+  scenarios become genuinely multi-doc.
+- **Regex adversarial/OOS guards test "the reference's regex fires,"
+  not real robustness.** Keyword `_PRIVACY_EXFIL_RE`/`_INJECTION_RE`
+  guards (and the 1–2 scenarios shaped to hit them) are *illustrative*
+  coverage. A brittle learner impl using the same shallow regex passes;
+  a real adversary (paraphrase, non-English, semantic) is not tested. A
+  genuine robustness bar needs semantic detection — out of scope for a
+  no-LLM deterministic course. Say so in the brief (same honesty rule
+  as retrieval tooling).
+
+These are acceptable for a *teaching* grader; they are not a credible
+*production-robustness* bar. Be explicit about which one you're shipping.
+
 ## 11. Pre-ship checklist
 
 - [ ] Skill→rubric traceability table exists; every scenario maps to a skill.

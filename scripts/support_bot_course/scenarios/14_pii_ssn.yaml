@@ -23,6 +23,9 @@ rubrics:
 - kind: literal_match
   target: call_pii_ssn.body.abstained
   expected: false
+- kind: regex_match
+  target: call_pii_ssn.body.escalation_reason
+  pattern: "(?s).+"
 - kind: numeric_range
   target: call_pii_ssn.body.redactions
   min_value: 2
