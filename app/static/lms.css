@@ -1099,6 +1099,13 @@
   text-transform: lowercase;
 }
 
+.test-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .test-result-count {
   font-size: 12px;
   color: var(--muted);
@@ -1106,12 +1113,25 @@
   flex-shrink: 0;
 }
 
-.test-result-row[open] .test-result-count::after {
-  content: " ▴";
+/* Expand affordance — on its own indicator so it shows on every
+   expandable row, including passing ones (which have no diagnostic
+   count). Non-expandable rows render no toggle and aren't clickable. */
+.test-result-toggle {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
 }
 
-.test-result-row:not([open]) .test-result-count::after {
-  content: " ▾";
+.test-result-row.is-expandable[open] .test-result-toggle::after {
+  content: "▴";
+}
+
+.test-result-row.is-expandable:not([open]) .test-result-toggle::after {
+  content: "▾";
+}
+
+.test-result-row:not(.is-expandable) > summary {
+  cursor: default;
 }
 
 .test-result-headline {

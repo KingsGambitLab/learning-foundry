@@ -1267,15 +1267,24 @@ class LMSService:
                     diagnostics.append(advice)
 
             ex_q = ex_expected = ex_actual = ex_label = None
-            if not scenario_passed and scenario is not None:
+            if scenario is not None:
                 try:
-                    fr = None
-                    rubrics = getattr(scenario, "rubrics", None) or []
-                    if first_fail_idx is not None and first_fail_idx < len(rubrics):
-                        fr = rubrics[first_fail_idx]
-                    ex_q, ex_expected, ex_actual, ex_label = _scenario_worked_example(
-                        scenario, output, fr, first_fail_kind, setup_data
-                    )
+                    if scenario_passed:
+                        # Passing scenarios get a positive worked example
+                        # too (question + the learner's own output) so the
+                        # row is expandable and shows WHAT passed — there
+                        # is no failing rubric, so no Expected/label/hint.
+                        ex_q, _, ex_actual, _ = _scenario_worked_example(
+                            scenario, output, None, None, setup_data
+                        )
+                    else:
+                        fr = None
+                        rubrics = getattr(scenario, "rubrics", None) or []
+                        if first_fail_idx is not None and first_fail_idx < len(rubrics):
+                            fr = rubrics[first_fail_idx]
+                        ex_q, ex_expected, ex_actual, ex_label = _scenario_worked_example(
+                            scenario, output, fr, first_fail_kind, setup_data
+                        )
                 except Exception:
                     ex_q = ex_expected = ex_actual = ex_label = None
 

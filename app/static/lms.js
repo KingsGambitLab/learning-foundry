@@ -894,8 +894,9 @@
         val
           ? `<div class="we-row"><span class="we-label">${escapeHtml(label)}</span><code class="we-val">${escapeHtml(String(val))}</code></div>`
           : "";
+      const isPassed = result.status === "passed";
       const workedExample =
-        result.status !== "passed" &&
+        !isPassed &&
         (result.example_question || result.example_expected || result.example_actual || result.failing_rubric)
           ? `<div class="test-result-example">
               ${exRow("Failing check", result.failing_rubric)}
@@ -904,14 +905,25 @@
               ${exRow("Your output", result.example_actual)}
               <div class="we-hint"><span class="we-label">How to think about it</span><span class="we-hint-text">${escapeHtml(hintForRubric(result.failing_rubric))}</span></div>
             </div>`
+          // Passing scenarios: a positive worked example — the question
+          // and the learner's own response that satisfied every check.
+          // No Expected/failing-check/hint (nothing failed).
+          : isPassed && (result.example_question || result.example_actual)
+          ? `<div class="test-result-example test-result-example-passed">
+              ${exRow("Question", result.example_question)}
+              ${exRow("Your output", result.example_actual)}
+            </div>`
           : "";
       // Each test is a <details> whose summary carries the head row + the
       // one-line headline. The diagnostic count sits on the right of the
       // head row (uses the previously-dead space) and doubles as the
       // expand affordance. Body is the full deduped diagnostic list.
+      // A row is expandable when it has a body: extra diagnostics or a
+      // worked example (failing OR the new passing positive example).
+      const expandable = hasMoreDetails || !!workedExample;
       return `
         <li class="test-result test-result-${escapeHtml(statusKind)}">
-          <details class="test-result-row" ${hasMoreDetails ? "" : ""}>
+          <details class="test-result-row${expandable ? " is-expandable" : ""}">
             <summary class="test-result-summary-row">
               <div class="test-result-head">
                 <span class="test-result-head-left">
@@ -919,7 +931,10 @@
                   <strong class="test-result-name">${escapeHtml(result.test_id)}</strong>
                   ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
                 </span>
-                ${countLabel ? `<span class="test-result-count">${escapeHtml(countLabel)}</span>` : ""}
+                <span class="test-result-meta">
+                  ${countLabel ? `<span class="test-result-count">${escapeHtml(countLabel)}</span>` : ""}
+                  ${expandable ? `<span class="test-result-toggle" aria-hidden="true"></span>` : ""}
+                </span>
               </div>
               ${headline ? `<p class="test-result-headline">${escapeHtml(headline)}</p>` : ""}
             </summary>
