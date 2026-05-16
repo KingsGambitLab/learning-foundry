@@ -20,6 +20,7 @@ from app.domain.testing import (
     LearnerCourseEvaluationReport,
     LearnerFeedbackRecord,
 )
+from app.domain.tutor import TutorChatMessage
 from app.domain.workflow import WorkflowEvent, WorkflowRun, WorkflowRunSummary
 from app.storage.database import build_engine
 
@@ -541,6 +542,7 @@ class PostgresWorkflowStore:
             "learner_feedback",
             "learner_eval_reports",
             "creator_assets",
+            "tutor_chat_messages",
         ]
         with self.engine.begin() as conn:
             counts = {}
@@ -1031,6 +1033,51 @@ class PostgresWorkflowStore:
                 {"enrollment_id": enrollment_id, "limit": limit},
             ).fetchall()
         return [LearnerFeedbackRecord.model_validate(row.payload) for row in rows]
+
+    def append_tutor_chat_message(self, message: TutorChatMessage) -> TutorChatMessage:
+        payload = json.dumps(message.model_dump(mode="json"))
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tutor_chat_messages (
+                        message_id, user_id, session_id, created_at, payload
+                    ) VALUES (
+                        :message_id, :user_id, :session_id, :created_at, CAST(:payload AS JSONB)
+                    )
+                    ON CONFLICT (message_id) DO NOTHING
+                    """
+                ),
+                {
+                    "message_id": message.id,
+                    "user_id": message.user_id,
+                    "session_id": message.session_id,
+                    "created_at": message.created_at.isoformat(),
+                    "payload": payload,
+                },
+            )
+        return message
+
+    def list_tutor_chat_messages(
+        self, user_id: str, session_id: str, limit: int = 200
+    ) -> list[TutorChatMessage]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT payload FROM (
+                        SELECT payload, created_at
+                        FROM tutor_chat_messages
+                        WHERE user_id = :user_id AND session_id = :session_id
+                        ORDER BY created_at DESC
+                        LIMIT :limit
+                    ) recent
+                    ORDER BY created_at ASC
+                    """
+                ),
+                {"user_id": user_id, "session_id": session_id, "limit": limit},
+            ).fetchall()
+        return [TutorChatMessage.model_validate(row.payload) for row in rows]
 
     def save_learner_eval_report(
         self, report: LearnerCourseEvaluationReport

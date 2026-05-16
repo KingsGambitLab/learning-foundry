@@ -494,6 +494,48 @@
       }
     }
 
+    // Hydrate the transcript on first open. Server (Postgres) is the
+    // source of truth — durable across devices / cleared storage; the
+    // localStorage copy is only an offline cache + fast fallback.
+    async function hydrateHistory() {
+      let msgs = null;
+      try {
+        const res = await fetch(
+          cfg.baseUrl +
+            "/v1/tutor/history?session_id=" +
+            encodeURIComponent(cfg.sessionId || ""),
+          { credentials: "same-origin" }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.messages) && data.messages.length > 0) {
+            msgs = data.messages.map((m) => ({ role: m.role, text: m.text }));
+          }
+        }
+      } catch (_) {
+        // offline / network error → fall back to the local cache
+      }
+      if (!msgs) {
+        const saved = loadHistory(cfg);
+        if (saved.length > 0) msgs = saved;
+      }
+      if (msgs && msgs.length > 0) {
+        history = msgs;
+        saveHistory(cfg, history); // mirror server → local cache
+        for (const msg of msgs) {
+          if (msg.role === "user") {
+            appendUser(msg.text, { persist: false });
+          } else {
+            appendTutor(msg.text, { persist: false });
+          }
+        }
+        // Returning learner — skip the welcome card and chips
+      } else {
+        log.appendChild(buildWelcomeCard());
+        scrollToBottom();
+      }
+    }
+
     // ── Open / close ─────────────────────────────────────────────────────────
     function openPanel() {
       panelOpen = true;
@@ -503,22 +545,7 @@
 
       if (!welcomeShown) {
         welcomeShown = true;
-        // Hydrate from localStorage on first open
-        const saved = loadHistory(cfg);
-        if (saved.length > 0) {
-          history = saved;
-          for (const msg of saved) {
-            if (msg.role === "user") {
-              appendUser(msg.text, { persist: false });
-            } else {
-              appendTutor(msg.text, { persist: false });
-            }
-          }
-          // Returning learner — skip the welcome card and chips
-        } else {
-          log.appendChild(buildWelcomeCard());
-          scrollToBottom();
-        }
+        void hydrateHistory();
       }
 
       input.focus();

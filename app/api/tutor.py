@@ -8,6 +8,7 @@ from app.domain.tutor import (
     TutorChatRequest,
     TutorChatResponse,
     TutorEditorContext,
+    TutorHistoryResponse,
     TutorSubmitRequest,
     TutorSubmitResponse,
     TutorTriageRequest,
@@ -36,8 +37,33 @@ router = APIRouter(prefix="/v1/tutor", tags=["tutor"])
 def chat(
     req: TutorChatRequest,
     svc: TutorService = Depends(_tutor_service),
+    user: User = Depends(current_user),
 ) -> TutorChatResponse:
-    return svc.chat(req)
+    return svc.chat(req, user_id=str(user.id))
+
+
+@router.get(
+    "/history",
+    response_model=TutorHistoryResponse,
+    dependencies=[Depends(require_role(Role.learner))],
+)
+def history(
+    session_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+) -> TutorHistoryResponse:
+    """Durable transcript for this learner + session. The widget
+    hydrates from here on open; browser localStorage is only an offline
+    cache. Scoped to the authenticated user so one learner can never
+    read another's conversation."""
+    store = _store(request)
+    if store is None:
+        return TutorHistoryResponse(messages=[])
+    try:
+        messages = store.list_tutor_chat_messages(str(user.id), session_id)
+    except Exception:
+        messages = []
+    return TutorHistoryResponse(messages=messages)
 
 
 @router.post(

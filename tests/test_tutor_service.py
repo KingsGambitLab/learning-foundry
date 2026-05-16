@@ -279,5 +279,54 @@ class TutorServiceTriageTest(unittest.TestCase):
         fake_client.with_options.assert_called_once_with(timeout=15.0)
 
 
+class TutorChatPersistenceTest(unittest.TestCase):
+    def test_chat_persists_user_and_tutor_turns(self) -> None:
+        store = MagicMock()
+        store.list_all_learner_workspace_sessions.return_value = []
+        store.list_learner_submissions.return_value = []
+        svc = TutorService(store=store)
+        svc._client = _make_fake_client("here is a hint")
+
+        reply = svc.chat(
+            TutorChatRequest(session_id="lms-enr1", message="how do I start?"),
+            user_id="user-42",
+        )
+
+        self.assertEqual(reply.reply, "here is a hint")
+        self.assertEqual(store.append_tutor_chat_message.call_count, 2)
+        first = store.append_tutor_chat_message.call_args_list[0].args[0]
+        second = store.append_tutor_chat_message.call_args_list[1].args[0]
+        self.assertEqual((first.role, first.text), ("user", "how do I start?"))
+        self.assertEqual((second.role, second.text), ("tutor", "here is a hint"))
+        self.assertEqual(first.user_id, "user-42")
+        self.assertEqual(first.session_id, "lms-enr1")
+        # tutor reply must sort strictly after the user turn so the
+        # transcript never renders reversed on equal timestamps
+        self.assertLess(first.created_at, second.created_at)
+
+    def test_chat_without_user_id_does_not_persist(self) -> None:
+        store = MagicMock()
+        store.list_all_learner_workspace_sessions.return_value = []
+        svc = TutorService(store=store)
+        svc._client = _make_fake_client()
+
+        svc.chat(TutorChatRequest(session_id="s1", message="hi"))
+
+        store.append_tutor_chat_message.assert_not_called()
+
+    def test_persistence_failure_never_breaks_the_reply(self) -> None:
+        store = MagicMock()
+        store.list_all_learner_workspace_sessions.return_value = []
+        store.append_tutor_chat_message.side_effect = RuntimeError("db down")
+        svc = TutorService(store=store)
+        svc._client = _make_fake_client("still answered")
+
+        reply = svc.chat(
+            TutorChatRequest(session_id="s1", message="hi"), user_id="u1"
+        )
+
+        self.assertEqual(reply.reply, "still answered")
+
+
 if __name__ == "__main__":
     unittest.main()

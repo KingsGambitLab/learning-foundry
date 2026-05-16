@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from anthropic import Anthropic, APIError
 
 from app.domain.tutor import (
+    TutorChatMessage,
     TutorChatRequest,
     TutorChatResponse,
     TutorSubmitRequest,
@@ -373,7 +376,45 @@ class TutorService:
             return "\n\n".join(sections) + "\n\n<learner_question>\n" + message + "\n</learner_question>"
         return message
 
-    def chat(self, req: TutorChatRequest) -> TutorChatResponse:
+    def _persist_turn(
+        self, user_id: str, session_id: str, user_msg: str, tutor_reply: str
+    ) -> None:
+        """Append the user turn + tutor reply to durable storage. Best
+        effort: a persistence failure must never break the chat reply
+        (consistent with the rest of the tutor's graceful degradation)."""
+        if self._store is None or not user_id:
+            return
+        try:
+            now = datetime.now(UTC)
+            # The tutor reply must sort strictly AFTER the user turn —
+            # identical timestamps tie and the transcript can render
+            # reversed (history is ordered by created_at).
+            self._store.append_tutor_chat_message(
+                TutorChatMessage(
+                    id=f"tcm_{uuid.uuid4().hex}",
+                    user_id=user_id,
+                    session_id=session_id,
+                    role="user",
+                    text=user_msg,
+                    created_at=now,
+                )
+            )
+            self._store.append_tutor_chat_message(
+                TutorChatMessage(
+                    id=f"tcm_{uuid.uuid4().hex}",
+                    user_id=user_id,
+                    session_id=session_id,
+                    role="tutor",
+                    text=tutor_reply,
+                    created_at=now + timedelta(milliseconds=1),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — never block the reply
+            logger.warning("[tutor] chat persistence failed: %s", exc)
+
+    def chat(
+        self, req: TutorChatRequest, user_id: str | None = None
+    ) -> TutorChatResponse:
         client = self._get_client()
         if client is None:
             return TutorChatResponse(
@@ -419,6 +460,8 @@ class TutorService:
         ).strip()
         if not text:
             text = "(no response)"
+        if user_id:
+            self._persist_turn(user_id, req.session_id, req.message, text)
         return TutorChatResponse(reply=text, hint_tier=None)
 
     def triage(self, req: TutorTriageRequest) -> TutorTriageResponse:

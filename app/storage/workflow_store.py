@@ -17,6 +17,7 @@ from app.domain.testing import (
     LearnerCourseEvaluationReport,
     LearnerFeedbackRecord,
 )
+from app.domain.tutor import TutorChatMessage
 from app.domain.workflow import WorkflowEvent, WorkflowRun, WorkflowRunSummary
 
 
@@ -80,6 +81,11 @@ class WorkflowStore(Protocol):
 
     def save_learner_feedback(self, feedback: LearnerFeedbackRecord) -> LearnerFeedbackRecord: ...
     def list_learner_feedback(self, enrollment_id: str, limit: int = 100) -> list[LearnerFeedbackRecord]: ...
+
+    def append_tutor_chat_message(self, message: TutorChatMessage) -> TutorChatMessage: ...
+    def list_tutor_chat_messages(
+        self, user_id: str, session_id: str, limit: int = 200
+    ) -> list[TutorChatMessage]: ...
 
     def save_learner_eval_report(
         self, report: LearnerCourseEvaluationReport

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -40,6 +41,21 @@ class TutorTriageResponse(BaseModel):
     action: Literal["tutor", "agent"]
     reason: str
     original_prompt: str
+
+
+class TutorChatMessage(BaseModel):
+    """One persisted turn of a lab-tutor conversation."""
+
+    id: str
+    user_id: str
+    session_id: str
+    role: Literal["user", "tutor"]
+    text: str
+    created_at: datetime
+
+
+class TutorHistoryResponse(BaseModel):
+    messages: list[TutorChatMessage] = Field(default_factory=list)
 
 
 class TutorEditorContext(BaseModel):

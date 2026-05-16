@@ -48,6 +48,41 @@ class TutorRoutesTest(unittest.TestCase):
         self.assertEqual(body["reply"], "(stub) Got: hello")
         self.assertIsNone(body["hint_tier"])
 
+    def test_history_returns_scoped_messages(self) -> None:
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        from app.domain.tutor import TutorChatMessage
+
+        msgs = [
+            TutorChatMessage(
+                id="m1", user_id="u", session_id="lms-x", role="user",
+                text="hi", created_at=datetime.now(UTC),
+            ),
+            TutorChatMessage(
+                id="m2", user_id="u", session_id="lms-x", role="tutor",
+                text="hello back", created_at=datetime.now(UTC),
+            ),
+        ]
+        fake_store = MagicMock()
+        fake_store.list_tutor_chat_messages.return_value = msgs
+        with patch("app.api.tutor._store", return_value=fake_store):
+            resp = self.client.get("/v1/tutor/history", params={"session_id": "lms-x"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual([m["text"] for m in body["messages"]], ["hi", "hello back"])
+        # scoped to the authenticated learner, not an arbitrary key
+        _args = fake_store.list_tutor_chat_messages.call_args
+        self.assertEqual(_args.args[1], "lms-x")
+
+    def test_history_empty_when_no_store(self) -> None:
+        from unittest.mock import patch
+
+        with patch("app.api.tutor._store", return_value=None):
+            resp = self.client.get("/v1/tutor/history", params={"session_id": "s1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["messages"], [])
+
     def test_submit_returns_two_viva_questions(self) -> None:
         resp = self.client.post(
             "/v1/tutor/submit",
