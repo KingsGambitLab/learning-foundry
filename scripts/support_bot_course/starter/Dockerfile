@@ -2,16 +2,19 @@ FROM python:3.11-bookworm
 
 WORKDIR /app
 
-# Deps cached independently of source: this layer only rebuilds when
-# requirements.txt changes, so iterating on app.py stays fast.
+# ─────────────────────────────────────────────────────────────────────
+# DO NOT EDIT THIS BLOCK. It is Docker-layer-cached: it only rebuilds
+# when requirements.txt changes. Editing this (or requirements.txt)
+# forces a multi-minute reinstall + model re-download on EVERY
+# submission. The full toolset + the MiniLM model are pre-installed.
+# ─────────────────────────────────────────────────────────────────────
 COPY requirements.txt ./
 RUN python -m pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
-
-# Optional: if you use a HF model (sentence-transformers MiniLM or
-# llm-guard), bake it at build time so it works in the no-egress grader:
-# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
-# ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+# ─────────────────────────────────────────────────────────────────────
 
 COPY . .
 

@@ -183,6 +183,31 @@ reference has *inherent* limits. State them; don't paper over them.
 These are acceptable for a *teaching* grader; they are not a credible
 *production-robustness* bar. Be explicit about which one you're shipping.
 
+## 10c. Learner-facing brief discipline
+
+- **Author for the actual LMS markdown renderer** (`lms.js
+  renderMarkdown`): it supports only headings-from-bold, paragraphs,
+  `- ` bullet lists, and inline `code`/**bold**. **No pipe tables, no
+  fenced code blocks, no numbered lists** — they render as run-on text.
+  A GFM table in the Skills/contract section shipped broken.
+- **Fixed, fully pre-installed toolset; forbid learner deps edits.** A
+  "comment out / uncomment to use" requirements pattern means any learner
+  edit busts the Docker deps-cache → a multi-minute reinstall on *every*
+  submission. Pin the complete endorsed set, install it all once, bake
+  any model it needs at build time, and tell the learner in the brief +
+  a Dockerfile guard banner: *use only these; do not edit requirements
+  or the deps step.* Deliberately exclude genuinely heavy deps
+  (spaCy/large HF models) and say why.
+- **Keep the brief actionable; quarantine production context.** State
+  what the learner must DO plainly (e.g. "S8 LLM is capped at ~60k
+  tokens/submission — at most 1–2 short calls; fall back on failure").
+  Production-only material (observability/Langfuse/eval) goes in a
+  clearly-labeled *"context only — nothing to build here"* section, not
+  woven into instructions. Ship a ready helper for any non-trivial
+  integration (e.g. a `call_llm()` stub) instead of dumping the raw
+  HTTP/JSON contract on the learner. Don't include a "local dev"
+  walkthrough that can diverge from the graded path and confuse.
+
 ## 11. Pre-ship checklist
 
 - [ ] Skill→rubric traceability table exists; every scenario maps to a skill.

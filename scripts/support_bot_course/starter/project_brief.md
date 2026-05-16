@@ -48,51 +48,58 @@ The green bar (≥ 15 / 22) is reachable with **S1–S7 and the free core
 libraries only** — no LLM required for any decision. S8 adds polish/score
 but never blocks.
 
-## Tools (free / open-source; pre-installed)
+## Tools (fixed, pre-installed — use only these)
 
-`fastapi uvicorn pydantic httpx rank_bm25 numpy tenacity pytest`.
+The complete toolset is **already installed and cached in the image**:
+`fastapi uvicorn pydantic httpx rank_bm25 numpy faiss-cpu torch(+cpu)
+sentence-transformers tenacity scrubadub rapidfuzz pytest` (the MiniLM
+embedding model is also baked in at build time, offline-ready).
+
+**Do NOT edit `requirements.txt` or the Dockerfile dependency step.**
+The grader rebuilds your image on every submission; this dependency
+layer is cached only while those files are unchanged. Adding a library
+forces a multi-minute reinstall on **every** submission. Everything you
+need for S1–S8 is already here — use only these.
 
 **Be honest about retrieval here:** every request already includes the
-small, relevant `kb_articles` set — there is no external corpus, no
-index to build, no scale. So **lexical retrieval (`rank_bm25`, or even
-careful keyword/overlap scoring) fully clears S1/S6**; the grader does
-**not** reward embeddings here and dense retrieval will not improve your
-score. `sentence-transformers` + `faiss-cpu` are included only to show
-the *production-scale* path you'd use when the KB is large/external
-(bake the model in the Dockerfile then — see comments) — **treat them
-as optional/illustrative, not required.** This course teaches *grounded-
-answering discipline* (citation precision+recall, faithfulness,
-abstention), not retrieval-engineering at scale.
+small, relevant `kb_articles` set — no external corpus, no index, no
+scale. **Lexical retrieval (`rank_bm25`, or careful keyword/overlap
+scoring) fully clears S1/S6**; the grader does **not** reward embeddings
+and dense retrieval will not raise your score. `sentence-transformers` +
+`faiss-cpu` are pre-installed only to illustrate the *production-scale*
+path (large/external KB) — optional, not required. This course teaches
+*grounded-answering discipline* (citation precision+recall,
+faithfulness, abstention), not retrieval-engineering at scale.
+`scrubadub` (S4) and `rapidfuzz` (S2) are provided as conveniences;
+regex/stdlib also suffices. Heavier OSS (presidio, llm-guard, langgraph,
+langfuse) is deliberately not installed to keep submission builds fast.
 
-Optional OSS upgrades are commented in `requirements.txt`
-(`scrubadub`/`presidio` for S4, `llm-guard` for S5, `rapidfuzz` for S2,
-`langgraph` for S6).
+## Using an LLM (only S8 — optional)
 
-## LLM proxy (S8, optional)
+- **S1–S7 need no LLM.** Build them with plain deterministic code; that
+  alone reaches the green bar.
+- **S8 is the only place an LLM helps** (bonus, non-gating) — to phrase
+  a nicer grounded reply. A ready-to-use LLM endpoint is provided to you
+  via the `LAB_LLM_BASE_URL` / `LAB_LLM_TOKEN` environment variables; the
+  exact call is already written in the S8 helper stub in `app.py` —
+  just use it. It runs on a small, fast model.
+- Your LLM usage is **capped at ~60,000 tokens per submission** (enough
+  for roughly one or two short calls). Plan accordingly: keep prompts
+  and replies short, call it at most once or twice, and if it is slow or
+  unavailable just return your plain templated reply — never block a
+  decision on the LLM.
 
-If `LAB_LLM_BASE_URL` / `LAB_LLM_TOKEN` are set, `POST $LAB_LLM_BASE_URL/llm/complete`
-with header `x-lab-llm-token: $LAB_LLM_TOKEN` and body
-`{"system": "...", "messages": [{"role":"user","content":"..."}], "max_tokens": 320}`.
-It returns `{"content": "...", "usage": {"input_tokens", "output_tokens"}}`.
-It is **Haiku, budget-capped** per submission — read `usage`, stay frugal,
-and **degrade to a templated grounded reply on any failure** (never block
-a decision on the LLM).
+## Observability (context only — nothing to build here)
 
-## Observability (production note)
+In a real production support bot you would add tracing / evaluation
+tooling (e.g. **Langfuse**, **OpenLLMetry**, structured per-request
+logs) capturing the input, retrieved context, decision, and model I/O —
+so you can later answer *"why did the bot respond this way for that
+user's query?"*. That matters in production but is **out of scope for
+this assignment**: the grader sandbox has no external network and this
+is not graded. Noted for context only.
 
-In a real deployment you would wire **Langfuse / OpenLLMetry** here to
-trace prompts, latency, cost, and quality. The grader sandbox blocks
-egress, so that is taught as a concept; this course's concrete
-stand-in is the proxy's returned `usage` — treat it as your telemetry
-and keep cost bounded. (An extended assignment grades structured request
-logging directly.)
+---
 
-## Local dev
-
-```
-cd starter && pip install -r requirements.txt
-uvicorn app:app --reload --port 8000
-python public/checks/run_visible_checks.py    # offline, uses a local LLM stub
-```
-Hidden grader uses different conversations from the same distribution —
-don't hard-code to the visible samples.
+Note: the hidden grader uses different conversations from the same
+distribution as the visible examples — don't hard-code to the samples.

@@ -56,9 +56,36 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-# Optional: the platform LLM proxy (Haiku, budget-capped). No key needed.
+# Optional: the platform LLM proxy (small fast model, budget-capped at
+# ~60k tokens/submission — no API key needed). S8 ONLY. S1–S7 need no LLM.
 LLM_BASE = os.environ.get("LAB_LLM_BASE_URL")
 LLM_TOKEN = os.environ.get("LAB_LLM_TOKEN")
+
+
+def call_llm(system: str, user: str, max_tokens: int = 320) -> str | None:
+    """S8 helper — already written, just call it. Returns the model's
+    text, or None if the LLM is unset/slow/failing (then fall back to a
+    plain templated reply; never block a decision on this)."""
+    if not LLM_BASE or not LLM_TOKEN:
+        return None
+    import json
+    import urllib.request
+
+    body = json.dumps({
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "max_tokens": max_tokens,
+    }).encode()
+    req = urllib.request.Request(
+        LLM_BASE.rstrip("/") + "/llm/complete",
+        data=body, method="POST",
+        headers={"content-type": "application/json", "x-lab-llm-token": LLM_TOKEN},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return (json.loads(r.read().decode()).get("content") or "").strip() or None
+    except Exception:
+        return None  # graceful degradation
 
 
 @app.post("/support/answer", response_model=AnswerResponse)
@@ -69,7 +96,8 @@ def support_answer(req: AnswerRequest) -> AnswerResponse:
     # TODO S1  Retrieve relevant kb_articles (rank_bm25 / sentence-transformers+faiss).
     # TODO S2  Policy-as-code: answer | clarify | escalate | refuse (+ thresholds).
     # TODO S3  Refuse / abstain when nothing in the KB supports the question.
-    # TODO S8  (bonus) Call the LLM proxy to phrase a grounded reply.
+    # TODO S8  (bonus) optionally call_llm(system, user) to phrase a
+    #          grounded reply; fall back to a template if it returns None.
     return AnswerResponse(
         reply="not yet implemented",
         action="answer",
