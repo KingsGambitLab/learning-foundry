@@ -23,6 +23,10 @@ feedback on **what works and what to improve**, useful to iterate — and
 you can **submit as many times as you need** to solve the assignment.
 Use the visible checks above to iterate fast locally between submissions.
 
-Passing the review (≥ 15 / 22 checks) is reachable with the pre-installed
-core libraries and **no LLM**. The LLM (S8) only polishes the reply and is
-a non-gating bonus — see `project_brief.md`.
+Passing the review (**≥ 22 / 25 scenarios**) is reachable with the
+pre-installed libraries and **no LLM**. Grounding (S1/S6) must be
+**semantic** — the questions are vocabulary-mismatch, so use the
+pre-installed `all-MiniLM-L6-v2` embedding model + `faiss-cpu`, not
+keyword matching (a keyword-only retriever tops out near 20/25 and
+cannot clear the bar — see `project_brief.md`). The LLM (S8) only
+polishes the reply and is a non-gating bonus.

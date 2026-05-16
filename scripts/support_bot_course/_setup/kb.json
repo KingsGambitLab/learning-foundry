@@ -13,12 +13,12 @@
     {
       "article_id": "kb_password",
       "title": "Resetting your password",
-      "text": "Use the 'Forgot password' link on the login page. If you are locked out or suspect unauthorized access, contact support so an agent can secure the account."
+      "text": "Use the 'Forgot password' link on the login page to receive a reset email. Choose a new password and you are signed back in."
     },
     {
       "article_id": "kb_billing",
       "title": "Updating billing details",
-      "text": "Update your card under Settings > Billing > Payment method. Invoices are available under Billing > Invoices and can be downloaded as PDF."
+      "text": "Update your card under Settings > Billing > Payment method. Past invoices are available under Billing > Invoices and can be downloaded as a PDF."
     },
     {
       "article_id": "kb_plan",
@@ -37,8 +37,43 @@
     },
     {
       "article_id": "kb_outage",
-      "title": "Service status",
-      "text": "Live system status and incident history are published at the status page. Subscribe there for outage notifications by email or webhook."
+      "title": "Service status page",
+      "text": "Live system status and incident history are published at the public status page you can open in a browser."
+    },
+    {
+      "article_id": "kb_notify",
+      "title": "Service incident subscriptions",
+      "text": "Owners who subscribe are emailed and webhook-pinged the instant an incident begins, so you are informed of a disruption immediately rather than discovering it later."
+    },
+    {
+      "article_id": "kb_uptime_badge",
+      "title": "Embeddable status badge widget",
+      "text": "Place the live status badge on your own marketing site so customers can see at a glance the moment the platform went down or recovered; it refreshes as soon as our team flips an incident."
+    },
+    {
+      "article_id": "kb_sso",
+      "title": "Identity provider single sign-on",
+      "text": "A workspace may mandate that every member sign in through the organization's configured SAML provider rather than local credentials. The owner uploads provider metadata under Settings > Security."
+    },
+    {
+      "article_id": "kb_invoice_email",
+      "title": "Where receipts are delivered",
+      "text": "After every successful payment an itemized receipt is automatically sent to the account owner's email address; it arrives in your mailbox and is not something you fetch manually."
+    },
+    {
+      "article_id": "kb_offboard_delete",
+      "title": "Closing your account",
+      "text": "When you leave us, an owner can request closure and we permanently wipe all of your stuff within 30 days. This cannot be undone."
+    },
+    {
+      "article_id": "kb_webhooks",
+      "title": "Outbound event webhooks",
+      "text": "We POST event notifications to whatever address you configure; delivery is retried with backoff and throttled to a few messages per minute to protect your endpoint."
+    },
+    {
+      "article_id": "kb_guest_share",
+      "title": "Read-only share links",
+      "text": "Give an outside person a read-only view by creating a public share link; they see the shared page without being given a seat in your workspace."
     }
   ]
 }

@@ -180,6 +180,28 @@ reference has *inherent* limits. State them; don't paper over them.
   no-LLM deterministic course. Say so in the brief (same honesty rule
   as retrieval tooling).
 
+- **Forcing a tool to be "required" hits a near-tie wall.** To make
+  dense embedding retrieval *genuinely required* (not lexical-optional),
+  S1/S6 questions are **vocabulary-mismatch**: a synonym paraphrase of
+  the winner article + a decoy article carrying the question's literal
+  keywords. This works only when the decoy is a *clearly different
+  task* (export-vs-delete, outage-notify-vs-status-badge,
+  SSO-vs-password-reset). If the decoy is semantically *adjacent*
+  (API-rate-limit-vs-webhook-throttle, plan-downgrade-vs-payment-grace),
+  the pinned embedding model itself ranks the decoy top and the
+  **reference false-fails** — caught only by the budgeted reference
+  graded run (which is exactly why you run it). Empirically: ~5–6 clean
+  vocabulary-mismatch scenarios are achievable; sharpening a question to
+  cure a dense false-fail also makes it lexically findable, so a
+  keyword-only solution plateaus ~2–3 scenarios *below* a dense one, not
+  far below. Set the pass bar in that gap (e.g. dense 25/25, keyword
+  ≤20/25 → bar ≥22/25) and **state the honest ceiling in the brief**
+  ("keyword-only tops out ~20/25; semantic retrieval required"). Do not
+  keep adding adjacent-decoy scenarios to widen the gap — each one is a
+  latent false-fail for a correct learner. Author gold by spec (not by
+  running the embedding reference) so the reference run is an
+  independent *check*, not a tautology.
+
 These are acceptable for a *teaching* grader; they are not a credible
 *production-robustness* bar. Be explicit about which one you're shipping.
 

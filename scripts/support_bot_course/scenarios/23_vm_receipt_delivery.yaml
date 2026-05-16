@@ -1,0 +1,33 @@
+id: vm_receipt_delivery
+description: "S6 / multi_turn: I never got the bill for it in my inbox \u2014 where does it actually go?"
+category: state_persistence
+quality_bar_ids:
+- multi_turn_context
+trace:
+- id: call_vm_receipt_delivery
+  method: POST
+  path: /support/answer
+  body:
+    message: "I never got the bill for it in my inbox \u2014 where does it actually go?"
+    conversation_id: "vm_receipt_delivery"
+    history: [{"role": "user", "content": "I upgraded my plan yesterday."}, {"role": "assistant", "content": "Done \u2014 your upgrade is active."}]
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_receipt_delivery
+rubrics:
+- kind: schema_match
+  target: call_vm_receipt_delivery.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_receipt_delivery.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_receipt_delivery.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_receipt_delivery.body.citations
+  gold_set_path: setup_data.gold.vm_receipt_delivery.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_receipt_delivery.body.citations
+  acceptable_source: setup_data.gold.vm_receipt_delivery.citations
+  min_overlap: 1.0

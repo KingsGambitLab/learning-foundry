@@ -1,12 +1,14 @@
 """Reference: production-grade multi-turn SaaS Customer Support Bot.
 
-Design principle that makes the course winnable: every GRADED decision
-(`action`, `citations`, `redactions`, `abstained`) is **deterministic
-policy-as-code** — retrieval + rules + regex. The LLM (reached only via
-the platform proxy, Haiku) is used solely to phrase the natural-language
+Design principle that makes the course winnable: the routing decisions
+(`action`, `redactions`, `abstained`) are **deterministic policy-as-code**
+— rules + regex; `citations` are grounded on **dense semantic retrieval**
+(a pinned MiniLM embedding model + faiss) because keyword matching cannot
+ground the vocabulary-mismatch scenarios. The LLM (reached only via the
+platform proxy, Haiku) is used solely to phrase the natural-language
 `reply`; if the proxy is unreachable the bot degrades to a grounded
-template. So green is reachable with zero dependence on LLM quality, and
-decision-stability/idempotency hold by construction.
+template. So the pass bar is reachable with zero dependence on LLM
+quality, and decision-stability/idempotency hold by construction.
 
 Best practices demonstrated & tested:
 - grounding: answers cite only provided kb_articles (precision + recall)
@@ -99,7 +101,17 @@ def strip_injection(text: str) -> str:
     return " ".join(keep).strip() or text  # never blank-out entirely
 
 
-# ---------------- retrieval (BM25-lite, stdlib) ----------------
+# ---------------- retrieval (dense: MiniLM embeddings + faiss) ----------------
+#
+# Retrieval is SEMANTIC, not lexical. Many real support questions share
+# almost no surface words with the help doc that actually answers them
+# ("teammates aren't getting alerts when the site goes down" -> the
+# *outage notifications* article, not the *team seats* article that
+# happens to contain the word "teammates"). A keyword/BM25 ranker is
+# fooled by a lexical decoy; a sentence-embedding ranker is not. So the
+# reference grounds citations on cosine similarity of pinned-model
+# embeddings indexed in faiss. Everything downstream of `retrieve()`
+# (policy, PII, injection, abstention, multi-turn) stays deterministic.
 
 _STOP = set(
     "a an the of for to in on at and or by with from is was are be been do did does "
@@ -112,37 +124,65 @@ def _toks(s: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", s.lower()) if len(t) > 1 and t not in _STOP]
 
 
-def retrieve(query: str, kb: list[dict]) -> tuple[list[str], float, dict | None]:
-    """Return (citations, top_score, top_article). Scores by IDF-weighted
-    overlap of query tokens against title+text. Cites the supporting
-    article(s); precision holds because ids come only from `kb`."""
-    if not kb:
-        return [], 0.0, None
-    q = set(_toks(query))
-    if not q:
-        return [], 0.0, None
-    n = len(kb)
-    df: dict[str, int] = {}
-    docs = []
-    for a in kb:
-        d = set(_toks((a.get("title", "") + " " + a.get("text", ""))))
-        docs.append(d)
-        for t in d:
-            df[t] = df.get(t, 0) + 1
-    import math
+# Pinned embedding model — the brief requires this exact model so the
+# semantic winner is reproducible and gold is not model-dependent.
+_EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+_MODEL = None  # lazy singleton; pure-core policy tests never load it
 
-    scored = []
-    for a, d in zip(kb, docs):
-        s = sum(math.log((n + 1) / (df.get(t, 0) + 0.5)) for t in q if t in d)
-        scored.append((s, a))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_s, top_a = scored[0]
-    if top_s <= 0:
+# cosine thresholds (tuned against this KB; verified server-side):
+#  - below ABS_FLOOR  -> nothing in the KB supports the query -> abstain
+#  - a runner-up is co-cited only if it is genuinely close to the top
+#    AND independently relevant (keeps precision: single-winner queries
+#    cite exactly one id, so subset_match against the gold set holds)
+_ABS_FLOOR = 0.30
+_REL_FLOOR = 0.42
+_MARGIN = 0.94
+
+
+def _model():
+    global _MODEL
+    if _MODEL is None:
+        from sentence_transformers import SentenceTransformer
+
+        _MODEL = SentenceTransformer(_EMBED_MODEL_ID)
+    return _MODEL
+
+
+def retrieve(query: str, kb: list[dict]) -> tuple[list[str], float, dict | None]:
+    """Return (citations, top_score, top_article). Dense semantic ranking:
+    embed the query and each article with a pinned MiniLM model, index
+    with faiss IndexFlatIP over L2-normalized vectors (inner product =
+    cosine). Cites the semantically-supporting article(s); precision
+    holds because ids come only from `kb` and runner-ups must be close
+    AND independently relevant. A purely lexical ranker mis-cites the
+    vocabulary-mismatch scenarios; this does not."""
+    if not kb or not query.strip():
         return [], 0.0, None
-    # cite the top article + any close runner-up (recall without spraying)
+    import faiss
+    import numpy as np
+
+    model = _model()
+    docs = [(a.get("title", "") + ". " + a.get("text", "")).strip() for a in kb]
+    doc_vecs = np.asarray(
+        model.encode(docs, normalize_embeddings=True), dtype="float32"
+    )
+    q_vec = np.asarray(
+        model.encode([query], normalize_embeddings=True), dtype="float32"
+    )
+    index = faiss.IndexFlatIP(doc_vecs.shape[1])
+    index.add(doc_vecs)
+    scores, idxs = index.search(q_vec, min(len(kb), 5))
+    scores, idxs = scores[0], idxs[0]
+
+    top_s = float(scores[0])
+    top_a = kb[int(idxs[0])]
+    if top_s < _ABS_FLOOR:
+        return [], top_s, None
     cites = [top_a["article_id"]]
-    for s, a in scored[1:]:
-        if s >= 0.6 * top_s and a["article_id"] not in cites:
+    for s, i in zip(scores[1:], idxs[1:]):
+        s = float(s)
+        a = kb[int(i)]
+        if s >= _MARGIN * top_s and s >= _REL_FLOOR and a["article_id"] not in cites:
             cites.append(a["article_id"])
         if len(cites) >= 3:
             break
@@ -151,10 +191,14 @@ def retrieve(query: str, kb: list[dict]) -> tuple[list[str], float, dict | None]
 
 # ---------------- policy-as-code ----------------
 
+# Genuine account-security / fraud / legal incidents -> human agent.
+# A plain "how do I reset my password" is NOT a security incident — it
+# is a normal grounded answer (cite kb_password); only lockout /
+# unauthorized-access / fraud / legal escalate. Keeps the routing spec
+# unambiguous and ungameable.
 _ESCALATE_RE = re.compile(
-    r"(?i)\b(hacked|compromis|unauthor|fraud|stolen|locked out|can't log ?in|"
-    r"cannot log ?in|reset (my )?password|account (closed|cancel)|delete my account|"
-    r"lawsuit|legal|gdpr|ccpa|chargeback|dispute|data breach)\b"
+    r"(?i)\b(hacked|compromis|unauthor|fraud|stolen|locked out|can'?t log ?in|"
+    r"cannot log ?in|lawsuit|legal|gdpr|ccpa|chargeback|dispute|data breach)\b"
 )
 
 # Privacy-exfiltration guardrail: requests for ANOTHER person's

@@ -1,0 +1,34 @@
+id: vm_sso_enforce
+description: "S1 / happy_path: Can we make staff log in only through our company's Okta instead of each having their own "
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_vm_sso_enforce
+  method: POST
+  path: /support/answer
+  body:
+    message: "Can we make staff log in only through our company's Okta instead of each having their own password here?"
+    conversation_id: "vm_sso_enforce"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_sso_enforce
+rubrics:
+- kind: schema_match
+  target: call_vm_sso_enforce.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_sso_enforce.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_sso_enforce.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_sso_enforce.body.citations
+  gold_set_path: setup_data.gold.vm_sso_enforce.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_sso_enforce.body.citations
+  acceptable_source: setup_data.gold.vm_sso_enforce.citations
+  min_overlap: 1.0

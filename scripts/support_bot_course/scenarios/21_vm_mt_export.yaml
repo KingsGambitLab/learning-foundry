@@ -1,0 +1,33 @@
+id: vm_mt_export
+description: "S6 / multi_turn: how do I do that again?"
+category: state_persistence
+quality_bar_ids:
+- multi_turn_context
+trace:
+- id: call_vm_mt_export
+  method: POST
+  path: /support/answer
+  body:
+    message: "how do I do that again?"
+    conversation_id: "vm_mt_export"
+    history: [{"role": "user", "content": "We're switching tools soon \u2014 before we leave, how do I take a complete copy of all the stuff we've stored with you?"}, {"role": "assistant", "content": "You can do that from Settings."}]
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_mt_export
+rubrics:
+- kind: schema_match
+  target: call_vm_mt_export.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_mt_export.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_mt_export.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_mt_export.body.citations
+  gold_set_path: setup_data.gold.vm_mt_export.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_mt_export.body.citations
+  acceptable_source: setup_data.gold.vm_mt_export.citations
+  min_overlap: 1.0

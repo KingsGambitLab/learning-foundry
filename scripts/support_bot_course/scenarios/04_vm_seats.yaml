@@ -1,0 +1,38 @@
+id: vm_seats
+description: "S1 / happy_path: A new colleague is joining the team \u2014 how does the account owner add them as a member with"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_vm_seats
+  method: POST
+  path: /support/answer
+  body:
+    message: "A new colleague is joining the team \u2014 how does the account owner add them as a member with their own seat?"
+    conversation_id: "vm_seats"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_seats
+rubrics:
+- kind: schema_match
+  target: call_vm_seats.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_seats.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_seats.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_seats.body.citations
+  gold_set_path: setup_data.gold.vm_seats.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_seats.body.citations
+  acceptable_source: setup_data.gold.vm_seats.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_vm_seats.body.reply
+  gold_path: setup_data.gold.vm_seats.reply
+  strictness: lenient

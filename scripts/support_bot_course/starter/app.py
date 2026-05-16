@@ -7,8 +7,10 @@ Contract:  POST /support/answer
              abstained:bool, escalation_reason?}
 
 You are graded on the skills in project_brief.md. Passing the review is
-reachable with the free core libs (no LLM needed for the decisions);
-the LLM (via the platform proxy at env LAB_LLM_BASE_URL, token
+reachable with deterministic code + the pre-installed embedding stack
+(no LLM needed for the decisions); S1/S6 grounding must be semantic
+(all-MiniLM-L6-v2 + faiss), not keyword matching — see project_brief.md.
+The LLM (via the platform proxy at env LAB_LLM_BASE_URL, token
 LAB_LLM_TOKEN) only polishes `reply` and is a non-gating bonus.
 
 This starter returns a fixed baseline so every behavioral scenario
@@ -93,7 +95,11 @@ def support_answer(req: AnswerRequest) -> AnswerResponse:
     # TODO S4  PII redaction: detect+redact email/phone/card/SSN, count them.
     # TODO S5  Strip prompt-injection / override text before deciding policy.
     # TODO S6  Multi-turn: resolve anaphora against `history`.
-    # TODO S1  Retrieve relevant kb_articles (rank_bm25 / sentence-transformers+faiss).
+    # TODO S1  Retrieve relevant kb_articles SEMANTICALLY: embed the
+    #          question + each article with the pre-installed pinned
+    #          model 'sentence-transformers/all-MiniLM-L6-v2' and rank by
+    #          cosine similarity (faiss IndexFlatIP over normalized
+    #          vectors). Keyword/BM25 fails the vocabulary-mismatch cases.
     # TODO S2  Policy-as-code: answer | clarify | escalate | refuse (+ thresholds).
     # TODO S3  Refuse / abstain when nothing in the KB supports the question.
     # TODO S8  (bonus) optionally call_llm(system, user) to phrase a

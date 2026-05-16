@@ -1,0 +1,38 @@
+id: vm_api
+description: "S1 / happy_path: Our integration calls your REST API directly \u2014 what's the per-minute request cap before re"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_vm_api
+  method: POST
+  path: /support/answer
+  body:
+    message: "Our integration calls your REST API directly \u2014 what's the per-minute request cap before responses get throttled, and which base URL should the client point at?"
+    conversation_id: "vm_api"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_api
+rubrics:
+- kind: schema_match
+  target: call_vm_api.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_api.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_api.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_api.body.citations
+  gold_set_path: setup_data.gold.vm_api.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_api.body.citations
+  acceptable_source: setup_data.gold.vm_api.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_vm_api.body.reply
+  gold_path: setup_data.gold.vm_api.reply
+  strictness: lenient

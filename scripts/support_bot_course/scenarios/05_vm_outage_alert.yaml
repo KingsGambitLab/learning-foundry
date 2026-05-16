@@ -1,0 +1,34 @@
+id: vm_outage_alert
+description: "S1 / happy_path: Last night the platform went down and nobody on my team found out until customers complain"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_vm_outage_alert
+  method: POST
+  path: /support/answer
+  body:
+    message: "Last night the platform went down and nobody on my team found out until customers complained \u2014 how do we make sure we hear about it next time?"
+    conversation_id: "vm_outage_alert"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_outage_alert
+rubrics:
+- kind: schema_match
+  target: call_vm_outage_alert.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_outage_alert.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_outage_alert.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_outage_alert.body.citations
+  gold_set_path: setup_data.gold.vm_outage_alert.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_outage_alert.body.citations
+  acceptable_source: setup_data.gold.vm_outage_alert.citations
+  min_overlap: 1.0
