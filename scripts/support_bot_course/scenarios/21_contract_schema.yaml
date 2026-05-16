@@ -1,0 +1,25 @@
+id: contract_schema
+description: "S7 / contract: How do I update my billing card?"
+category: boundary
+quality_bar_ids:
+- contract_conformance
+trace:
+- id: call_contract_schema
+  method: POST
+  path: /support/answer
+  body:
+    message: "How do I update my billing card?"
+    conversation_id: "contract_schema"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_contract_schema
+rubrics:
+- kind: schema_match
+  target: call_contract_schema.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_contract_schema.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_contract_schema.body.abstained
+  expected: false

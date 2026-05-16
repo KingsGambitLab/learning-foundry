@@ -1,0 +1,25 @@
+id: policy_answer_smallrefund
+description: "S2 / policy_routing: How are refunds under fifty dollars handled?"
+category: boundary
+quality_bar_ids:
+- policy_routing
+trace:
+- id: call_policy_answer_smallrefund
+  method: POST
+  path: /support/answer
+  body:
+    message: "How are refunds under fifty dollars handled?"
+    conversation_id: "policy_answer_smallrefund"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_policy_answer_smallrefund
+rubrics:
+- kind: schema_match
+  target: call_policy_answer_smallrefund.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_policy_answer_smallrefund.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_policy_answer_smallrefund.body.abstained
+  expected: false

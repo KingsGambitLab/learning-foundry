@@ -306,6 +306,18 @@ def _start_container(
     if data_volume_host_dir is not None:
         data_volume_host_dir.mkdir(parents=True, exist_ok=True)
         cmd.extend(["-v", f"{data_volume_host_dir.absolute()}:/data"])
+    # Lab LLM proxy bridge (Customer Support Bot course). Additive and
+    # opt-in: the grader sets LAB_LLM_BASE_URL/LAB_LLM_TOKEN in its own
+    # process env for the duration of one submission; for every other
+    # course these are absent and nothing changes. The container reaches
+    # the host-bound proxy via the docker host-gateway alias; cost/abuse
+    # is bounded by the proxy's per-submission token cap + global USD
+    # hard-stop, not by this hop.
+    cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+    for _ev in ("LAB_LLM_BASE_URL", "LAB_LLM_TOKEN"):
+        _val = os.environ.get(_ev)
+        if _val:
+            cmd.extend(["-e", f"{_ev}={_val}"])
     cmd.append(image_tag)
     try:
         result = subprocess.run(

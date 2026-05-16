@@ -1,0 +1,38 @@
+id: happy_seats
+description: "S1 / happy_path: How does my team owner add another teammate to our account?"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_happy_seats
+  method: POST
+  path: /support/answer
+  body:
+    message: "How does my team owner add another teammate to our account?"
+    conversation_id: "happy_seats"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_happy_seats
+rubrics:
+- kind: schema_match
+  target: call_happy_seats.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_happy_seats.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_happy_seats.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_happy_seats.body.citations
+  gold_set_path: setup_data.gold.happy_seats.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_happy_seats.body.citations
+  acceptable_source: setup_data.gold.happy_seats.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_happy_seats.body.reply
+  gold_path: setup_data.gold.happy_seats.reply
+  strictness: lenient

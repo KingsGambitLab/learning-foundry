@@ -1,0 +1,31 @@
+# Web service the grader builds + runs (required).
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+httpx==0.28.1
+
+# --- Free core retrieval/reliability stack (CPU-only) ----------------------
+# Plain `pip install -r requirements.txt`. The index line below pulls the
+# CPU PyTorch wheel (no nvidia/CUDA). The green bar is reachable with just
+# rank_bm25 + numpy; sentence-transformers/faiss is the dense upgrade.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+rank_bm25==0.2.2
+faiss-cpu==1.8.0.post1
+torch==2.2.2+cpu
+sentence-transformers==3.2.1
+tenacity==9.0.0          # retry/backoff -> graceful degradation (S7)
+pytest==8.3.3            # your own local tests
+
+# --- Optional production-grade upgrades (uncomment to use; all OSS/CPU) -----
+# scrubadub==2.0.1               # S4 PII (Apache-2.0, no model)
+# presidio-analyzer==2.2.355     # S4 PII (MIT, heavier: spaCy)
+# llm-guard==0.3.15              # S5 injection + PII scanners (MIT; bake HF model)
+# rapidfuzz==3.10.1              # S2 fuzzy intent matching (MIT)
+# langgraph==0.2.45              # S6 multi-turn orchestration (MIT) — NOT required
+#
+# Production observability (concept — see project_brief.md): in a real
+# deployment you'd wire Langfuse / OpenLLMetry for tracing & eval. The
+# grader sandbox blocks egress, so it's taught as a concept; this course's
+# concrete stand-in is the LLM proxy's per-call usage/cost it returns.
+# langfuse==2.53.0               # OSS; not usable inside the grader sandbox

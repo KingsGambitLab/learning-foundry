@@ -1,0 +1,33 @@
+id: mt_export_followup
+description: "S6 / multi_turn: how do I do that again?"
+category: state_persistence
+quality_bar_ids:
+- multi_turn_context
+trace:
+- id: call_mt_export_followup
+  method: POST
+  path: /support/answer
+  body:
+    message: "how do I do that again?"
+    conversation_id: "mt_export_followup"
+    history: [{"role": "user", "content": "How do I export my account data?"}, {"role": "assistant", "content": "Settings > Data > Export."}]
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_mt_export_followup
+rubrics:
+- kind: schema_match
+  target: call_mt_export_followup.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_mt_export_followup.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_mt_export_followup.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_mt_export_followup.body.citations
+  gold_set_path: setup_data.gold.mt_export_followup.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_mt_export_followup.body.citations
+  acceptable_source: setup_data.gold.mt_export_followup.citations
+  min_overlap: 1.0

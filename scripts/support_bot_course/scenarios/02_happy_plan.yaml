@@ -1,0 +1,38 @@
+id: happy_plan
+description: "S1 / happy_path: Can I downgrade my plan and when does it take effect?"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_happy_plan
+  method: POST
+  path: /support/answer
+  body:
+    message: "Can I downgrade my plan and when does it take effect?"
+    conversation_id: "happy_plan"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_happy_plan
+rubrics:
+- kind: schema_match
+  target: call_happy_plan.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_happy_plan.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_happy_plan.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_happy_plan.body.citations
+  gold_set_path: setup_data.gold.happy_plan.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_happy_plan.body.citations
+  acceptable_source: setup_data.gold.happy_plan.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_happy_plan.body.reply
+  gold_path: setup_data.gold.happy_plan.reply
+  strictness: lenient

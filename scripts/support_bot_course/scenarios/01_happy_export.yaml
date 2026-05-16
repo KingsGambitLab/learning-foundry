@@ -1,0 +1,38 @@
+id: happy_export
+description: "S1 / happy_path: How do I export all my account data to a CSV file?"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_happy_export
+  method: POST
+  path: /support/answer
+  body:
+    message: "How do I export all my account data to a CSV file?"
+    conversation_id: "happy_export"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_happy_export
+rubrics:
+- kind: schema_match
+  target: call_happy_export.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_happy_export.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_happy_export.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_happy_export.body.citations
+  gold_set_path: setup_data.gold.happy_export.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_happy_export.body.citations
+  acceptable_source: setup_data.gold.happy_export.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_happy_export.body.reply
+  gold_path: setup_data.gold.happy_export.reply
+  strictness: lenient

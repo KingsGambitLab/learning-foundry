@@ -1,0 +1,25 @@
+id: policy_clarify_vague
+description: "S2 / policy_routing: it's broken"
+category: boundary
+quality_bar_ids:
+- policy_routing
+trace:
+- id: call_policy_clarify_vague
+  method: POST
+  path: /support/answer
+  body:
+    message: "it's broken"
+    conversation_id: "policy_clarify_vague"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_policy_clarify_vague
+rubrics:
+- kind: schema_match
+  target: call_policy_clarify_vague.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_policy_clarify_vague.body.action
+  expected: "clarify"
+- kind: literal_match
+  target: call_policy_clarify_vague.body.abstained
+  expected: false

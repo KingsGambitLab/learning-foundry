@@ -1,0 +1,25 @@
+id: mt_refund_followup
+description: "S6 / multi_turn: what about getting that one refunded? it was $480"
+category: state_persistence
+quality_bar_ids:
+- multi_turn_context
+trace:
+- id: call_mt_refund_followup
+  method: POST
+  path: /support/answer
+  body:
+    message: "what about getting that one refunded? it was $480"
+    conversation_id: "mt_refund_followup"
+    history: [{"role": "user", "content": "I was double charged for an order."}, {"role": "assistant", "content": "I can look into the duplicate charge."}]
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_mt_refund_followup
+rubrics:
+- kind: schema_match
+  target: call_mt_refund_followup.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_mt_refund_followup.body.action
+  expected: "escalate"
+- kind: literal_match
+  target: call_mt_refund_followup.body.abstained
+  expected: false

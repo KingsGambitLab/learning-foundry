@@ -1,0 +1,37 @@
+id: contract_idempotency
+description: "S7 / idempotency: How do I update my billing card?"
+category: idempotency
+quality_bar_ids:
+- contract_conformance
+trace:
+- id: call_contract_idempotency
+  method: POST
+  path: /support/answer
+  body:
+    message: "How do I update my billing card?"
+    conversation_id: "contract_idempotency"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_contract_idempotency
+- id: call_contract_idempotency_again
+  method: POST
+  path: /support/answer
+  body:
+    message: "How do I update my billing card?"
+    conversation_id: "contract_idempotency"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_contract_idempotency_again
+rubrics:
+- kind: schema_match
+  target: call_contract_idempotency.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_contract_idempotency.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_contract_idempotency.body.abstained
+  expected: false
+- kind: literal_match
+  target: call_contract_idempotency_again.body.action
+  expected: "answer"

@@ -73,10 +73,35 @@
       "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
     extractive_stub_resistance:
       "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
+    regex_match:
+      "The field doesn't match the required format. Compare your value against the expected pattern and fix the shape, not just the content.",
+    numeric_range:
+      "A numeric field is out of the allowed range. Check the bound shown in Expected and clamp/compute the value accordingly.",
+    llm_judge_coverage:
+      "Your answer is missing key points it must convey. Make sure each required fact from the evidence is actually stated.",
+    llm_judge_false_premise:
+      "The question's premise isn't supported by the evidence — the service must abstain/refuse rather than answer.",
   };
-  function hintForRubric(kind) {
-    if (!kind) return "";
-    return RUBRIC_HINTS[String(kind).trim()] ||
+  // Target-specific hints: many distinct skills grade via the same
+  // rubric kind (literal_match on action vs redactions vs abstained),
+  // so a kind-only hint is misleading. failing_rubric is now a label
+  // like "literal_match on action" — key the hint on kind + target.
+  const TARGET_HINTS = {
+    "literal_match on action":
+      "Your routing decision was wrong. Decide the policy: should this be answered, asked-to-clarify, escalated to a human, or refused?",
+    "literal_match on abstained":
+      "You should have refused/abstained — the request can't be answered from what's provided (off-scope or no supporting evidence).",
+    "literal_match on redactions":
+      "PII wasn't handled. Detect and redact emails / phones / cards / SSNs in echoed content and report how many you redacted.",
+    "literal_match on escalation_reason":
+      "When you escalate, you must include a clear escalation_reason.",
+  };
+  function hintForRubric(label) {
+    if (!label) return "";
+    const s = String(label).trim();
+    if (TARGET_HINTS[s]) return TARGET_HINTS[s];
+    const kind = s.split(" on ")[0].trim();
+    return RUBRIC_HINTS[kind] ||
       "Re-read this scenario's Expected vs Your output above and adjust the step that produced the difference.";
   }
 

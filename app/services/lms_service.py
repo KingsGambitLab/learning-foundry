@@ -135,19 +135,38 @@ def _trim_example(value: Any, limit: int = 600) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _rubric_kind_cfg(rubric: Any) -> tuple[str | None, dict]:
+    kind = getattr(rubric, "kind", None)
+    if kind is None and isinstance(rubric, dict):
+        kind = rubric.get("kind")
+    cfg = getattr(rubric, "config", None)
+    if not isinstance(cfg, dict):
+        cfg = rubric if isinstance(rubric, dict) else {}
+    return kind, cfg
+
+
+def _short_target(target: Any) -> str:
+    """`call_x.body.action` -> `action`; `call_x.body` -> `response`."""
+    if not isinstance(target, str) or not target:
+        return "response"
+    last = target.split(".")[-1].strip()
+    return "response" if last in ("", "body") else last
+
+
 def _scenario_worked_example(
     scenario: Any,
     output: Any,
+    failing_rubric: Any,
     failing_rubric_kind: str | None,
     setup_data: dict | None,
-) -> tuple[str | None, str | None, str | None]:
-    """Best-effort (question, expected, actual) for a FAILED scenario.
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Best-effort (question, expected, actual, label) for a FAILED
+    scenario, bound to the SPECIFIC failing rubric instance.
 
     Pure read of data already in hand — the scenario's request trace,
-    the learner's captured response, and the failing rubric's gold
+    the learner's captured response, and the failing rubric's own gold
     path resolved through the same interpolator the grader uses. Never
-    raises: any resolution miss yields ``None`` for that field so the
-    rest of the scorecard is unaffected.
+    raises: any miss yields ``None`` so the scorecard is unaffected.
     """
     from app.services.scenario_trace_runner import interpolate
 
@@ -161,43 +180,92 @@ def _scenario_worked_example(
         except Exception:
             return _trim_example(template) or None
 
-    # --- question: first trace step body carrying a "question" key ---
+    # --- question: field-agnostic. Different course contracts use
+    #     different request keys (question / message / prompt / query);
+    #     fall back to the first string-valued body field. ---
     question: str | None = None
     for step in getattr(scenario, "trace", None) or []:
         body = getattr(step, "body", None) or {}
-        if isinstance(body, dict) and "question" in body:
-            question = _resolve(body["question"])
+        if not isinstance(body, dict):
+            continue
+        for key in ("question", "message", "prompt", "query", "input"):
+            if key in body and body[key] not in (None, "", [], {}):
+                question = _resolve(body[key])
+                break
+        if question is None:
+            for v in body.values():
+                if isinstance(v, str) and v.strip() and not v.startswith("${setup_data."):
+                    question = _resolve(v)
+                    break
+        if question:
             break
 
     # --- actual: the learner's captured response body ---
     actual: str | None = None
     if isinstance(captures, dict) and captures:
         last = list(captures.values())[-1]
-        body = last.get("body") if isinstance(last, dict) else last
-        actual = _trim_example(body) or None
+        b = last.get("body") if isinstance(last, dict) else last
+        actual = _trim_example(b) or None
 
-    # --- expected: the failing rubric's gold reference ---
-    expected: str | None = None
-    for rubric in getattr(scenario, "rubrics", None) or []:
-        kind = getattr(rubric, "kind", None)
-        if kind is None and isinstance(rubric, dict):
-            kind = rubric.get("kind")
-        if kind != failing_rubric_kind:
-            continue
-        cfg = getattr(rubric, "config", None)
-        if not isinstance(cfg, dict):
-            cfg = rubric if isinstance(rubric, dict) else {}
-        for key in ("gold_path", "gold_set_path"):
-            if cfg.get(key):
-                expected = _resolve("${" + str(cfg[key]) + "}")
+    # --- expected + label: from the SPECIFIC failing rubric instance
+    #     (falls back to first-of-kind only if no instance was given). ---
+    kind = failing_rubric_kind
+    cfg: dict = {}
+    target: Any = None
+    if failing_rubric is not None:
+        kind, cfg = _rubric_kind_cfg(failing_rubric)
+        target = cfg.get("target")
+    else:
+        for rb in getattr(scenario, "rubrics", None) or []:
+            k, c = _rubric_kind_cfg(rb)
+            if k == failing_rubric_kind:
+                cfg, target = c, c.get("target")
                 break
-        if expected is None and "expected" in cfg:
-            expected = _trim_example(cfg["expected"]) or None
-        if expected is None and cfg.get("must_have_fields"):
-            expected = "fields: " + _trim_example(cfg["must_have_fields"])
-        break
 
-    return question, expected, actual
+    # Resolve a human "Expected" from whatever gold/threshold key the
+    # failing rubric kind uses. Covers EVERY registered rubric kind so
+    # no failing check ever renders a blank Expected:
+    #   gold_path            llm_judge_semantic_eq
+    #   gold_set_path        oracle_set_overlap
+    #   expected_falsity_path llm_judge_false_premise
+    #   expected_path        behavioral_equivalence
+    #   expected             literal_match / behavioral_equivalence
+    #   must_have_fields     schema_match
+    #   must_contain_facts   llm_judge_coverage
+    #   pattern              regex_match
+    #   min_value/max_value  numeric_range
+    #   acceptable_source    subset_match
+    expected: str | None = None
+    for key in ("gold_path", "gold_set_path", "expected_falsity_path", "expected_path"):
+        if cfg.get(key):
+            expected = _resolve("${" + str(cfg[key]) + "}")
+            break
+    if expected is None and "expected" in cfg:
+        expected = _trim_example(cfg["expected"]) or None
+    if expected is None and cfg.get("must_have_fields"):
+        expected = "required fields: " + _trim_example(cfg["must_have_fields"])
+    if expected is None and cfg.get("must_contain_facts"):
+        expected = "must convey: " + _trim_example(cfg["must_contain_facts"])
+    if expected is None and cfg.get("pattern"):
+        expected = "must match pattern: " + _trim_example(cfg["pattern"])
+    if expected is None and ("min_value" in cfg or "max_value" in cfg):
+        lo, hi = cfg.get("min_value"), cfg.get("max_value")
+        expected = (
+            f"numeric range: {'-inf' if lo is None else lo} … {'inf' if hi is None else hi}"
+        )
+    if expected is None and cfg.get("acceptable_source"):
+        ov = cfg.get("min_overlap")
+        expected = (
+            f"every value must come from `{cfg['acceptable_source']}`"
+            + (f" (≥{ov} overlap)" if ov is not None else "")
+        )
+
+    label = None
+    if kind:
+        st = _short_target(target)
+        label = f"{kind} on {st}" if st != "response" else kind
+
+    return question, expected, actual, label
 
 
 def _strip_rubric_prefix(text: str) -> str:
@@ -1061,29 +1129,62 @@ class LMSService:
                     "and resubmit."
                 )
 
+        # Lab LLM proxy: mint a per-submission scoped token (60k cap,
+        # global USD hard-stop) and expose it to the learner container
+        # via the grader process env (workspace_boot forwards it). No-op
+        # for courses whose learner code never calls the proxy; revoked
+        # in finally so a token can't outlive its submission.
+        _lab_tok = None
+        _lab_env_prev = {k: os.environ.get(k) for k in ("LAB_LLM_BASE_URL", "LAB_LLM_TOKEN")}
         try:
-            pass_result = grader.run(
-                scenarios=scenarios,
-                reference_impl_dir=learner_starter,
-                setup_data_dir=setup_data_dir,
-                router=router,
-                capabilities=capabilities,
+            from app.services.lab_llm_proxy import issue_token, revoke_token
+
+            _lab_sub_id = f"submit_{uuid4().hex[:12]}"
+            _lab_tok = issue_token(_lab_sub_id, ttl_s=1800)
+            os.environ["LAB_LLM_BASE_URL"] = os.environ.get(
+                "LAB_LLM_PROXY_URL", "http://host.docker.internal:8055"
             )
-        except TypeError:
-            # Fake graders without ``capabilities`` / ``router`` kwargs.
+            os.environ["LAB_LLM_TOKEN"] = _lab_tok
+        except Exception as exc:  # proxy optional — never block grading
+            logging.getLogger("course_gen.lms.submit").debug(
+                "lab_llm token mint skipped: %s", exc
+            )
+
+        try:
             try:
                 pass_result = grader.run(
                     scenarios=scenarios,
                     reference_impl_dir=learner_starter,
                     setup_data_dir=setup_data_dir,
                     router=router,
+                    capabilities=capabilities,
                 )
             except TypeError:
-                pass_result = grader.run(
-                    scenarios=scenarios,
-                    reference_impl_dir=learner_starter,
-                    setup_data_dir=setup_data_dir,
-                )
+                # Fake graders without ``capabilities`` / ``router`` kwargs.
+                try:
+                    pass_result = grader.run(
+                        scenarios=scenarios,
+                        reference_impl_dir=learner_starter,
+                        setup_data_dir=setup_data_dir,
+                        router=router,
+                    )
+                except TypeError:
+                    pass_result = grader.run(
+                        scenarios=scenarios,
+                        reference_impl_dir=learner_starter,
+                        setup_data_dir=setup_data_dir,
+                    )
+        finally:
+            if _lab_tok is not None:
+                try:
+                    revoke_token(_lab_tok)
+                except Exception:  # noqa: BLE001
+                    pass
+            for _k, _v in _lab_env_prev.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
 
         # Aggregate per-scenario verdicts into the legacy GradeReport
         # shape so the existing experience / scorecard UI rendering
@@ -1119,13 +1220,15 @@ class LMSService:
             verdict_statuses: list[str] = []
             raw_diagnostics: list[str] = []
             first_fail_kind: str | None = None
+            first_fail_idx: int | None = None
             if output.aborted and output.abort_reason:
                 raw_diagnostics.append(output.abort_reason)
-            for kind, verdict_dump in output.verdicts:
+            for _vi, (kind, verdict_dump) in enumerate(output.verdicts):
                 verdict = Verdict.model_validate(verdict_dump)
                 verdict_statuses.append(verdict.status)
                 if verdict.status == "fail" and first_fail_kind is None:
                     first_fail_kind = kind
+                    first_fail_idx = _vi
                 # ``abstain`` rationales are infrastructure noise ("no LLM
                 # router configured") — we treat abstain as pass anyway,
                 # so drop them from the surfaced diagnostics. Only ``fail``
@@ -1163,14 +1266,18 @@ class LMSService:
                     seen.add(advice)
                     diagnostics.append(advice)
 
-            ex_q = ex_expected = ex_actual = None
+            ex_q = ex_expected = ex_actual = ex_label = None
             if not scenario_passed and scenario is not None:
                 try:
-                    ex_q, ex_expected, ex_actual = _scenario_worked_example(
-                        scenario, output, first_fail_kind, setup_data
+                    fr = None
+                    rubrics = getattr(scenario, "rubrics", None) or []
+                    if first_fail_idx is not None and first_fail_idx < len(rubrics):
+                        fr = rubrics[first_fail_idx]
+                    ex_q, ex_expected, ex_actual, ex_label = _scenario_worked_example(
+                        scenario, output, fr, first_fail_kind, setup_data
                     )
                 except Exception:
-                    ex_q = ex_expected = ex_actual = None
+                    ex_q = ex_expected = ex_actual = ex_label = None
 
             results.append(
                 TestGradeResult(
@@ -1181,7 +1288,7 @@ class LMSService:
                     score=1.0 if scenario_passed else 0.0,
                     summary=summary,
                     diagnostics=diagnostics,
-                    failing_rubric=None if scenario_passed else first_fail_kind,
+                    failing_rubric=None if scenario_passed else (ex_label or first_fail_kind),
                     example_question=ex_q,
                     example_expected=ex_expected,
                     example_actual=ex_actual,

@@ -1,0 +1,44 @@
+{
+  "articles": [
+    {
+      "article_id": "kb_refund",
+      "title": "Refund policy",
+      "text": "Refunds under $100 are processed automatically within 5 business days from Billing > Refunds. Refunds of $100 or more require a support agent to review the order before approval."
+    },
+    {
+      "article_id": "kb_export",
+      "title": "Exporting your data",
+      "text": "To export your account data, go to Settings > Data > Export and choose CSV or JSON. The file is emailed to the account owner within an hour."
+    },
+    {
+      "article_id": "kb_password",
+      "title": "Resetting your password",
+      "text": "Use the 'Forgot password' link on the login page. If you are locked out or suspect unauthorized access, contact support so an agent can secure the account."
+    },
+    {
+      "article_id": "kb_billing",
+      "title": "Updating billing details",
+      "text": "Update your card under Settings > Billing > Payment method. Invoices are available under Billing > Invoices and can be downloaded as PDF."
+    },
+    {
+      "article_id": "kb_plan",
+      "title": "Changing your plan",
+      "text": "Upgrade or downgrade anytime under Settings > Plan. Upgrades are prorated immediately; downgrades take effect at the next billing cycle."
+    },
+    {
+      "article_id": "kb_seats",
+      "title": "Adding team members",
+      "text": "Account owners add teammates under Settings > Team > Invite. Each seat is billed on the next invoice. Roles are owner, admin, and member."
+    },
+    {
+      "article_id": "kb_api",
+      "title": "Using the API",
+      "text": "Generate an API key under Settings > Developer. The REST API base URL is https://api.example.com/v1 and is rate-limited to 600 requests per minute."
+    },
+    {
+      "article_id": "kb_outage",
+      "title": "Service status",
+      "text": "Live system status and incident history are published at the status page. Subscribe there for outage notifications by email or webhook."
+    }
+  ]
+}
