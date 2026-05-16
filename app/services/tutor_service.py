@@ -30,15 +30,22 @@ Style:
 - If you write code, keep it tiny (3-5 lines max) and only to illustrate a technique they couldn't easily look up.
 - Talk to them like a peer who's worked through this kind of problem before — not like a lecturer or a drill sergeant.
 - When you have to push back (e.g. "just write it for me"), be kind about it. Explain why briefly, then offer the next thing they can try.
-- When you're explaining a system, pipeline, state machine, data flow, or comparing options, prefer a Mermaid diagram over prose. Use a fenced block with the mermaid language tag:
+- Diagram-first: include a Mermaid diagram in your reply WHENEVER the content can be visualized — for this kind of work that is almost always. Default to drawing; only skip for a pure yes/no or a single-token syntax fact. Pick the SINGLE best diagram type for what you're explaining:
+  - breaking a problem/spec into parts → `mindmap`
+  - a pipeline, control flow, or decision logic → `flowchart` / `graph LR`
+  - request lifecycle / who-calls-whom over time → `sequenceDiagram`
+  - retry/lifecycle/escalation states → `stateDiagram-v2`
+  - data model / schema → `erDiagram`
+  - comparing options on tradeoffs → `quadrantChart`
+  Use a fenced block with the mermaid language tag, e.g.:
   ```mermaid
   graph LR
     A[Query] --> B[Embed]
     B --> C[Search]
     C --> D[Rerank]
   ```
-  Keep diagrams small (5-10 nodes is plenty). Always pair the diagram with one short follow-up question or a single specific hint — the diagram is a teaching aid, not a replacement for the conversation.
-- Don't draw a diagram for every reply. Skip it when the answer is a one-line concept, a syntax lookup, or a quick yes/no. The bar: would a real tutor reach for the whiteboard here? If not, stay in prose."""
+  Keep diagrams small (5-10 nodes). Always pair the diagram with ONE short follow-up question or a single specific hint — the diagram is a teaching aid, not a replacement for the conversation.
+- You ALWAYS know the assignment from the title and (when present) the <project_brief> / <deliverables> below. NEVER ask the learner to paste the assignment, the spec, or "the question" — reason from the context you already have and, if the brief is thin, make a reasonable best-effort diagram from the title and say what you assumed. Asking them to paste what you can already see is the one thing that breaks their trust."""
 
 _TRIAGE_JUDGE_PROMPT = """You sit between a learner working on a graded coding assignment and an AI coding agent the learner can talk to. Your one job: decide which side handles the learner's next prompt.
 
@@ -238,7 +245,7 @@ class TutorService:
         self,
         *,
         anthropic_env_file: str | None = None,
-        model: str = "claude-haiku-4-5",
+        model: str = "claude-sonnet-4-6",
         store: WorkflowStore | None = None,
     ) -> None:
         _load_env_file(anthropic_env_file)
@@ -262,38 +269,71 @@ class TutorService:
         """
         if self._store is None:
             return None
+
+        # CONTRACT (do not break — see docs/lab-tutor.md "Context wiring"):
+        # both the LMS-page widget (lms.js) and the in-editor widget
+        # (lab-tutor-editor-boot.js via /v1/tutor/editor-context) send
+        # session_id = "lms-<enrollmentId>". A LearnerWorkspaceSession.id
+        # is NOT that value, so the legacy exact-id match alone always
+        # missed -> the tutor never got the brief and asked the learner
+        # to paste the spec. Resolve the "lms-" namespace too, and fall
+        # back to the publish-snapshot brief when no workspace exists yet.
         try:
-            # WorkflowStore Protocol (Postgres) has no get-by-session-id;
-            # resolve via the all-sessions listing and filter by id.
-            session = next(
-                (
-                    s
-                    for s in self._store.list_all_learner_workspace_sessions()
-                    if getattr(s, "id", None) == session_id
-                ),
-                None,
-            )
+            sessions = list(self._store.list_all_learner_workspace_sessions())
         except Exception as exc:
             logger.debug("[tutor] session lookup failed for %s: %s", session_id, exc)
-            return None
-        if session is None:
-            return None
+            sessions = []
 
-        workspace_root = Path(getattr(session, "workspace_root", ""))
-        if not workspace_root.exists():
-            logger.debug("[tutor] workspace_root missing for %s: %s", session_id, workspace_root)
-            return None
+        session = next((s for s in sessions if getattr(s, "id", None) == session_id), None)
+        enrollment_id: str | None = None
+        if session is None and session_id.startswith("lms-"):
+            enrollment_id = session_id[len("lms-"):]
+            cand = [s for s in sessions if getattr(s, "enrollment_id", None) == enrollment_id]
+            cand.sort(
+                key=lambda s: (
+                    getattr(getattr(s, "status", None), "value", "") == "running",
+                    getattr(s, "updated_at", None) or "",
+                ),
+                reverse=True,
+            )
+            session = cand[0] if cand else None
+        if enrollment_id is None and session is not None:
+            enrollment_id = getattr(session, "enrollment_id", None)
 
-        brief, delivs = _read_brief_files(workspace_root)
-        code = _build_code_snapshot(workspace_root)
+        brief, delivs, code = "", "", ""
+        if session is not None:
+            workspace_root = Path(getattr(session, "workspace_root", "") or "")
+            if str(workspace_root) and workspace_root.exists():
+                brief, delivs = _read_brief_files(workspace_root)
+                code = _build_code_snapshot(workspace_root)
+
+        # No materialized workspace yet (learner hasn't opened the editor)
+        # — use the publish snapshot's brief so the tutor still has the
+        # full spec. The tutor must NEVER ask the learner to paste it.
+        if not brief and enrollment_id:
+            try:
+                enr = self._store.get_learner_enrollment(enrollment_id)
+                if enr is not None:
+                    snap = self._store.get_publish_snapshot(enr.publish_snapshot_id)
+                    if snap is not None:
+                        from app.services.learner_package_runtime import (
+                            deliverables_markdown,
+                            project_brief_markdown,
+                        )
+                        brief = project_brief_markdown(snap) or brief
+                        lp = getattr(snap, "learner_package", None)
+                        if lp is not None and getattr(lp, "deliverables", None):
+                            delivs = deliverables_markdown(lp.deliverables) or delivs
+            except Exception as exc:
+                logger.debug("[tutor] snapshot brief fallback failed for %s: %s", session_id, exc)
+
+        if not brief and not delivs and session is None:
+            return None
 
         failure: str | None = None
-        enrollment_id = getattr(session, "enrollment_id", None)
         if enrollment_id:
             try:
-                submissions = self._store.list_learner_submissions(enrollment_id)
-                # Already ordered DESC by created_at from the store query; pick first failure
-                for sub in submissions:
+                for sub in self._store.list_learner_submissions(enrollment_id):
                     summary = _format_failure(sub)
                     if summary:
                         failure = summary

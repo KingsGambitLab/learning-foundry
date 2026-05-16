@@ -96,6 +96,50 @@
     return mermaidPromise;
   }
 
+  // Click-to-enlarge: a 5-10 node diagram is unreadable in the narrow
+  // chat panel, so let the learner open any rendered diagram in a big
+  // zoomable overlay (and copy its source). Basic, no deps.
+  function openMermaidLightbox(svgHtml, source) {
+    const prev = document.querySelector(".lt-mermaid-modal");
+    if (prev) prev.remove();
+    const modal = document.createElement("div");
+    modal.className = "lt-mermaid-modal";
+    const inner = document.createElement("div");
+    inner.className = "lt-mermaid-modal-inner";
+    inner.innerHTML = svgHtml;
+    const bar = document.createElement("div");
+    bar.className = "lt-mermaid-modal-bar";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "lt-mermaid-modal-btn";
+    copyBtn.textContent = "Copy source";
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      try {
+        navigator.clipboard.writeText(source);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy source"; }, 1500);
+      } catch (_) { /* clipboard unavailable (insecure context) */ }
+    });
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "lt-mermaid-modal-btn";
+    closeBtn.textContent = "Close ✕";
+    bar.appendChild(copyBtn);
+    bar.appendChild(closeBtn);
+    modal.appendChild(bar);
+    modal.appendChild(inner);
+    function close() {
+      modal.remove();
+      document.removeEventListener("keydown", onKey);
+    }
+    function onKey(ev) { if (ev.key === "Escape") close(); }
+    closeBtn.addEventListener("click", close);
+    modal.addEventListener("click", (ev) => { if (ev.target === modal) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(modal);
+  }
+
   let mermaidIdCounter = 0;
   async function renderMermaidInto(parent, code) {
     // Show a small "Rendering diagram…" placeholder while we load+parse.
@@ -123,9 +167,23 @@
       // of it coming from the tutor's reply (our own backend). Use a sandboxed
       // container so any quirks stay isolated.
       const wrap = document.createElement("div");
-      wrap.className = "lt-mermaid-svg";
+      wrap.className = "lt-mermaid-svg lt-mermaid-svg--zoom";
       wrap.innerHTML = svg;
+      wrap.title = "Click to enlarge";
+      wrap.setAttribute("role", "button");
+      wrap.setAttribute("tabindex", "0");
+      wrap.addEventListener("click", () => openMermaidLightbox(svg, code));
+      wrap.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          openMermaidLightbox(svg, code);
+        }
+      });
       placeholder.appendChild(wrap);
+      const hint = document.createElement("div");
+      hint.className = "lt-mermaid-hint";
+      hint.textContent = "Click diagram to enlarge";
+      placeholder.appendChild(hint);
     } catch (e) {
       console.warn("[lab-tutor] mermaid render error:", e);
       placeholder.className = "lt-mermaid lt-mermaid--failed";
@@ -312,18 +370,25 @@
       const chips = document.createElement("div");
       chips.className = "lt-chips";
 
-      const chipLabels = [
-        "I'm stuck",
-        "Why isn't this working?",
-        "Walk me through the design",
+      // {label} is what the learner sees; {prompt} is what gets sent.
+      // "Explain the problem statement" requests a mindmap — the best
+      // Mermaid option for breaking a problem into its parts.
+      const chipDefs = [
+        { label: "I'm stuck", prompt: "I'm stuck" },
+        { label: "Why isn't this working?", prompt: "Why isn't this working?" },
+        {
+          label: "Explain the problem statement",
+          prompt:
+            "Explain the problem statement for this assignment as a Mermaid mindmap that breaks it into its key parts (inputs, the core task, constraints, and the success criteria). Then ask me one focused question to get started.",
+        },
       ];
-      for (const label of chipLabels) {
+      for (const def of chipDefs) {
         const chip = document.createElement("button");
         chip.className = "lt-chip";
         chip.type = "button";
-        chip.textContent = label;
+        chip.textContent = def.label;
         chip.addEventListener("click", () => {
-          input.value = label;
+          input.value = def.prompt;
           input.focus();
         });
         chips.appendChild(chip);
@@ -483,6 +548,7 @@
         const res = await fetch(cfg.baseUrl + "/v1/tutor/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({
             session_id: cfg.sessionId,
             message: text,
@@ -753,6 +819,7 @@
         const res = await fetch(baseUrl + "/v1/tutor/triage", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({ session_id: sessionId, prompt, assignment_title: assignmentTitle }),
           signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
         });

@@ -26,13 +26,12 @@ def _asset_version(*paths: Path) -> str:
 def _render_nav(user: dict | None) -> str:
     """Role-aware top nav.
 
-    - One primary tab: Labs (the merged enrolled + catalog list).
     - Course builder shows only for creators.
     - No "Learner LMS" / "API docs" links.
     - Right side: signed-in identity + Log out, or a Log in button.
     """
     role = (user or {}).get("role")
-    links = ['<a class="topnav-link active" href="/courses">Labs</a>']
+    links: list[str] = []
     if role == "creator":
         links.append('<a class="topnav-link" href="/create-course">Course builder</a>')
     if user:

@@ -40,3 +40,17 @@ class TutorTriageResponse(BaseModel):
     action: Literal["tutor", "agent"]
     reason: str
     original_prompt: str
+
+
+class TutorEditorContext(BaseModel):
+    """Resolved tutor context for an embedded code-server editor.
+
+    nginx only knows the dynamic editor port; this maps that port to
+    the owning learner's enrollment so the in-editor widget gets the
+    same ``session_id`` / ``assignment_title`` as the LMS-page widget
+    (shared history). Falls back to a generic context on any miss so
+    the bubble still mounts.
+    """
+
+    assignment_title: str
+    session_id: str

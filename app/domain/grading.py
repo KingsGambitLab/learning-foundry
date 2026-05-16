@@ -119,6 +119,13 @@ class TestGradeResult(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
     summary: str
     diagnostics: list[str] = Field(default_factory=list)
+    # Worked example for FAILED scenarios so a learner can fix in one
+    # pass instead of guessing against hidden inputs. All optional /
+    # defaulted: reports serialized before this field still validate.
+    failing_rubric: str | None = None
+    example_question: str | None = None
+    example_expected: str | None = None
+    example_actual: str | None = None
 
 
 class LearnerReviewGuidance(BaseModel):

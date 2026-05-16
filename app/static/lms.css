@@ -994,6 +994,19 @@
   color: #166534;
 }
 
+/* "Ready" pass state: the deliverable already meets the bar, so any
+   guidance is optional polish — render a calm neutral panel (never the
+   red "needs work" treatment) so improvements read as refinement. */
+.review-guidance.is-ready {
+  border-color: rgba(148, 163, 184, 0.32);
+  background: rgba(248, 250, 252, 0.85);
+}
+
+.review-guidance.is-ready summary,
+.review-guidance.is-ready .review-guidance-section h5 {
+  color: #475569;
+}
+
 /* Submission item state classes mirror the panel palette so the row
    border / surface tint matches the inner feedback panel. */
 .submission-item.is-strong {
@@ -1121,6 +1134,60 @@
 
 .test-result-diagnostics li + li {
   margin-top: 4px;
+}
+
+/* Worked example for a failed scenario: question / expected / your
+   output / failing rubric, so the learner can fix in one pass. */
+.test-result-example {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.test-result-example .we-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.test-result-example .we-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
+.test-result-example .we-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: transparent;
+}
+.test-result-example .we-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+  border-radius: 0 6px 6px 0;
+  display: grid;
+  gap: 4px;
+}
+.test-result-example .we-hint .we-label {
+  padding-top: 0;
+  color: #2563eb;
+}
+.test-result-example .we-hint-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
 }
 
 .writeup-shell {

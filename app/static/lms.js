@@ -52,6 +52,34 @@
   // 15+/18 (>=15 marks) is treated as "solved"/green in the UI. The
   // backend status stays authoritative for data; this is render-only.
   const GOOD_ACCURACY_MARKS = 15;
+
+  // Concept-level hint per failing rubric — bridges the gap between
+  // "what's wrong" (the worked example) and the IR/technique a learner
+  // should reach for. Deliberately a CONCEPT nudge, never the answer.
+  const RUBRIC_HINTS = {
+    llm_judge_semantic_eq:
+      "Checks your answer means the same as the reference. If it's off-topic, that's usually a retrieval problem — you answered from the wrong passage/chunk, not a wording problem.",
+    llm_judge_false_premise:
+      "This question can't be answered from the documents — the service must abstain. The skill: verify the question's core premise is actually grounded in the evidence before you answer.",
+    literal_match:
+      "An exact-value check (often abstained==true on unanswerable questions). Detect when no provided passage supports the question's premise.",
+    oracle_set_overlap:
+      "Citation recall: the gold supporting passages aren't in your citations. Revisit how you decide which passage_ids support the answer.",
+    subset_match:
+      "Citation precision: you cited an id that wasn't in the request pool. Only cite passage_ids that were actually provided.",
+    schema_match:
+      "Your response shape doesn't match the contract — check the required fields and their types.",
+    behavioral_equivalence:
+      "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
+    extractive_stub_resistance:
+      "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
+  };
+  function hintForRubric(kind) {
+    if (!kind) return "";
+    return RUBRIC_HINTS[String(kind).trim()] ||
+      "Re-read this scenario's Expected vs Your output above and adjust the step that produced the difference.";
+  }
+
   function isSolved(passed, total, backendStatus) {
     const p = Number(passed || 0);
     return backendStatus === "passed" || p >= GOOD_ACCURACY_MARKS || (total && p === Number(total));
@@ -622,10 +650,18 @@
     const whyItMatters = Array.isArray(feedback.why_it_matters) ? feedback.why_it_matters.filter(Boolean) : [];
     const likelyRootCause = Array.isArray(feedback.likely_root_cause) ? feedback.likely_root_cause.filter(Boolean) : [];
     const investigationSteps = Array.isArray(feedback.investigation_steps) ? feedback.investigation_steps.filter(Boolean) : [];
-    const strongClass = opts && opts.isStrong ? " is-strong" : "";
+    // When the deliverable already passes, improvements are optional —
+    // render a calm neutral panel (never the red "needs work" treatment)
+    // and soften the wording so it reads as refinement, not failure.
+    const isReady = Boolean(opts && opts.isReady);
+    const panelClass = isReady
+      ? " is-ready"
+      : (opts && opts.isStrong ? " is-strong" : "");
+    const summaryLabel = isReady ? "Optional improvements" : "Summary feedback";
+    const rootCauseLabel = isReady ? "Optional refinements" : "Likely root cause";
     return `
-      <details class="review-guidance${strongClass}" open>
-        <summary>Summary feedback</summary>
+      <details class="review-guidance${panelClass}"${isReady ? "" : " open"}>
+        <summary>${summaryLabel}</summary>
         ${feedback.learner_feedback ? `<p class="review-guidance-summary">${escapeHtml(feedback.learner_feedback)}</p>` : ""}
         ${feedback.fundamental_gap ? `
           <div class="review-guidance-section">
@@ -647,7 +683,7 @@
         ` : ""}
         ${likelyRootCause.length ? `
           <div class="review-guidance-section">
-            <h5>Likely root cause</h5>
+            <h5>${rootCauseLabel}</h5>
             <ul>${likelyRootCause.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
           </div>
         ` : ""}
@@ -814,6 +850,25 @@
       const countLabel = details.length
         ? `${details.length} diagnostic${details.length === 1 ? "" : "s"}`
         : "";
+      // Worked example (failed scenarios only): the actual question,
+      // the expected/gold reference, the learner's own output, and
+      // which rubric failed — so a learner fixes in one pass instead
+      // of guessing against hidden inputs.
+      const exRow = (label, val) =>
+        val
+          ? `<div class="we-row"><span class="we-label">${escapeHtml(label)}</span><code class="we-val">${escapeHtml(String(val))}</code></div>`
+          : "";
+      const workedExample =
+        result.status !== "passed" &&
+        (result.example_question || result.example_expected || result.example_actual || result.failing_rubric)
+          ? `<div class="test-result-example">
+              ${exRow("Failing check", result.failing_rubric)}
+              ${exRow("Question", result.example_question)}
+              ${exRow("Expected", result.example_expected)}
+              ${exRow("Your output", result.example_actual)}
+              <div class="we-hint"><span class="we-label">How to think about it</span><span class="we-hint-text">${escapeHtml(hintForRubric(result.failing_rubric))}</span></div>
+            </div>`
+          : "";
       // Each test is a <details> whose summary carries the head row + the
       // one-line headline. The diagnostic count sits on the right of the
       // head row (uses the previously-dead space) and doubles as the
@@ -837,6 +892,7 @@
                 ${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
               </ul>
             ` : ""}
+            ${workedExample}
           </details>
         </li>
       `;
@@ -1185,7 +1241,7 @@
                   ${renderStatusPill(pillKind, pillLabel)}
                   ${renderInfoPill("Checks", `${gr.passed_tests}/${gr.total_tests}`)}
                 </div>
-                ${reviewArea.feedback ? renderLearnerGuidance(reviewArea.feedback, { isStrong }) : ""}
+                ${reviewArea.feedback ? renderLearnerGuidance(reviewArea.feedback, { isStrong, isReady: isPassed }) : ""}
                 ${renderTestResults(gr)}
               </div>
               `;

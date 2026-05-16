@@ -362,6 +362,60 @@ they refresh. This is acceptable for Phase 1 operational cadences.
 
 ---
 
+## Context wiring — invariants (DO NOT BREAK)
+
+This has regressed more than once. The tutor is only useful if it
+receives the assignment's **project brief + deliverables**, not just the
+title. The whole chain hinges on ONE contract:
+
+> **`session_id` is always `lms-<enrollmentId>`.**
+
+Producers of `session_id` (all must keep the `lms-<enrollmentId>` form):
+
+1. **LMS-page widget** — `app/static/lms.js` `syncLabTutor()` calls
+   `__labTutorMount({ sessionId: "lms-" + enrollmentId, ... })`.
+2. **In-editor widget** — nginx (`/etc/nginx/conf.d/course-gen-codex.conf`,
+   editor `location`) `sub_filter`-injects
+   `<script src="/static/lab-tutor-editor-boot.js" data-editor-port="$eport">`
+   into the code-server HTML. `lab-tutor-editor-boot.js` calls
+   `GET /v1/tutor/editor-context?port=<port>`, which maps the port →
+   owning learner's enrollment (ownership-checked) and returns
+   `session_id = "lms-<enrollmentId>"` + the real `assignment_title`.
+
+Consumer: `TutorService._resolve_session_context(session_id)` (in
+`app/services/tutor_service.py`). It MUST resolve the `lms-<enrollmentId>`
+namespace — first by finding that enrollment's workspace session
+(workspace files → brief/code), and if no workspace exists yet, by
+falling back to the **publish snapshot's** `project_brief_markdown` /
+`deliverables_markdown`. (The original code only matched
+`LearnerWorkspaceSession.id == session_id`, which `lms-<eid>` never
+equals → the tutor silently got no brief and asked the learner to paste
+the spec. That is the canonical regression.)
+
+Behavioral invariant (enforced in `_TUTOR_PERSONA`): the tutor must
+**never** ask the learner to paste the assignment/spec/question, and
+should include a Mermaid diagram whenever the content can be
+visualized (picking the best diagram type for the content).
+
+### Regression checklist (run after ANY tutor / nginx / lms.js change)
+
+```bash
+# 1. Resolver returns a real brief for the lms-<eid> namespace.
+#    (login as a learner with an enrollment, then:)
+curl -s -b jar -X POST http://18.236.242.248/v1/tutor/chat \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"lms-<ENROLLMENT_ID>","message":"Explain the problem statement with a mindmap","assignment_title":"<title>"}'
+#    PASS = reply contains a ```mermaid block AND does NOT say
+#    "paste the assignment / spec / question".
+# 2. Editor path: GET /v1/tutor/editor-context?port=<running editor port>
+#    returns assignment_title + session_id "lms-<enrollmentId>".
+# 3. Served code-server HTML still injects lab-tutor-editor-boot.js
+#    (curl the /editor/<port>/ page, grep for the script tag).
+```
+
+If any step fails, the tutor is running context-blind — fix before
+shipping.
+
 ## Historical note
 
 This document previously described a VS Code extension that shipped inside

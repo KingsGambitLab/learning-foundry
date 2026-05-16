@@ -120,6 +120,86 @@ def _rubric_kinds(scenario) -> list[str]:
     return out
 
 
+def _trim_example(value: Any, limit: int = 600) -> str:
+    """Compact, length-capped string for a worked-example field."""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
+        except Exception:
+            text = str(value)
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _scenario_worked_example(
+    scenario: Any,
+    output: Any,
+    failing_rubric_kind: str | None,
+    setup_data: dict | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Best-effort (question, expected, actual) for a FAILED scenario.
+
+    Pure read of data already in hand — the scenario's request trace,
+    the learner's captured response, and the failing rubric's gold
+    path resolved through the same interpolator the grader uses. Never
+    raises: any resolution miss yields ``None`` for that field so the
+    rest of the scorecard is unaffected.
+    """
+    from app.services.scenario_trace_runner import interpolate
+
+    captures = getattr(output, "captures", {}) or {}
+
+    def _resolve(template: Any) -> str | None:
+        if not isinstance(template, str):
+            return _trim_example(template) or None
+        try:
+            return _trim_example(interpolate(template, captures, setup_data=setup_data))
+        except Exception:
+            return _trim_example(template) or None
+
+    # --- question: first trace step body carrying a "question" key ---
+    question: str | None = None
+    for step in getattr(scenario, "trace", None) or []:
+        body = getattr(step, "body", None) or {}
+        if isinstance(body, dict) and "question" in body:
+            question = _resolve(body["question"])
+            break
+
+    # --- actual: the learner's captured response body ---
+    actual: str | None = None
+    if isinstance(captures, dict) and captures:
+        last = list(captures.values())[-1]
+        body = last.get("body") if isinstance(last, dict) else last
+        actual = _trim_example(body) or None
+
+    # --- expected: the failing rubric's gold reference ---
+    expected: str | None = None
+    for rubric in getattr(scenario, "rubrics", None) or []:
+        kind = getattr(rubric, "kind", None)
+        if kind is None and isinstance(rubric, dict):
+            kind = rubric.get("kind")
+        if kind != failing_rubric_kind:
+            continue
+        cfg = getattr(rubric, "config", None)
+        if not isinstance(cfg, dict):
+            cfg = rubric if isinstance(rubric, dict) else {}
+        for key in ("gold_path", "gold_set_path"):
+            if cfg.get(key):
+                expected = _resolve("${" + str(cfg[key]) + "}")
+                break
+        if expected is None and "expected" in cfg:
+            expected = _trim_example(cfg["expected"]) or None
+        if expected is None and cfg.get("must_have_fields"):
+            expected = "fields: " + _trim_example(cfg["must_have_fields"])
+        break
+
+    return question, expected, actual
+
+
 def _strip_rubric_prefix(text: str) -> str:
     """Drop the leading ``rubric_kind (fail): `` prefix the aggregation
     layer adds. Learners care about WHAT broke, not which rubric class
@@ -1027,15 +1107,25 @@ class LMSService:
         # truth, not the oracle output (which only carries id/category).
         scenario_by_id = {s.id: s for s in scenarios}
 
+        # Loaded once for worked-example gold resolution (best-effort:
+        # a missing/unreadable _setup just yields no expected value).
+        try:
+            setup_data = _load_setup_data(setup_data_dir)
+        except Exception:
+            setup_data = {}
+
         results: list[TestGradeResult] = []
         for output in pass_result.scenario_outputs:
             verdict_statuses: list[str] = []
             raw_diagnostics: list[str] = []
+            first_fail_kind: str | None = None
             if output.aborted and output.abort_reason:
                 raw_diagnostics.append(output.abort_reason)
             for kind, verdict_dump in output.verdicts:
                 verdict = Verdict.model_validate(verdict_dump)
                 verdict_statuses.append(verdict.status)
+                if verdict.status == "fail" and first_fail_kind is None:
+                    first_fail_kind = kind
                 # ``abstain`` rationales are infrastructure noise ("no LLM
                 # router configured") — we treat abstain as pass anyway,
                 # so drop them from the surfaced diagnostics. Only ``fail``
@@ -1073,6 +1163,15 @@ class LMSService:
                     seen.add(advice)
                     diagnostics.append(advice)
 
+            ex_q = ex_expected = ex_actual = None
+            if not scenario_passed and scenario is not None:
+                try:
+                    ex_q, ex_expected, ex_actual = _scenario_worked_example(
+                        scenario, output, first_fail_kind, setup_data
+                    )
+                except Exception:
+                    ex_q = ex_expected = ex_actual = None
+
             results.append(
                 TestGradeResult(
                     test_id=output.scenario_id,
@@ -1082,6 +1181,10 @@ class LMSService:
                     score=1.0 if scenario_passed else 0.0,
                     summary=summary,
                     diagnostics=diagnostics,
+                    failing_rubric=None if scenario_passed else first_fail_kind,
+                    example_question=ex_q,
+                    example_expected=ex_expected,
+                    example_actual=ex_actual,
                 )
             )
 

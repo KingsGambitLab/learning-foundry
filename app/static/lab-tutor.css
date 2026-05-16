@@ -381,6 +381,65 @@
   display: block;
   margin: 0 auto;
 }
+.lt-mermaid-svg--zoom {
+  cursor: zoom-in;
+  border-radius: 6px;
+  transition: box-shadow 0.12s ease;
+}
+.lt-mermaid-svg--zoom:hover,
+.lt-mermaid-svg--zoom:focus-visible {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.45);
+  outline: none;
+}
+.lt-mermaid-hint {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #64748b;
+  text-align: center;
+}
+.lt-mermaid-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  background: rgba(15, 23, 42, 0.78);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 12px;
+}
+.lt-mermaid-modal-bar {
+  display: flex;
+  gap: 8px;
+}
+.lt-mermaid-modal-btn {
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fff;
+  color: #0f172a;
+}
+.lt-mermaid-modal-btn:hover {
+  background: #e2e8f0;
+}
+.lt-mermaid-modal-inner {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  max-width: 94vw;
+  max-height: 82vh;
+  overflow: auto;
+}
+.lt-mermaid-modal-inner svg {
+  width: auto;
+  height: auto;
+  max-width: 88vw;
+  display: block;
+}
 .lt-mermaid pre {
   margin: 0;
   padding: 8px;
