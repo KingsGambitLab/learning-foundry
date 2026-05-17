@@ -135,7 +135,7 @@ document.getElementById("login-form").addEventListener("submit", async (ev) => {
   });
   if (resp.ok) {
     const params = new URLSearchParams(location.search);
-    location.href = params.get("next") || "/";
+    location.href = params.get("next") || "/courses";
   } else {
     document.getElementById("err").textContent = "Invalid email or password.";
   }

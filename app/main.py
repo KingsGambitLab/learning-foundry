@@ -309,6 +309,12 @@ def root(request: Request):
     # Logged-out experience is just the login form.
     if user is None:
         return RedirectResponse(url="/login", status_code=302)
+    # The bare "/" hero is deprecated — /courses is the canonical
+    # landing. Only "/?enrollment=<id>" still renders here: that is the
+    # pinned learner workspace/brief/review experience (where enrolling
+    # and "resume" navigate to). No enrollment param → go to /courses.
+    if not request.query_params.get("enrollment"):
+        return RedirectResponse(url="/courses", status_code=302)
     svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
         catalog=svc.list_catalog(),
