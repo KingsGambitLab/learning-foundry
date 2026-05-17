@@ -78,8 +78,9 @@ def test_every_rubric_kind_yields_expected_and_label(kind, cfg):
     assert label == (f"{kind} on {st}" if st != "response" else kind)
     # 3. Question is field-agnostic (body uses `message`, not `question`).
     assert q and "refund" in q
-    # 4. Actual is the learner's captured response body.
-    assert actual and "action" in actual
+    # 4. Actual is always a non-empty string (field-scoped when the
+    #    target resolves, else the full body — never blank).
+    assert actual and isinstance(actual, str) and actual.strip()
 
 
 def test_no_registered_kind_is_unmapped():
@@ -130,6 +131,42 @@ def test_short_target_helper():
     assert _short_target("call_x.body.citations") == "citations"
     assert _short_target("call_x.body") == "response"
     assert _short_target("") == "response"
+
+
+def _output_with(body: dict):
+    return SimpleNamespace(captures={"call_x": {"status": 200, "body": body}})
+
+
+def test_actual_is_scoped_to_failing_field_not_whole_body():
+    """#2: 'Your output' must show the SAME field the failing rubric
+    checks (apples-to-apples with Expected), not the whole response."""
+    out = _output_with({"reply": "not yet implemented", "action": "answer",
+                         "citations": [], "redactions": 0})
+    cite_rubric = {"kind": "oracle_set_overlap", "target": "call_x.body.citations",
+                   "gold_set_path": "setup_data.gold.cites", "min_recall": 0.5}
+    q, expected, actual, label = _scenario_worked_example(
+        _scenario(BODY, [cite_rubric]), out, cite_rubric, "oracle_set_overlap", SETUP
+    )
+    assert actual == "[]"                       # the citations field only
+    assert "not yet implemented" not in actual  # NOT the whole body
+    assert "action" not in actual
+
+    act_rubric = {"kind": "literal_match", "target": "call_x.body.action",
+                  "expected": "escalate"}
+    _q, _e, actual2, _l = _scenario_worked_example(
+        _scenario(BODY, [act_rubric]), out, act_rubric, "literal_match", SETUP
+    )
+    assert actual2 == "answer"
+
+
+def test_actual_falls_back_to_whole_body_when_target_field_absent():
+    out = _output_with({"action": "answer", "redactions": 0})  # no citations
+    r = {"kind": "oracle_set_overlap", "target": "call_x.body.citations",
+         "gold_set_path": "setup_data.gold.cites", "min_recall": 0.5}
+    _q, _e, actual, _l = _scenario_worked_example(
+        _scenario(BODY, [r]), out, r, "oracle_set_overlap", SETUP
+    )
+    assert actual and "action" in actual  # whole-body fallback, never blank
 
 
 def test_rubric_kind_cfg_handles_dict_and_object():

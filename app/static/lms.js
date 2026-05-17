@@ -58,15 +58,15 @@
   // should reach for. Deliberately a CONCEPT nudge, never the answer.
   const RUBRIC_HINTS = {
     llm_judge_semantic_eq:
-      "Checks your answer means the same as the reference. If it's off-topic, that's usually a retrieval problem — you answered from the wrong passage/chunk, not a wording problem.",
+      "Checks your answer means the same as the reference. If it's off-topic, that's usually a retrieval problem — you answered from the wrong source, not a wording problem.",
     llm_judge_false_premise:
-      "This question can't be answered from the documents — the service must abstain. The skill: verify the question's core premise is actually grounded in the evidence before you answer.",
+      "This question can't be answered from the provided knowledge base — the service must abstain. The skill: verify the question's core premise is actually grounded in the sources before you answer.",
     literal_match:
-      "An exact-value check (often abstained==true on unanswerable questions). Detect when no provided passage supports the question's premise.",
+      "An exact-value check (often abstained==true on unanswerable questions). Detect when no provided source supports the question's premise.",
     oracle_set_overlap:
-      "Citation recall: the gold supporting passages aren't in your citations. Revisit how you decide which passage_ids support the answer.",
+      "Citation recall: a source that supports the answer is missing from your `citations`. Revisit how you decide which sources to cite.",
     subset_match:
-      "Citation precision: you cited an id that wasn't in the request pool. Only cite passage_ids that were actually provided.",
+      "Citation precision: you cited a source that isn't an accepted supporting source. Only cite sources that actually support the answer.",
     schema_match:
       "Your response shape doesn't match the contract — check the required fields and their types.",
     behavioral_equivalence:
@@ -103,6 +103,39 @@
     const kind = s.split(" on ")[0].trim();
     return RUBRIC_HINTS[kind] ||
       "Re-read this scenario's Expected vs Your output above and adjust the step that produced the difference.";
+  }
+
+  // Plain-English name for the failing check. The internal rubric label
+  // ("oracle_set_overlap on citations") still drives hintForRubric, but
+  // learners never see rubric-kind jargon. Keyed on kind + target;
+  // unknown combos degrade to a readable field-oriented phrase.
+  const CHECK_LABELS = {
+    "oracle_set_overlap on citations": "Citations — a required source is missing",
+    "subset_match on citations": "Citations — an unsupported source was cited",
+    "literal_match on action": "Routing decision (answer / clarify / escalate / refuse)",
+    "behavioral_equivalence on action": "Routing decision stability",
+    "literal_match on abstained": "Abstain / refuse decision",
+    "llm_judge_false_premise on abstained": "Abstain on an unanswerable question",
+    "literal_match on redactions": "PII redaction count",
+    "numeric_range on redactions": "PII redaction count",
+    "literal_match on escalation_reason": "Escalation reason",
+    "regex_match on escalation_reason": "Escalation reason",
+    "llm_judge_semantic_eq on reply": "Answer quality (meaning)",
+    "llm_judge_coverage on reply": "Answer completeness",
+  };
+  function friendlyCheckLabel(label) {
+    if (!label) return "";
+    const s = String(label).trim();
+    if (CHECK_LABELS[s]) return CHECK_LABELS[s];
+    const [kind, field] = s.split(" on ").map((x) => x && x.trim());
+    if (kind && kind.indexOf("schema_match") === 0) return "Response shape (contract)";
+    if (!field || field === "response") {
+      if (kind && kind.indexOf("schema_match") === 0) return "Response shape (contract)";
+      return "Response check";
+    }
+    if (kind === "regex_match") return `Format of \`${field}\``;
+    if (kind === "numeric_range") return `\`${field}\` out of allowed range`;
+    return `\`${field}\` is incorrect`;
   }
 
   function isSolved(passed, total, backendStatus) {
@@ -899,7 +932,7 @@
         !isPassed &&
         (result.example_question || result.example_expected || result.example_actual || result.failing_rubric)
           ? `<div class="test-result-example">
-              ${exRow("Failing check", result.failing_rubric)}
+              ${exRow("What failed", friendlyCheckLabel(result.failing_rubric))}
               ${exRow("Question", result.example_question)}
               ${exRow("Expected", result.example_expected)}
               ${exRow("Your output", result.example_actual)}

@@ -200,13 +200,6 @@ def _scenario_worked_example(
         if question:
             break
 
-    # --- actual: the learner's captured response body ---
-    actual: str | None = None
-    if isinstance(captures, dict) and captures:
-        last = list(captures.values())[-1]
-        b = last.get("body") if isinstance(last, dict) else last
-        actual = _trim_example(b) or None
-
     # --- expected + label: from the SPECIFIC failing rubric instance
     #     (falls back to first-of-kind only if no instance was given). ---
     kind = failing_rubric_kind
@@ -221,6 +214,24 @@ def _scenario_worked_example(
             if k == failing_rubric_kind:
                 cfg, target = c, c.get("target")
                 break
+
+    # --- actual: scope to the SAME field the failing rubric checks so
+    #     it reads apples-to-apples with Expected (e.g. Expected
+    #     ['kb_export'] vs Your output []), not the whole response body.
+    #     Fall back to the full captured body when the target can't be
+    #     resolved (missing field / no target / whole-body target). ---
+    whole_body: str | None = None
+    if isinstance(captures, dict) and captures:
+        _last = list(captures.values())[-1]
+        _b = _last.get("body") if isinstance(_last, dict) else _last
+        whole_body = _trim_example(_b) or None
+    actual: str | None = None
+    if isinstance(target, str) and target:
+        scoped = _resolve("${" + target + "}")
+        if scoped is not None and "${" not in scoped:
+            actual = scoped
+    if actual is None:
+        actual = whole_body
 
     # Resolve a human "Expected" from whatever gold/threshold key the
     # failing rubric kind uses. Covers EVERY registered rubric kind so
@@ -349,8 +360,22 @@ def humanize_diagnostic(raw: str) -> str:
             )
         return f"Response field `{field}` doesn't match the expected value"
 
-    # Unrecognized — pass through. Better than losing signal.
-    return raw
+    # subset_match with no values to check (learner returned an empty
+    # citations/list field) — phrase it as the actionable cause.
+    if body.strip() in (
+        "target is empty; cannot check subset",
+        "target is empty, cannot check subset",
+    ):
+        return (
+            "You returned no citations, so the supporting-source check "
+            "couldn't run — cite the source(s) your answer relies on"
+        )
+
+    # Unrecognized — pass through the PREFIX-STRIPPED text (never the
+    # raw `rubric_kind (fail): ...`; internal rubric names must not leak
+    # to learners). LLM-judge rationales are already plain English and
+    # survive this unchanged.
+    return body
 
 
 # ---------------- Outcome-mode feedback clustering ----------------

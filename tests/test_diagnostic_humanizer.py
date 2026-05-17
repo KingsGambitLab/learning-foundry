@@ -69,12 +69,28 @@ class HumanizeDiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(out, "Response is missing numeric field `eval.summary.pass_rate`")
 
-    def test_unrecognized_diagnostic_passes_through(self) -> None:
-        """When no rule matches, we MUST NOT drop the diagnostic —
-        return it as-is so the learner still has something to chase.
-        """
+    def test_unrecognized_diagnostic_strips_rubric_prefix(self) -> None:
+        """When no rule matches we keep the message (never drop signal)
+        but the internal ``rubric_kind (fail):`` prefix MUST be stripped
+        — learners never see rubric-kind jargon."""
         out = humanize_diagnostic("some_future_rubric (fail): a brand new message")
-        self.assertEqual(out, "some_future_rubric (fail): a brand new message")
+        self.assertEqual(out, "a brand new message")
+        self.assertNotIn("some_future_rubric", out)
+
+    def test_llm_judge_rationale_keeps_prose_drops_kind(self) -> None:
+        out = humanize_diagnostic(
+            "llm_judge_semantic_eq (fail): The answer says 'not yet "
+            "implemented', contradicting the reference."
+        )
+        self.assertNotIn("llm_judge_semantic_eq", out)
+        self.assertTrue(out.startswith("The answer says"))
+
+    def test_subset_empty_target_is_actionable(self) -> None:
+        out = humanize_diagnostic(
+            "subset_match (fail): target is empty; cannot check subset"
+        )
+        self.assertNotIn("subset_match", out)
+        self.assertIn("no citations", out)
 
     def test_empty_input(self) -> None:
         self.assertEqual(humanize_diagnostic(""), "")
