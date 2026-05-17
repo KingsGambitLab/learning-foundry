@@ -73,6 +73,40 @@ def deliverables_markdown(deliverables: list[LearnerDeliverablePackage]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def readme_markdown(snapshot: PublishSnapshot) -> str:
+    """The single learner-facing doc: the project brief followed by a
+    Deliverables section. (We used to seed three files — README.md,
+    project_brief.md, deliverables.md — where the first two were
+    byte-identical; one well-structured README is clearer.)
+
+    Heading hygiene: the brief owns the only H1 (the course title).
+    The Deliverables block is an H2 section with H3 per deliverable —
+    NOT ``deliverables_markdown`` (that emits its own H1, kept intact
+    for the tutor's context builder).
+    """
+    learner_package = snapshot.learner_package
+    brief = project_brief_markdown(snapshot).rstrip()
+    parts = [
+        brief,
+        "",
+        "---",
+        "",
+        "## Deliverables",
+        "",
+        "Checklist of what the review scores when you submit:",
+        "",
+    ]
+    deliverables = learner_package.deliverables if learner_package is not None else []
+    for index, deliverable in enumerate(deliverables, start=1):
+        parts.append(f"### {index}. {deliverable.title}")
+        parts.append("")
+        objective = (deliverable.objective or "").strip()
+        if objective:
+            parts.append(objective)
+            parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
+
+
 def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSnapshot) -> Path:
     root = Path(workspace_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -83,10 +117,10 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     files_to_write: dict[str, str] = {}
     for file in _workspace_seed_source_files(learner_package.deliverables, learner_package.package_type):
         files_to_write[file.relative_path] = file.content
-    brief = project_brief_markdown(snapshot)
-    files_to_write["README.md"] = brief
-    files_to_write["project_brief.md"] = brief
-    files_to_write["deliverables.md"] = deliverables_markdown(learner_package.deliverables)
+    # One consolidated learner doc. (Previously also wrote
+    # project_brief.md — an exact dup of README — and a standalone
+    # deliverables.md; folded into README for a single source.)
+    files_to_write["README.md"] = readme_markdown(snapshot)
     files_to_write[".coursegen/workspace_seeded.txt"] = snapshot.id + "\n"
     files_to_write[".coursegen/review_areas/index.json"] = review_area_index_json(learner_package.deliverables)
     files_to_write[".coursegen/deliverables/index.json"] = review_area_index_json(learner_package.deliverables)

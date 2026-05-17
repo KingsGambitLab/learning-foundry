@@ -1,7 +1,7 @@
 # Customer Support Bot — starter
 
-Implement `POST /support/answer` as described in `project_brief.md`.
-Read the brief and `deliverables.md` first.
+Implement `POST /support/answer` as described in `README.md` (the
+project brief, with the Deliverables checklist at the end). Read it first.
 
 ## :vscode: Iterate in this workspace with the visible checks
 
@@ -28,5 +28,5 @@ pre-installed libraries and **no LLM**. Grounding (S1/S6) must be
 **semantic** — the questions are vocabulary-mismatch, so use the
 pre-installed `all-MiniLM-L6-v2` embedding model + `faiss-cpu`, not
 keyword matching (a keyword-only retriever tops out near 20/25 and
-cannot clear the bar — see `project_brief.md`). The LLM (S8) only
+cannot clear the bar — see `README.md`). The LLM (S8) only
 polishes the reply and is a non-gating bonus.

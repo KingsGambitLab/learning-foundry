@@ -13,6 +13,7 @@ import json, mimetypes, pathlib, time
 from app.storage.postgres_store import PostgresWorkflowStore
 from app.domain.publish import LearnerPackageFile
 from app.domain.task_agent import LearnerDeliverableBrief
+from app.domain.course import CourseRunStatus
 
 st = PostgresWorkflowStore()
 CID = "course_support_bot"
@@ -130,6 +131,10 @@ run.summary = SUMMARY
 run.shared_workflow_run_id = CID
 run.course_family_id = CID
 run.lab_tutor_enabled = True
+# Force published — the template (course_wikiqa_v1) is hidden
+# (status=active), so a deep-copy would otherwise un-publish the
+# Support Bot and drop it from the catalog.
+run.status = CourseRunStatus.published
 run.latest_publish_snapshot_id = snap.id
 pj = dict(run.payload_json or {})
 pj.setdefault("outcome_state", {})
@@ -144,16 +149,13 @@ st.save_course_run(run)
 # dataset. Back up each enrollment row before mutating; refresh the
 # non-learner docs in any already-seeded workspace (never touch
 # learner-authored files).
-from app.services.learner_package_runtime import (
-    project_brief_markdown, deliverables_markdown,
-)
+from app.services.learner_package_runtime import readme_markdown
 
 BACKUP = pathlib.Path("/opt/course-gen-codex/tmp") / f"support_bot_enrollments.bak.{int(time.time())}.json"
 WS_BASE = pathlib.Path("/opt/course-gen-codex/learner_workspaces")
 summaries = st.list_learner_enrollments(limit=500)
 repinned, refreshed, backup_rows = [], [], []
-brief_md = project_brief_markdown(snap)
-delivs_md = deliverables_markdown(lp.deliverables)
+readme_md = readme_markdown(snap)  # single consolidated learner doc
 for s in summaries:
     if getattr(s, "course_run_id", None) != CID:
         continue
@@ -169,9 +171,15 @@ for s in summaries:
     try:
         ws = WS_BASE / e.learner_id / e.shared_workflow_run_id / "workspace"
         if (ws / ".coursegen" / "workspace_seeded.txt").exists():
-            (ws / "README.md").write_text(brief_md, encoding="utf-8")
-            (ws / "project_brief.md").write_text(brief_md, encoding="utf-8")
-            (ws / "deliverables.md").write_text(delivs_md, encoding="utf-8")
+            (ws / "README.md").write_text(readme_md, encoding="utf-8")
+            # Single-README consolidation: remove the now-retired dup
+            # files from already-seeded workspaces (learner code, e.g.
+            # public/starter/app.py, is never touched).
+            for stale in ("project_brief.md", "deliverables.md"):
+                try:
+                    (ws / stale).unlink()
+                except FileNotFoundError:
+                    pass
             (ws / ".coursegen" / "workspace_seeded.txt").write_text(snap.id + "\n", encoding="utf-8")
             refreshed.append(e.id)
     except Exception as exc:  # best-effort; never fail the publish on this
