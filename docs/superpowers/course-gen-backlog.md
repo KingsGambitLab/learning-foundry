@@ -695,6 +695,117 @@ convention** so a learner doesn't accidentally over-fit.
 
 ---
 
+## 21. Core publish flow lacks the safe-republish behaviors hand-coded in install_support_bot.py
+
+**Status:** Backlog (highest impact). Sub-item (a) also has a spawned
+chip ("Repin enrollments on course re-publish").
+
+**Originating direct fix:** Customer Support Bot. The course is
+published via a bespoke one-off script
+(`scripts/support_bot_course/install_support_bot.py`, mirrored at
+`/opt/course-gen-codex/tmp/`). Every safety behavior needed for a
+re-publish was hand-coded there because the core publish path does not
+do them. A re-publish through the normal flow on ANY other lab silently
+regresses learners.
+
+**Generalization — fold ALL of these into the core course publish
+pipeline so every lab gets them for free:**
+- (a) **Re-pin active enrollments** to the freshly published snapshot.
+  `get_deliverable_experience` serves `enrollment.publish_snapshot_id`,
+  not the course's latest — so without repin, learners see the OLD
+  brief/README while being graded on the NEW on-disk bundle (M33).
+- (b) **Refresh already-seeded workspace docs** to the current scheme
+  (single consolidated README) and delete retired files
+  (`project_brief.md`, `deliverables.md`), **never touching
+  learner-authored code** (M41). `seed_workspace_from_snapshot` skips
+  existing files, so already-materialised workspaces need an explicit
+  refresh step.
+- (c) **Back up enrollment rows** (and the course run / snapshot)
+  before any mutation (M33 — backups went to `tmp/`).
+- (d) **Preserve `status=published` across re-publish.** Deep-copying a
+  template course run inherits the template's status; if the template
+  is hidden (`active`) the re-published lab silently drops out of the
+  catalog (M41 regression — caught and patched in the script only).
+- (e) **Populate a real structured `learner_brief`** instead of leaving
+  the cloned template's (the Support Bot showed Wikipedia-QA copy until
+  M33 set it explicitly).
+- (f) **Embed the grader bundle in the publish snapshot** instead of
+  rsync-to-disk + `payload_json.outcome_state.workspace_root` (the
+  prior P0; bundle currently lives in the mutable
+  `outcome_workspaces/<course>/` tree, not the immutable snapshot).
+
+**Where to fix:** the course publish/snapshot service
+(`app/services/publish_snapshot_service.py`,
+`PostgresWorkflowStore.save_publish_snapshot`/`save_course_run`) plus
+`seed_workspace_from_snapshot` for (b). Confirm with the user before
+changing shared publish semantics (some snapshot pinning is
+intentional for mid-assignment immutability).
+
+---
+
+## 22. Course publish is a per-course bespoke script, not a pipeline
+
+**Status:** Backlog. Depends on / overlaps #21.
+
+**Originating direct fix:** `install_support_bot.py` clones the
+known-good `course_wikiqa_v1` snapshot and mutates it by hand (title,
+summary, brief, deliverable, learner_brief, seed files, workspace_root,
+visible_files). Onboarding any new lab today means writing another such
+script.
+
+**Generalization:** a parameterized publisher (course id + starter tree
++ grader bundle dir → snapshot + course run) or a proper
+authoring→publish command, so new labs don't need bespoke glue and
+inherit #21's safety behaviors automatically.
+
+---
+
+## 23. Learner-facing platform fixes already generalized (audit trail)
+
+**Status:** DONE in pipeline — these session fixes landed in core
+(`app/services/lms_service.py`, `app/static/lms.js`,
+`app/static/lab-tutor.js`, `app/templates/`,
+`app/services/learner_package_runtime.py`) and therefore already apply
+to **every lab**, not just the Support Bot. Recorded for traceability;
+no further generalization work.
+
+- **M34** lab-tutor chat persisted in Postgres (was browser
+  localStorage only) — core `tutor_service` + `tutor_chat_messages`.
+- **M35** removed the brittle VS Code agent-panel intercept; clean
+  reintroduction is a **spawned chip** ("Reintroduce agent-panel tutor
+  triage") — the EditContext root cause is captured there.
+- **M36** passing checks are expandable (positive worked example).
+  *Limitation:* reports graded before M36 have no stored
+  passing-example data and are not retrofitted — only new submissions.
+- **M37** dead `#catalog-panel` link → `/courses`.
+- **M38** learner-facing copy "course" → "lab".
+- **M39** `/courses` is the post-login landing; bare `/` deprecated
+  (but `/?enrollment=<id>` preserved for the workspace experience).
+- **M40** failing-check feedback is consumable: Expected vs Your output
+  are field-scoped (same target), no internal rubric-kind jargon,
+  domain-neutral hints.
+- **M41** one consolidated `README.md` per workspace (core
+  `seed_workspace_from_snapshot`); the *refresh of already-seeded*
+  workspaces is still bespoke — covered by #21(b)/#22.
+
+**Known dead code to clean up (not lab-specific):** the orphaned
+`renderCatalog()` block + bare-`/` hero path in `lms.js`/
+`render_lms_home` (unreachable since the catalog moved to `/courses`).
+
+---
+
+## 24. Support Bot course-content methodology (audit trail)
+
+**Status:** DONE as guidance — generalized in
+`docs/COURSE_AUTHORING_PLAYBOOK.md`, not code. The Support Bot's
+**M32** changes (dense-retrieval genuinely required, vocabulary-mismatch
+scenarios, spec-authored gold instead of reference-derived, honest
+"keyword tops out ~20/25" limitation) are course content. The reusable
+*method* is the playbook (§4, §10b near-tie wall). Any new lab applies
+it by following the playbook; nothing to change in the pipeline.
+
+---
+
 ## How to add to this list
 
 When making a direct course fix:
