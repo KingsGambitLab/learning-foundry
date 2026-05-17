@@ -1028,7 +1028,7 @@
           <h1>Pick a published course and start building.</h1>
           <p>Enroll once and we will keep your shared workspace, project brief, and review history pinned here. ${escapeHtml(String(readyCourses))} learner-ready course${readyCourses === 1 ? "" : "s"} below.</p>
           <div class="focus-actions">
-            <a class="button primary" href="#catalog-panel">Browse published courses ↓</a>
+            <a class="button primary" href="/courses">Browse published courses</a>
           </div>
         </div>
       `;
