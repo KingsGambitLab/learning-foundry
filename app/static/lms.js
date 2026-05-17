@@ -206,7 +206,7 @@
     if (course.supported_for_lms) {
       return "Includes a shared learner workspace, visible checks, and assignment review.";
     }
-    return course.support_reason || "This course is being prepared and is not ready for learners yet.";
+    return course.support_reason || "This lab is being prepared and is not ready for learners yet.";
   }
 
   function courseStatusCopy(summary) {
@@ -482,7 +482,7 @@
     if (action === "enroll") {
       if (/not ready/i.test(detail) || /prepared/i.test(detail) || /learner/i.test(detail)) {
         return {
-          message: "This course is still being prepared and is not ready for learners yet.",
+          message: "This lab is still being prepared and is not ready for learners yet.",
           detail,
         };
       }
@@ -501,14 +501,14 @@
 
     if (action === "catalog") {
       return {
-        message: "We couldn't refresh the published course catalog.",
+        message: "We couldn't refresh the published lab catalog.",
         detail,
       };
     }
 
     if (action === "enrollments") {
       return {
-        message: "We couldn't refresh your course list right now.",
+        message: "We couldn't refresh your lab list right now.",
         detail,
       };
     }
@@ -1001,7 +1001,7 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy">
           <p class="eyebrow">Continue where you left off</p>
-          <h1>Loading your latest course...</h1>
+          <h1>Loading your latest lab...</h1>
           <p class="focus-subcopy">We are fetching your project brief, workspace status, and review history.</p>
         </div>
       `;
@@ -1025,10 +1025,10 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy empty-state">
           <p class="eyebrow">Learner LMS</p>
-          <h1>Pick a published course and start building.</h1>
-          <p>Enroll once and we will keep your shared workspace, project brief, and review history pinned here. ${escapeHtml(String(readyCourses))} learner-ready course${readyCourses === 1 ? "" : "s"} below.</p>
+          <h1>Pick a published lab and start building.</h1>
+          <p>Enroll once and we will keep your shared workspace, project brief, and review history pinned here. ${escapeHtml(String(readyCourses))} learner-ready lab${readyCourses === 1 ? "" : "s"} below.</p>
           <div class="focus-actions">
-            <a class="button primary" href="/courses">Browse published courses</a>
+            <a class="button primary" href="/courses">Browse published labs</a>
           </div>
         </div>
       `;
@@ -1066,7 +1066,7 @@
       `;
 
     const eyebrowText = enrollment.status === "completed"
-      ? "Course complete"
+      ? "Lab complete"
       : latestSubmission
         ? "Resume your project"
         : `Project review areas: ${progress.total}`;
@@ -1177,9 +1177,9 @@
     const experience = uiState.currentExperience;
     if (!experience) {
       deliverablesPanel.classList.add("hidden");
-      deliverablesBody.innerHTML = '<p class="empty">Open a course to see its deliverables.</p>';
+      deliverablesBody.innerHTML = '<p class="empty">Open a lab to see its deliverables.</p>';
       submissionHistory.classList.add("hidden");
-      submissionHistoryBody.innerHTML = "<p class=\"empty\">Open a course to see its review history.</p>";
+      submissionHistoryBody.innerHTML = "<p class=\"empty\">Open a lab to see its review history.</p>";
       return;
     }
 
@@ -1324,8 +1324,8 @@
     if (!enrollments.length) {
       enrollmentList.innerHTML = `
         <div class="summary-card empty-state">
-          <h3>No courses yet</h3>
-          <p>Choose a learner-ready course below and we will pin it here once you enroll.</p>
+          <h3>No labs yet</h3>
+          <p>Choose a learner-ready lab below and we will pin it here once you enroll.</p>
         </div>
       `;
       return;
