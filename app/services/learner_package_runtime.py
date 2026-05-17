@@ -107,6 +107,32 @@ def readme_markdown(snapshot: PublishSnapshot) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
+# Platform-managed dirs the learner should never have to look at. We
+# can't delete them (`.coursegen` is the runtime/grader protocol; see
+# course-gen-backlog §26) — but we can hide them from the code-server
+# Explorer/search via a workspace settings file.
+_HARNESS_HIDE_GLOBS = {"**/.coursegen": True, "**/.coursegen_data": True}
+
+
+def vscode_settings_hiding_harness(existing: str | None = None) -> str:
+    """Return `.vscode/settings.json` content that hides the
+    platform-managed harness dirs from the Explorer + search. MERGES
+    into any course-provided settings (never clobbers other keys)."""
+    data: dict = {}
+    if existing:
+        try:
+            loaded = json.loads(existing)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (ValueError, TypeError):
+            data = {}
+    for key in ("files.exclude", "search.exclude"):
+        merged = dict(data.get(key) or {})
+        merged.update(_HARNESS_HIDE_GLOBS)
+        data[key] = merged
+    return json.dumps(data, indent=2) + "\n"
+
+
 def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSnapshot) -> Path:
     root = Path(workspace_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -130,6 +156,11 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     # it stays for now (see backlog: retire it + retarget the validator).
     for deliverable in learner_package.deliverables:
         files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
+    # Hide the platform-managed harness dirs from the learner's editor
+    # (merges with a course-provided .vscode/settings.json if present).
+    files_to_write[".vscode/settings.json"] = vscode_settings_hiding_harness(
+        files_to_write.get(".vscode/settings.json")
+    )
 
     for relative_path, content in files_to_write.items():
         target = root / relative_path

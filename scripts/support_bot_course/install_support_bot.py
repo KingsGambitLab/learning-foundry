@@ -149,7 +149,9 @@ st.save_course_run(run)
 # dataset. Back up each enrollment row before mutating; refresh the
 # non-learner docs in any already-seeded workspace (never touch
 # learner-authored files).
-from app.services.learner_package_runtime import readme_markdown
+from app.services.learner_package_runtime import (
+    readme_markdown, vscode_settings_hiding_harness,
+)
 
 BACKUP = pathlib.Path("/opt/course-gen-codex/tmp") / f"support_bot_enrollments.bak.{int(time.time())}.json"
 WS_BASE = pathlib.Path("/opt/course-gen-codex/learner_workspaces")
@@ -189,6 +191,16 @@ for s in summaries:
                 (ws / ".coursegen" / "review_areas" / "index.json").unlink()
             except FileNotFoundError:
                 pass
+            # Hide harness dirs in already-seeded editors too (merge
+            # with any existing .vscode/settings.json).
+            vs = ws / ".vscode" / "settings.json"
+            vs.parent.mkdir(parents=True, exist_ok=True)
+            vs.write_text(
+                vscode_settings_hiding_harness(
+                    vs.read_text(encoding="utf-8") if vs.exists() else None
+                ),
+                encoding="utf-8",
+            )
             (ws / ".coursegen" / "workspace_seeded.txt").write_text(snap.id + "\n", encoding="utf-8")
             refreshed.append(e.id)
     except Exception as exc:  # best-effort; never fail the publish on this
