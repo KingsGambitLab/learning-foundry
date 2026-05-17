@@ -180,6 +180,15 @@ for s in summaries:
                     (ws / stale).unlink()
                 except FileNotFoundError:
                     pass
+            # Retire the unread .coursegen index clutter (the
+            # per-deliverable review_areas/<id>/README.md is kept — the
+            # publish-certification validator still requires it).
+            import shutil as _sh
+            _sh.rmtree(ws / ".coursegen" / "deliverables", ignore_errors=True)
+            try:
+                (ws / ".coursegen" / "review_areas" / "index.json").unlink()
+            except FileNotFoundError:
+                pass
             (ws / ".coursegen" / "workspace_seeded.txt").write_text(snap.id + "\n", encoding="utf-8")
             refreshed.append(e.id)
     except Exception as exc:  # best-effort; never fail the publish on this

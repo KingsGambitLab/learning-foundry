@@ -122,8 +122,12 @@ def seed_workspace_from_snapshot(workspace_root: str | Path, snapshot: PublishSn
     # deliverables.md; folded into README for a single source.)
     files_to_write["README.md"] = readme_markdown(snapshot)
     files_to_write[".coursegen/workspace_seeded.txt"] = snapshot.id + "\n"
-    files_to_write[".coursegen/review_areas/index.json"] = review_area_index_json(learner_package.deliverables)
-    files_to_write[".coursegen/deliverables/index.json"] = review_area_index_json(learner_package.deliverables)
+    # NOTE: review_areas/index.json + deliverables/index.json are no
+    # longer seeded — nothing reads them at runtime or in validation;
+    # they were learner-visible clutter. The per-deliverable
+    # review-area README is still required by
+    # validate_seeded_learner_workspace (publish certification gate), so
+    # it stays for now (see backlog: retire it + retarget the validator).
     for deliverable in learner_package.deliverables:
         files_to_write[f".coursegen/review_areas/{deliverable.deliverable_id}/README.md"] = deliverable.starter_readme
 

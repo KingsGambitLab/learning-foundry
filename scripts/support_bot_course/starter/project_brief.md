@@ -6,6 +6,13 @@ routes by **policy-as-code**, redacts **PII**, resists **prompt
 injection**, and holds **context across turns** — graded against hidden
 multi-turn scenarios.
 
+## How to approach this
+
+- Read the rest of this README (contract, skills, tools) so you know what is graded.
+- Open `public/starter/app.py` next — that is the only file you implement; the TODOs map to the skills below.
+- Iterate locally: run `python public/checks/run_visible_checks.py` to drive the visible samples and read exactly which field mismatched, then fix and re-run.
+- When the visible checks pass, submit from the dashboard to run the full hidden review (you can submit as many times as you need).
+
 ## Endpoint contract
 
 `POST /support/answer`

@@ -56,22 +56,56 @@ def main() -> int:
         body = {"message": c["message"], "conversation_id": c["name"],
                 "history": c.get("history", []), "kb_articles": kb}
         r = client.post("/support/answer", json=body)
-        ok = r.status_code == 200
-        j = r.json() if ok else {}
         e = c["expect"]
-        if "action" in e:
-            ok = ok and j.get("action") == e["action"]
-        if "abstained" in e:
-            ok = ok and j.get("abstained") == e["abstained"]
-        if "citations_include" in e:
-            ok = ok and e["citations_include"] in (j.get("citations") or [])
-        if "redactions_min" in e:
-            ok = ok and int(j.get("redactions", 0)) >= e["redactions_min"]
-        print(("PASS" if ok else "FAIL"), c["name"], "->",
-              {k: j.get(k) for k in ("action", "citations", "redactions", "abstained")})
-        passed += ok
-        failed += not ok
+        problems: list[str] = []
+
+        if r.status_code != 200:
+            # Most common early failure: the endpoint crashed or the
+            # response failed schema validation. Surface the status AND
+            # the body so it's debuggable without guessing.
+            detail = r.text
+            try:
+                detail = json.dumps(r.json(), indent=2)
+            except Exception:
+                pass
+            problems.append(f"HTTP {r.status_code} (expected 200)\n     body: {detail}")
+            j = {}
+        else:
+            j = r.json()
+            if "action" in e and j.get("action") != e["action"]:
+                problems.append(f"action: expected {e['action']!r}, got {j.get('action')!r}")
+            if "abstained" in e and j.get("abstained") != e["abstained"]:
+                problems.append(f"abstained: expected {e['abstained']!r}, got {j.get('abstained')!r}")
+            if "citations_include" in e and e["citations_include"] not in (j.get("citations") or []):
+                problems.append(
+                    f"citations: must include {e['citations_include']!r}, "
+                    f"got {j.get('citations')!r}"
+                )
+            if "redactions_min" in e and int(j.get("redactions", 0)) < e["redactions_min"]:
+                problems.append(
+                    f"redactions: expected >= {e['redactions_min']}, "
+                    f"got {j.get('redactions')!r}"
+                )
+
+        if not problems:
+            print(f"PASS  {c['name']}")
+            passed += 1
+        else:
+            failed += 1
+            print(f"FAIL  {c['name']}")
+            print(f"     message : {c['message']!r}")
+            if c.get("history"):
+                print(f"     history : {len(c['history'])} prior turn(s)")
+            for p in problems:
+                print(f"     - {p}")
+            if r.status_code == 200:
+                got = {k: j.get(k) for k in ("action", "citations", "redactions", "abstained")}
+                print(f"     full response: {json.dumps(got)}")
     print(f"\n{passed} passed / {failed} failed (visible samples)")
+    if failed:
+        print("These are a SUBSET of the hidden review; the hidden grader uses "
+              "different conversations from the same distribution. Fix the "
+              "mismatches above, then submit from the dashboard for the full review.")
     return 0 if failed == 0 else 1
 
 

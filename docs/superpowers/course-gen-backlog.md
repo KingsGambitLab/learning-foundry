@@ -806,6 +806,52 @@ it by following the playbook; nothing to change in the pipeline.
 
 ---
 
+## 25. visible-check command metadata doesn't match the real command
+
+**Status:** Backlog. Generic across all labs.
+
+**Originating direct fix:** Customer Support Bot. The platform default
+`visible_check_command` is `sh .coursegen/runtime/check_visible.sh`
+(`postgres_store.py`, `artifact_materializer.py`), but the Support Bot
+bundle has no `check_visible.sh` — the real visible check is
+`python public/checks/run_visible_checks.py`, and the seeded
+`.coursegen/runtime/` only ships `install.sh`/`run.sh`/`verify.sh`.
+Anything that surfaces `visible_check_command` to a learner (or runs
+it) points at a non-existent script.
+
+**Generalization:** make the runtime-dependency metadata
+(`local_run_command` / `visible_check_command` / `preview_command`)
+derive from what the bundle actually ships (or require authoring to
+emit a real `check_visible.sh`), and validate the referenced scripts
+exist at publish time. Until then the README/brief points learners at
+the correct `python public/checks/run_visible_checks.py`.
+
+---
+
+## 26. Seeded `.coursegen/review_areas/<id>/README.md` is a confusing duplicate the validator pins
+
+**Status:** Backlog. Core/platform — needs coordinated validator change.
+
+**Originating direct fix:** Customer Support Bot. M41 consolidated the
+learner workspace to a single `README.md`; this session also stopped
+seeding the unread `.coursegen/review_areas/index.json` +
+`deliverables/index.json` clutter. But `.coursegen/review_areas/<id>/
+README.md` (= `starter_readme`) is still seeded **because
+`validate_seeded_learner_workspace` (publish-certification gate,
+`bundle_validation.py` ~L760) hard-errors `seeded_workspace_missing_
+review_area_readme` if it's absent.** So learners still see a second,
+separate README inside a dot-folder.
+
+**Generalization:** retarget `validate_seeded_learner_workspace` (and
+the certification flow in `publish_learner_certification_service.py`)
+to validate the single consolidated `README.md` instead of the
+`.coursegen/review_areas/<id>/README.md` copy, then stop seeding the
+duplicate in `seed_workspace_from_snapshot`. End state: the only
+learner-facing doc is the one consolidated README; `.coursegen/` holds
+nothing but the internal `workspace_seeded.txt` marker.
+
+---
+
 ## How to add to this list
 
 When making a direct course fix:
