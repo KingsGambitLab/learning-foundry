@@ -279,8 +279,9 @@
     const expandBtn = document.createElement("button");
     expandBtn.className = "lt-icon-btn lt-expand";
     expandBtn.type = "button";
-    expandBtn.setAttribute("aria-label", "Maximise Lab Tutor");
-    expandBtn.appendChild(expandIcon());
+    // Default to the large/maximised panel; the button reduces it.
+    expandBtn.setAttribute("aria-label", "Minimise Lab Tutor");
+    expandBtn.appendChild(collapseIcon());
 
     const closeBtn = document.createElement("button");
     closeBtn.className = "lt-icon-btn lt-close";
@@ -296,7 +297,10 @@
     header.appendChild(headerTitle);
     header.appendChild(headerActions);
 
-    let expanded = false;
+    // Large by default — diagrams + long replies need the room; the
+    // header button (collapseIcon, set above) reduces it back to compact.
+    let expanded = true;
+    panel.classList.add("lt-panel--expanded");
     function toggleExpanded(force) {
       const next = typeof force === "boolean" ? force : !expanded;
       if (next === expanded) return;
