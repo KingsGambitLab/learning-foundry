@@ -323,10 +323,18 @@ class TutorService:
                             deliverables_markdown,
                             project_brief_markdown,
                         )
-                        brief = project_brief_markdown(snap) or brief
+                        # Only accept real, non-empty strings — a
+                        # malformed snapshot (or a test double) must not
+                        # let a non-str flow into _build_system_prompt's
+                        # "".join (TypeError).
+                        _b = project_brief_markdown(snap)
+                        if isinstance(_b, str) and _b.strip():
+                            brief = _b
                         lp = getattr(snap, "learner_package", None)
                         if lp is not None and getattr(lp, "deliverables", None):
-                            delivs = deliverables_markdown(lp.deliverables) or delivs
+                            _d = deliverables_markdown(lp.deliverables)
+                            if isinstance(_d, str) and _d.strip():
+                                delivs = _d
             except Exception as exc:
                 logger.debug("[tutor] snapshot brief fallback failed for %s: %s", session_id, exc)
 
