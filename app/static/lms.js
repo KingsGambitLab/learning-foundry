@@ -49,9 +49,13 @@
     return String(t ?? "").replace(/^\s*Production(?:-Quality)?\s+/i, "").trim();
   }
 
-  // 15+/18 (>=15 marks) is treated as "solved"/green in the UI. The
-  // backend status stays authoritative for data; this is render-only.
-  const GOOD_ACCURACY_MARKS = 15;
+  // ONE learner-facing pass rule for EVERY surface (submit banner,
+  // submission-history pill, latest-review card, deliverable chips) so
+  // the same submission can never read "Failed" in one place and
+  // "Solved" in another. The bar is the documented one ("≥ 22 / 25" in
+  // the brief = 88%). backendStatus === "passed" stays an override for
+  // any flow that already records a hard pass.
+  const PASS_RATE_BAR = 0.88;
 
   // Concept-level hint per failing rubric — bridges the gap between
   // "what's wrong" (the worked example) and the IR/technique a learner
@@ -139,8 +143,10 @@
   }
 
   function isSolved(passed, total, backendStatus) {
-    const p = Number(passed || 0);
-    return backendStatus === "passed" || p >= GOOD_ACCURACY_MARKS || (total && p === Number(total));
+    if (backendStatus === "passed") return true;
+    const t = Number(total || 0);
+    if (!t) return false;
+    return Number(passed || 0) / t >= PASS_RATE_BAR;
   }
 
   function titleCase(value) {
@@ -1338,9 +1344,9 @@
           ${historyByAttempt.map((submission) => `
             <div class="submission-item">
               <strong>${escapeHtml(formatDate(submission.created_at))}</strong>
-              <p>${escapeHtml(titleCase(submission.status))} · ${escapeHtml(`${submission.passed_tests}/${submission.total_tests} checks passed`)}</p>
+              <p>${escapeHtml(`${isSolved(submission.passed_tests, submission.total_tests, submission.status) ? "Solved" : "Needs work"} · ${submission.passed_tests}/${submission.total_tests} checks passed`)}</p>
               <div class="submission-item-meta">
-                ${renderStatusPill(submission.status === "passed" ? "passed" : "blocked", titleCase(submission.status))}
+                ${renderStatusPill(isSolved(submission.passed_tests, submission.total_tests, submission.status) ? "passed" : "blocked", isSolved(submission.passed_tests, submission.total_tests, submission.status) ? "Solved" : "Needs work")}
                 ${renderInfoPill("Pass rate", percent(submission.pass_rate))}
                 ${renderInfoPill("Submitted", formatDate(submission.created_at))}
               </div>
@@ -1614,9 +1620,12 @@
       const latestSubmission = gradedExperience.latest_assignment_submission;
       stopSubmitProgress();
 
+      const latestSolved = latestSubmission
+        ? isSolved(latestSubmission.passed_tests, latestSubmission.total_tests, latestSubmission.status)
+        : false;
       uiState.submissionFeedback = {
-        kind: latestSubmission?.status === "passed" ? "success" : "error",
-        title: latestSubmission?.status === "passed" ? "Project reviewed" : "Project needs another pass",
+        kind: latestSolved ? "success" : "error",
+        title: latestSolved ? "Project reviewed" : "Project needs another pass",
         message: latestSubmission
           ? `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed.`
           : "Grading finished.",
@@ -1627,7 +1636,7 @@
 
       if (latestSubmission) {
         showToast(
-          latestSubmission.status === "passed" ? "success" : "info",
+          latestSolved ? "success" : "info",
           "Review finished",
           `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed.`
         );
