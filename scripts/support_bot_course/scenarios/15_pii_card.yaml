@@ -23,6 +23,14 @@ rubrics:
 - kind: literal_match
   target: call_pii_card.body.abstained
   expected: false
+- kind: oracle_set_overlap
+  target: call_pii_card.body.citations
+  gold_set_path: setup_data.gold.pii_card.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_pii_card.body.citations
+  acceptable_source: setup_data.gold.pii_card.citations
+  min_overlap: 1.0
 - kind: numeric_range
   target: call_pii_card.body.redactions
   min_value: 1

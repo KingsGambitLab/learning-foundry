@@ -354,11 +354,15 @@ def scenario_yaml(c: dict) -> str:
             r'  pattern: "(?s).+"',
         ]
     # Citation grading: recall (>=0.5 of gold cited) AND precision (every
-    # cited id must be a GOLD id). Only on `answer` cases with a gold
-    # citation — never on a non-answer (subset_match fails on empty
-    # target; a non-answer never cites). Gold is the semantically
-    # supporting article, so a lexical-only ranker fails the VM cases.
-    if (c["skill"] == "S1" or c["skill"] == "S6") and g["citations"]:
+    # cited id must be a GOLD id). Applied to EVERY grounded-`answer`
+    # scenario that has a gold citation — not just S1/S6. Without this,
+    # a no-op returning {"action":"answer"} with no citations vacuously
+    # passes S2/S4/S5/S7 answer scenarios (schema+action+abstained all
+    # match the constant), so the grader fails to discriminate. Never on
+    # a non-answer (citations==[] there; subset_match fails on empty
+    # target). Gold is the semantically supporting article, so a
+    # lexical-only ranker still fails the vocabulary-mismatch cases.
+    if g["action"] == "answer" and g["citations"]:
         lines += [
             "- kind: oracle_set_overlap",
             f"  target: {sid}.body.citations",

@@ -32,6 +32,14 @@ rubrics:
 - kind: literal_match
   target: call_contract_idempotency.body.abstained
   expected: false
+- kind: oracle_set_overlap
+  target: call_contract_idempotency.body.citations
+  gold_set_path: setup_data.gold.contract_idempotency.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_contract_idempotency.body.citations
+  acceptable_source: setup_data.gold.contract_idempotency.citations
+  min_overlap: 1.0
 - kind: literal_match
   target: call_contract_idempotency_again.body.action
   expected: "answer"
