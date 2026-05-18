@@ -99,14 +99,37 @@
   // Click-to-enlarge: a 5-10 node diagram is unreadable in the narrow
   // chat panel, so let the learner open any rendered diagram in a big
   // zoomable overlay (and copy its source). Basic, no deps.
-  function openMermaidLightbox(svgHtml, source) {
+  async function openMermaidLightbox(_svgHtml, source) {
     const prev = document.querySelector(".lt-mermaid-modal");
     if (prev) prev.remove();
     const modal = document.createElement("div");
     modal.className = "lt-mermaid-modal";
     const inner = document.createElement("div");
     inner.className = "lt-mermaid-modal-inner";
-    inner.innerHTML = svgHtml;
+    inner.textContent = "Enlarging diagram…";
+    // RE-RENDER from source with a fresh id. Re-injecting the panel's
+    // SVG string duplicates Mermaid's id-scoped <style>/marker defs, so
+    // the clone renders unstyled/collapsed (an empty white box). A
+    // clean re-render with a unique id sizes correctly to the lightbox.
+    (async () => {
+      const mermaid = await loadMermaid();
+      try {
+        if (!mermaid) throw new Error("mermaid unavailable");
+        const { svg } = await mermaid.render(
+          "lt-mermaid-zoom-" + (++mermaidIdCounter), source
+        );
+        inner.innerHTML = svg;
+      } catch (e) {
+        inner.innerHTML = "";
+        const note = document.createElement("div");
+        note.className = "lt-mermaid-error";
+        note.textContent = "Couldn't render diagram. Source:";
+        const pre = document.createElement("pre");
+        pre.textContent = source;
+        inner.appendChild(note);
+        inner.appendChild(pre);
+      }
+    })();
     const bar = document.createElement("div");
     bar.className = "lt-mermaid-modal-bar";
     const copyBtn = document.createElement("button");
