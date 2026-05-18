@@ -512,6 +512,14 @@
 }
 
 .info-pill strong {
+  /* Reset the bleed from `.submission-item strong` (the date-heading
+     rule: display:block; font-size:14px; margin-bottom:6px) — equal
+     specificity but later in the file, so it otherwise wins and the
+     value renders block-level, larger, and offset from its label. */
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
   color: var(--text);
   font-weight: 600;
 }
