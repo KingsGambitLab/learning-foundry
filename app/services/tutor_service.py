@@ -183,8 +183,22 @@ def _build_code_snapshot(root: Path) -> str:
     return "File tree:\n" + "\n".join(f"  {ln}" for ln in tree_lines) + "\n\nFile contents:\n" + "".join(body_lines)
 
 
+# Learner workspaces live at <repo>/learner_workspaces/<learner_id>/
+# <shared_workflow_run_id>/workspace (mirrors lms_service._workspace_root).
+# tutor_service is app/services/, so parents[2] == repo root.
+_LEARNER_WS_BASE = Path(__file__).resolve().parents[2] / "learner_workspaces"
+
+
 def _read_brief_files(root: Path) -> tuple[str, str]:
-    """Return (project_brief, deliverables) as strings."""
+    """Return (project_brief, deliverables) as strings.
+
+    Workspaces now seed a single consolidated ``README.md`` (the brief
+    + a Deliverables section); ``project_brief.md`` / ``deliverables.md``
+    are legacy and no longer written. Prefer README; fall back to the
+    legacy split files for older workspaces."""
+    readme = _read_text_safely(root / "README.md", 48 * 1024) or ""
+    if readme.strip():
+        return readme.strip(), ""
     brief = _read_text_safely(root / "project_brief.md", 32 * 1024) or ""
     delivs = _read_text_safely(root / "deliverables.md", 32 * 1024) or ""
     return brief.strip(), delivs.strip()
@@ -303,22 +317,47 @@ class TutorService:
         if enrollment_id is None and session is not None:
             enrollment_id = getattr(session, "enrollment_id", None)
 
+        # Resolve the enrollment once — used both to locate the live
+        # learner workspace and for the snapshot-brief fallback.
+        enr = None
+        if enrollment_id:
+            try:
+                enr = self._store.get_learner_enrollment(enrollment_id)
+            except Exception as exc:
+                logger.debug("[tutor] enrollment lookup failed for %s: %s", session_id, exc)
+                enr = None
+
+        # Find the learner's live workspace dir so the tutor can READ
+        # their code (the #1 thing it needs to actually help). Prefer the
+        # session's workspace_root; it is frequently unset on editor
+        # sessions, so fall back to the deterministic LMS path
+        # learner_workspaces/<learner_id>/<shared_workflow_run_id>/workspace.
         brief, delivs, code = "", "", ""
+        ws_dir: Path | None = None
         if session is not None:
-            workspace_root = Path(getattr(session, "workspace_root", "") or "")
-            if str(workspace_root) and workspace_root.exists():
-                brief, delivs = _read_brief_files(workspace_root)
-                code = _build_code_snapshot(workspace_root)
+            sroot = Path(getattr(session, "workspace_root", "") or "")
+            if str(sroot) and sroot.exists():
+                ws_dir = sroot
+        if ws_dir is None and enr is not None:
+            cand = (
+                _LEARNER_WS_BASE
+                / str(enr.learner_id)
+                / str(enr.shared_workflow_run_id)
+                / "workspace"
+            )
+            if cand.exists():
+                ws_dir = cand
+        if ws_dir is not None:
+            brief, delivs = _read_brief_files(ws_dir)
+            code = _build_code_snapshot(ws_dir)
 
         # No materialized workspace yet (learner hasn't opened the editor)
         # — use the publish snapshot's brief so the tutor still has the
         # full spec. The tutor must NEVER ask the learner to paste it.
-        if not brief and enrollment_id:
+        if not brief and enr is not None:
             try:
-                enr = self._store.get_learner_enrollment(enrollment_id)
-                if enr is not None:
-                    snap = self._store.get_publish_snapshot(enr.publish_snapshot_id)
-                    if snap is not None:
+                snap = self._store.get_publish_snapshot(enr.publish_snapshot_id)
+                if snap is not None:
                         from app.services.learner_package_runtime import (
                             deliverables_markdown,
                             project_brief_markdown,
