@@ -176,8 +176,8 @@ def _build_code_snapshot(root: Path) -> str:
     if not files:
         return ""
 
-    # Learner source code first (so app.py always wins the budget over
-    # README / sample data / config, whose mtimes get bumped by platform
+    # Learner source code first (so it wins the budget over README /
+    # sample data / config, whose mtimes get bumped by platform
     # re-publishes), then most-recently-modified within each group.
     def _rank(pair):
         rel, abs_path = pair
@@ -189,6 +189,21 @@ def _build_code_snapshot(root: Path) -> str:
         return (0 if is_code else 1, -mtime)
 
     files.sort(key=_rank)
+
+    # TODO(tutor-context): the set of "the file(s) the learner edits"
+    # is hardcoded to app.py for now. Generalise this — derive it from
+    # the deliverable's editable/visible files (the course spec already
+    # knows `learner_brief.files_to_edit` / `visible_files`) so any
+    # course's primary file(s) get the same guaranteed inclusion.
+    # Until then: pin app.py (prefer public/starter/app.py) to the very
+    # front so it is ALWAYS included regardless of ranking/budget.
+    _APP_PY = "public/starter/app.py"
+    files.sort(
+        key=lambda pair: (
+            0 if str(pair[0]) == _APP_PY else
+            1 if pair[1].name == "app.py" else 2
+        )
+    )
 
     tree_lines = [str(rel) for rel, _ in files[:80]]
     body_lines: list[str] = []
