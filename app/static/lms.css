@@ -235,6 +235,32 @@
   max-width: 70ch;
 }
 
+.skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 0;
+  max-width: 70ch;
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: help;
+  transition: background 120ms ease;
+}
+
+.skill-tag:hover {
+  background: rgba(99, 102, 241, 0.16);
+}
+
 .progress-meter {
   width: 100%;
   height: 12px;
@@ -955,6 +981,235 @@
   padding-left: 18px;
 }
 
+/* "Strong" pass state: >=83% of checks passing.  Same structure as
+   the default red panel but green palette signals "you're close,
+   keep going". */
+.review-guidance.is-strong {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(240, 253, 244, 0.85);
+}
+
+.review-guidance.is-strong summary,
+.review-guidance.is-strong .review-guidance-section h5 {
+  color: #166534;
+}
+
+/* "Ready" pass state: the deliverable already meets the bar, so any
+   guidance is optional polish — render a calm neutral panel (never the
+   red "needs work" treatment) so improvements read as refinement. */
+.review-guidance.is-ready {
+  border-color: rgba(148, 163, 184, 0.32);
+  background: rgba(248, 250, 252, 0.85);
+}
+
+.review-guidance.is-ready summary,
+.review-guidance.is-ready .review-guidance-section h5 {
+  color: #475569;
+}
+
+/* Submission item state classes mirror the panel palette so the row
+   border / surface tint matches the inner feedback panel. */
+.submission-item.is-strong {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(240, 253, 244, 0.55);
+}
+
+.submission-item.is-ready {
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(220, 252, 231, 0.75);
+}
+
+/* Per-test result rows.  Each row is a <details> whose <summary>
+   carries the head line + the one-line headline.  Diagnostic count
+   floats to the right (uses the previously-dead right-side space)
+   and acts as the expand affordance. */
+.test-result-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.test-result {
+  padding: 0;
+}
+
+.test-result-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* Passing rows: green border + faint green tint so they read as
+   "this one's fine, you don't need to look here" inside an otherwise
+   red Summary feedback container. */
+.test-result-passed > .test-result-row {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(240, 253, 244, 0.6);
+}
+
+/* Failing rows keep the default gray-on-white card but get a subtle
+   red left border so they're scannable in a long list. */
+.test-result-blocked > .test-result-row {
+  border-left: 3px solid rgba(248, 113, 113, 0.65);
+}
+
+.test-result-row > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+.test-result-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.test-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.test-result-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.test-result-name {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.test-result-kind {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+}
+
+.test-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.test-result-count {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Expand affordance — on its own indicator so it shows on every
+   expandable row, including passing ones (which have no diagnostic
+   count). Non-expandable rows render no toggle and aren't clickable. */
+.test-result-toggle {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.test-result-row.is-expandable[open] .test-result-toggle::after {
+  content: "▴";
+}
+
+.test-result-row.is-expandable:not([open]) .test-result-toggle::after {
+  content: "▾";
+}
+
+.test-result-row:not(.is-expandable) > summary {
+  cursor: default;
+}
+
+.test-result-headline {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.test-result-diagnostics {
+  list-style: disc;
+  margin: 0;
+  padding: 12px 16px 14px 36px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.test-result-diagnostics li + li {
+  margin-top: 4px;
+}
+
+/* Worked example for a failed scenario: question / expected / your
+   output / failing rubric, so the learner can fix in one pass. */
+.test-result-example {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.test-result-example .we-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.test-result-example .we-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
+.test-result-example .we-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: transparent;
+}
+.test-result-example .we-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+  border-radius: 0 6px 6px 0;
+  display: grid;
+  gap: 4px;
+}
+.test-result-example .we-hint .we-label {
+  padding-top: 0;
+  color: #2563eb;
+}
+.test-result-example .we-hint-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
 .writeup-shell {
   gap: 12px;
 }
@@ -1349,3 +1604,81 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Scaler Labs UI (brand mark, merged Labs list, nav identity) ── */
+.brand-mark-img {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: block;
+  object-fit: contain;
+  background: #fff;
+  padding: 3px;
+  box-sizing: border-box;
+}
+.topnav-user {
+  color: var(--muted, #8b97a6);
+  font-size: 0.85rem;
+  padding: 0 0.4rem;
+}
+.topnav-logout {
+  display: inline;
+  margin: 0;
+}
+.topnav-logout-btn {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+}
+.lab-section-title {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted, #8b97a6);
+  margin: 1.6rem 0 0.75rem;
+}
+.lab-section-title:first-child { margin-top: 0; }
+.lab-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 0.7rem;
+  border: 1px solid var(--border, #2a3441);
+  border-radius: 12px;
+  background: var(--surface, #161c25);
+  transition: border-color 0.15s, transform 0.05s, box-shadow 0.15s;
+}
+.lab-card.is-clickable { cursor: pointer; }
+.lab-card.is-clickable:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 1px 0 rgba(59, 130, 246, 0.25), 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+.lab-card.is-clickable:active { transform: translateY(1px); }
+.lab-card.is-clickable:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.lab-card.is-enrolled { border-left: 3px solid #22c55e; }
+.lab-card.is-blocked { opacity: 0.6; }
+.lab-card-main { min-width: 0; flex: 1; }
+.lab-card-main h3 {
+  margin: 0.5rem 0 0.35rem;
+  font-size: 1.02rem;
+  font-weight: 620;
+}
+.lab-card-main p {
+  margin: 0;
+  color: var(--muted, #8b97a6);
+  font-size: 0.88rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lab-card-cta { flex-shrink: 0; }
+.lab-card-cta .button { pointer-events: none; }
+.lab-card-cta .button.is-busy { opacity: 0.7; }

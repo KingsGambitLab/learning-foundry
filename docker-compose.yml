@@ -1,0 +1,35 @@
+# Local + staging Postgres for course-gen-codex.
+#
+# Security:
+# - The 5435 publish is bound to 127.0.0.1 explicitly. The DB is NOT
+#   exposed on the EC2 public interface. Anything outside the host
+#   reaches Postgres only through the FastAPI app, which sits behind
+#   the auth-guarded `/v1/*` routes.
+# - Credentials default to dev placeholders. Override with
+#   POSTGRES_USER / POSTGRES_PASSWORD env (or a `.env` file alongside
+#   `docker-compose.yml`) on staging. The defaults are for offline dev
+#   only.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: course_gen_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-course_gen}
+      POSTGRES_USER: ${POSTGRES_USER:-course_gen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-course_gen}
+    ports:
+      # Loopback-only publish — Postgres is reachable only from the
+      # host running docker compose, never from the EC2 public
+      # interface. Override with POSTGRES_LISTEN_ADDR (e.g. for CI
+      # docker-in-docker setups) if needed.
+      - "${POSTGRES_LISTEN_ADDR:-127.0.0.1}:5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-course_gen}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:

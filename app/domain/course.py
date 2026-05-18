@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from app.domain.ai import AIUsageSummary
 from app.domain.registry import PackageType, StarterType
 from app.domain.task_agent import AssignmentDesignSpec, DataSourceSpec
-from app.domain.workflow import DraftKind, HILGate, MaterializedBundle, WorkflowReviewSummary, WorkflowStage, WorkflowStatus
+from app.domain.workflow import DraftKind, HILGate, MaterializedBundle, ReviewerFinding, WorkflowReviewSummary, WorkflowStage, WorkflowStatus
 
 
 class CourseRunStage(str, Enum):
@@ -62,12 +63,20 @@ class CourseRun(BaseModel):
     notes: list[str] = Field(default_factory=list)
     goal: str | None = None
     requested_learning_outcomes: list[str] = Field(default_factory=list)
+    lab_tutor_enabled: bool = False
     generated_plan: GeneratedCoursePlan | None = None
     generation_source: CourseGenerationSource | None = None
     generation_status: CourseGenerationStatus | None = None
     own_ai_usage: AIUsageSummary = Field(default_factory=AIUsageSummary)
     ai_usage: AIUsageSummary = Field(default_factory=AIUsageSummary)
     last_error: str | None = None
+    # Free-form JSON blob keyed by feature name. Used by the
+    # outcome-mode workflow to stash a serialized
+    # ``OutcomeWorkflowState`` under ``payload_json["outcome_state"]``
+    # so the run survives a reload / refresh / gate resume. Generic
+    # enough that future features can stash their own state shapes
+    # without a schema migration.
+    payload_json: dict[str, Any] = Field(default_factory=dict)
 
 
 class CourseRunSummary(BaseModel):
@@ -240,6 +249,26 @@ class CourseReviewCounts(BaseModel):
     published_workflow_runs: int
     workflow_runs_with_bundle: int
 
+class OutcomeFindingsBundle(BaseModel):
+    """Outcome-mode review findings surfaced from ``OutcomeWorkflowState``.
+
+    Populated by ``_build_review_report`` when the course_run carries a
+    persisted outcome state (``payload_json["outcome_state"]``). The
+    legacy ``CourseReviewReport.blockers`` / ``next_actions`` fields
+    continue to be populated for non-outcome consumers; this bundle
+    exposes the same data with explicit per-stage attribution so the
+    UI / repair LLM can tell which check produced each finding.
+    """
+
+    spec_review: list[ReviewerFinding] = Field(default_factory=list)
+    starter_review: list[ReviewerFinding] = Field(default_factory=list)
+    oracle_validation_failures: list[str] = Field(default_factory=list)
+    curated_validation_failures: list[str] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    overall_status: str
+    stage: str
+
+
 class CourseReviewReport(BaseModel):
     course_run_id: str
     title: str
@@ -254,6 +283,10 @@ class CourseReviewReport(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
     linked_workflows: list[CourseLinkedWorkflowSummary] = Field(default_factory=list)
     deliverables: list[CourseDeliverableReview] = Field(default_factory=list, validation_alias="deliverables")
+    # Populated only for outcome-mode runs (i.e. those carrying
+    # ``payload_json["outcome_state"]``). ``None`` for legacy runs so the
+    # existing review surface remains byte-identical for those callers.
+    outcome_findings: OutcomeFindingsBundle | None = None
 
 
 class CreateCourseDeliverableRequest(BaseModel):

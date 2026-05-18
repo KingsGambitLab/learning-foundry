@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -72,6 +73,7 @@ class LearnerStudioService:
         host: str = "127.0.0.1",
         minimum_free_disk_bytes: int = 3 * 1024 * 1024 * 1024,
         runner: TaskAgentBlackBoxRunner | None = None,
+        tutor_base_url: str | None = None,
     ) -> None:
         self.docker_binary = docker_binary
         self.image_name = image_name or default_learner_studio_image()
@@ -80,6 +82,29 @@ class LearnerStudioService:
         self.host = host
         self.minimum_free_disk_bytes = minimum_free_disk_bytes
         self.runner = runner or TaskAgentBlackBoxRunner()
+        # The widget runs in the learner's browser (on the host), not inside
+        # the container, so the URL must be host-reachable from the browser.
+        # `127.0.0.1` is correct for local dev; in production this should be
+        # the public hostname of the FastAPI service.
+        self._tutor_base_url = tutor_base_url or os.environ.get(
+            "LAB_TUTOR_BASE_URL", "http://127.0.0.1:8012"
+        )
+
+    def _tutor_environment(
+        self,
+        session_id: str,
+        assignment_title: str | None,
+        enrollment_id: str | None = None,
+    ) -> dict[str, str]:
+        env: dict[str, str] = {
+            "LAB_TUTOR_BASE_URL": self._tutor_base_url,
+            "LAB_TUTOR_SESSION_ID": session_id,
+        }
+        if assignment_title:
+            env["LAB_TUTOR_ASSIGNMENT_TITLE"] = assignment_title
+        if enrollment_id:
+            env["LAB_TUTOR_ENROLLMENT_ID"] = enrollment_id
+        return env
 
     def launch_editor(
         self,
@@ -90,6 +115,8 @@ class LearnerStudioService:
         scope: LearnerWorkspaceScope,
         existing_session: LearnerWorkspaceSession | None = None,
         start_support_services: bool = True,
+        lab_tutor_enabled: bool = False,
+        assignment_title: str | None = None,
     ) -> LearnerWorkspaceSession:
         workspace_path = Path(workspace_root).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -126,8 +153,14 @@ class LearnerStudioService:
             "-d",
             "--name",
             container_name,
+            # Bind to `self.host` (default 127.0.0.1) on the host so the
+            # code-server port is never world-reachable from the EC2
+            # public interface. Without this prefix, docker publishes to
+            # 0.0.0.0 and `code-server --auth none` would be unauth'd
+            # over the internet. The app-level reverse proxy fronts the
+            # editor on staging/prod.
             "-p",
-            f"{host_port}:8080",
+            f"{self.host}:{host_port}:8080",
             "-v",
             f"{workspace_path}:/workspace",
             "-w",
@@ -143,6 +176,7 @@ class LearnerStudioService:
                 else []
             ),
             *self._docker_env_args(self._app_runtime_environment(workspace_path)),
+            *(self._docker_env_args(self._tutor_environment(session_id, assignment_title, enrollment_id)) if lab_tutor_enabled else []),
             self.image_name,
             "code-server",
             "--bind-addr",
@@ -166,12 +200,23 @@ class LearnerStudioService:
                 (result.stderr or result.stdout).strip() or "Could not start learner editor container."
             )
 
-        editor_url = f"http://{self.host}:{host_port}/"
+        # Health-check the container on its loopback port directly.
+        local_editor_url = f"http://{self.host}:{host_port}/"
         try:
-            self._wait_for_http(editor_url, container_name=container_name)
+            self._wait_for_http(local_editor_url, container_name=container_name)
         except Exception:
             self._remove_runtime_support(workspace_path, network_name=network_name, container_prefix=container_name)
             raise
+        # The URL handed to the learner's browser. On a deployed host the
+        # code-server port is loopback-bound (M13 security fix), so we
+        # publish a reverse-proxy path instead of the raw 127.0.0.1 URL.
+        # COURSE_GEN_EDITOR_PUBLIC_BASE (e.g. "http://18.236.242.248")
+        # is set on staging; nginx maps /editor/<port>/ → the container.
+        editor_public_base = os.environ.get("COURSE_GEN_EDITOR_PUBLIC_BASE")
+        if editor_public_base:
+            editor_url = f"{editor_public_base.rstrip('/')}/editor/{host_port}/"
+        else:
+            editor_url = local_editor_url
         return LearnerWorkspaceSession(
             id=session_id,
             enrollment_id=enrollment_id,
@@ -281,8 +326,11 @@ class LearnerStudioService:
                     "-d",
                     "--name",
                     container_name,
+                    # Bind grading sandbox to loopback only (see editor
+                    # launch above for rationale — never publish 0.0.0.0
+                    # on a public EC2 interface).
                     "-p",
-                    f"{host_port}:8000",
+                    f"{self.host}:{host_port}:8000",
                     "-v",
                     f"{runtime_workspace}:/workspace",
                     "-w",
@@ -503,23 +551,72 @@ class LearnerStudioService:
                 environment.setdefault(f"{upper}_HOST", service_id)
         return environment
 
+    # Dependency-contract files that, if present at the workspace root,
+    # legitimately change the runtime image. Language-agnostic: covers
+    # Python (requirements, pyproject, Pipfile), JS/TS (package.json + locks),
+    # Ruby (Gemfile + lock), Go (go.mod/go.sum), Rust (Cargo.{toml,lock}),
+    # Java (pom.xml, build.gradle*), PHP (composer.*), Elixir (mix.*).
+    _IMAGE_DEPENDENCY_MANIFESTS = (
+        "requirements.txt",
+        "requirements.in",
+        "requirements-dev.txt",
+        "constraints.txt",
+        "pyproject.toml",
+        "poetry.lock",
+        "Pipfile",
+        "Pipfile.lock",
+        "uv.lock",
+        "pdm.lock",
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Gemfile",
+        "Gemfile.lock",
+        "go.mod",
+        "go.sum",
+        "Cargo.toml",
+        "Cargo.lock",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradle.properties",
+        "composer.json",
+        "composer.lock",
+        "mix.exs",
+        "mix.lock",
+    )
+
     def _workspace_runtime_cache_key(self, workspace_path: Path) -> str:
+        """Hash only the files that legitimately affect the runtime image.
+
+        The sandbox bind-mounts the workspace at `/workspace`, so learner
+        source, data fixtures, and per-deliverable test scripts do NOT
+        belong in the image and must NOT invalidate it. The image is a
+        function of:
+
+            * Dockerfile
+            * .coursegen/runtime/*.sh   (runtime protocol bundle)
+            * declared dependency-manifest files at the workspace root
+
+        That set is deterministic and language-agnostic.
+        """
         digest = hashlib.sha256()
-        ignored = {
-            ".coursegen",
-            ".git",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            ".venv",
-            "__pycache__",
-            "node_modules",
-        }
-        for path in sorted(p for p in workspace_path.rglob("*") if p.is_file()):
-            relative = path.relative_to(workspace_path)
-            if any(part in ignored for part in relative.parts):
-                continue
-            digest.update(relative.as_posix().encode("utf-8"))
+        relevant: list[Path] = []
+        dockerfile = workspace_path / "Dockerfile"
+        if dockerfile.is_file():
+            relevant.append(dockerfile)
+        runtime_dir = workspace_path / ".coursegen" / "runtime"
+        if runtime_dir.is_dir():
+            relevant.extend(sorted(p for p in runtime_dir.rglob("*") if p.is_file()))
+        for manifest_name in self._IMAGE_DEPENDENCY_MANIFESTS:
+            candidate = workspace_path / manifest_name
+            if candidate.is_file():
+                relevant.append(candidate)
+        for path in sorted(relevant, key=lambda p: p.relative_to(workspace_path).as_posix()):
+            digest.update(path.relative_to(workspace_path).as_posix().encode("utf-8"))
             digest.update(path.read_bytes())
         return digest.hexdigest()
 

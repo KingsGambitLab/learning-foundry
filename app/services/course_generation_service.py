@@ -4,6 +4,8 @@ import re
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from app.domain.ai import AIUsageSummary
 from app.domain.course import (
@@ -11,6 +13,8 @@ from app.domain.course import (
     CourseGenerationSource,
     CourseGenerationStatus,
     CourseRun,
+    CourseRunStage,
+    CourseRunStatus,
     CreatorCourseSetupChoices,
     CreatorCourseSetupInput,
     CreatorCourseDeliverablePlan,
@@ -63,11 +67,29 @@ class CourseGenerationService:
         live_planner: OpenAICoursePlanner | None = None,
         stack_catalog_service: StackCatalogService | None = None,
         job_runner: Callable[[Callable[[], None]], None] | None = None,
+        outcome_planner: Any = None,
+        outcome_workspace_root: Path | None = None,
+        outcome_deps_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.course_workflow_service = course_workflow_service
         self.live_planner = live_planner or OpenAICoursePlanner()
         self.stack_catalog_service = stack_catalog_service or StackCatalogService()
         self.job_runner = job_runner or self._run_job_in_background
+        # Outcome-mode collaborator. Lazy-constructed on first use so a
+        # service instance built with the flag off never imports the
+        # outcome planner / router. Tests inject a fake here.
+        self._outcome_planner = outcome_planner
+        # Where the outcome graph materializes starter / oracle / spec
+        # files. Defaults to ``<repo_root>/workspaces/outcome`` when not
+        # supplied; tests pass ``tmp_path`` for isolation.
+        self._outcome_workspace_root = outcome_workspace_root
+        # Optional overrides for ``_build_production_outcome_deps``;
+        # tests pass ``{"router": None}`` to skip real LLM calls without
+        # mocking the network layer. Keys correspond to keyword args of
+        # ``app.services.outcome_graph_deps.build_production_outcome_deps``.
+        self._outcome_deps_overrides: dict[str, Any] = dict(
+            outcome_deps_overrides or {}
+        )
 
     def status(self) -> CourseGenerationStatus:
         return self.live_planner.status()
@@ -348,56 +370,611 @@ class CourseGenerationService:
         )
 
     def generate_course_run(self, request: GenerateCourseFromBriefRequest) -> GenerateCourseFromBriefResponse:
-        normalized_plan, source, status, usage = self._generate_normalized_plan(request)
-        course_run = self.course_workflow_service.create_run(
-            CreateCourseRunRequest(
-                title=normalized_plan.title,
-                summary=normalized_plan.summary,
-                package_type=normalized_plan.package_type,
-                shared_design_spec=normalized_plan.shared_design_spec,
-                deliverables=normalized_plan.deliverables,
-            )
+        # Outcome mode is now the only mode (Wave 5 retired the legacy
+        # per-deliverable path). Every brief is routed through the
+        # single-outcome graph; the response adapter converts the resulting
+        # ``OutcomeWorkflowState`` back to a ``GenerateCourseFromBriefResponse``
+        # so the API surface is unchanged.
+        return self._kick_off_outcome_workflow(request)
+
+    # ---------------- Outcome-mode entry point (Wave 4.6) ----------------
+
+    def _kick_off_outcome_workflow(
+        self, request: GenerateCourseFromBriefRequest
+    ) -> GenerateCourseFromBriefResponse:
+        """Run the brief through the single-outcome graph and adapt the response.
+
+        Persists a placeholder ``CourseRun`` via the existing store/repository
+        pattern (mirroring ``queue_course_run_generation``), drives the
+        graph until the first gate or terminal state, and converts the
+        resulting ``OutcomeWorkflowState`` to a
+        ``GenerateCourseFromBriefResponse`` so the API surface stays put.
+
+        The legacy planner is consulted only for its ``status()`` so the
+        response carries provider / sdk_installed / api_key_present fields
+        callers already depend on.
+        """
+        planner = self._resolve_outcome_planner()
+        resolved_setup = self._resolve_creator_setup(request.goal, request.creator_setup)
+
+        # Status snapshot for the response. We do NOT call the legacy
+        # ``plan_course`` here — that would defeat the whole point of the
+        # flag. Status is metadata only (provider name, sdk_installed,
+        # api_key_present), which is safe to expose to the caller.
+        status = self.live_planner.status()
+
+        # Placeholder course_run so the API caller has a real id to poll
+        # against and so events are persisted to the same store the legacy
+        # path uses.
+        course_run = self.course_workflow_service.create_generation_placeholder(
+            title=request.title or self._title_from_goal(request.goal),
+            goal=request.goal,
+            learning_outcomes=list(request.learning_outcomes),
+            package_type_hint=request.package_type_hint,
+            creator_choices=resolved_setup,
+            generation_status=status,
         )
-        aligned_plan = self.course_workflow_service.generated_plan_from_run(
-            course_run,
-            notes=normalized_plan.notes,
+        self.course_workflow_service.store.append_course_event(
+            course_run.id,
+            "outcome_course_generation_started",
+            {
+                "provider": status.provider,
+                "source": status.source.value,
+                "message": "Outcome-mode generation started.",
+                "model_id": status.model_id,
+                "mode": "outcome",
+            },
         )
+
+        # Resolve workspace_root: tests inject ``outcome_workspace_root``;
+        # production falls back to ``workspaces/outcome/<course_run.id>``.
+        workspace_root = self._outcome_workspace_for(course_run.id)
+
+        # Drive the graph with the production-wired deps. Kick-off
+        # currently pauses at gate 1 (spec_review → awaiting_gate_1) so
+        # the placeholder/real collaborators downstream of gate 1 are
+        # not exercised here, but threading them through keeps the
+        # kick-off and resume paths consistent and prevents a future
+        # node that runs before gate 1 from regressing.
+        deps = self._build_production_outcome_deps()
+        state = generate_outcome_course_from_brief(
+            request,
+            planner=planner,
+            workspace_root=workspace_root,
+            run_id=course_run.id,
+            deps=deps,
+        )
+
+        return self._outcome_state_to_legacy_response(
+            state=state,
+            course_run=course_run,
+            request=request,
+            status=status,
+        )
+
+    def _resolve_outcome_planner(self) -> Any:
+        """Lazy-construct the outcome planner the first time it's needed."""
+        if self._outcome_planner is not None:
+            return self._outcome_planner
+        # Local import keeps the planner / LLM router out of the import
+        # graph for callers that never flip the flag.
+        from app.services.course_outcome_planner import OutcomeCoursePlanner
+
+        self._outcome_planner = OutcomeCoursePlanner()
+        return self._outcome_planner
+
+    def _build_production_outcome_deps(self) -> Any:
+        """Construct an ``OutcomeGraphDeps`` with every collaborator wired.
+
+        Codex review #6 finding #2: previously ``OutcomeGraphDeps`` was
+        built with only ``planner=...``, which caused the dispatcher to
+        ``AssertionError`` the moment a gate-1 approval landed and the
+        graph stepped into ``node_starter_authoring``. This helper now
+        returns deps with the full collaborator set so the graph can
+        execute past gate 1.
+
+        The factory delegates to
+        ``app.services.outcome_graph_deps.build_production_outcome_deps``
+        which mixes real production wiring (``OracleAuthor`` /
+        ``OraclePass`` / LLM router) with documented placeholders for
+        the not-yet-wired collaborators (``repo_author`` /
+        ``starter_verifier`` / reference-impl sandbox). Placeholders
+        return controlled error results so a paused run reaches a
+        ``blocked`` state with an actionable ``blocking_reason`` rather
+        than crashing the dispatcher.
+
+        Tests pass ``outcome_deps_overrides={"router": None, ...}`` at
+        construction time to swap any collaborator without monkey-
+        patching; ``None`` is forwarded verbatim so the spec_review
+        node short-circuits to "no router available".
+        """
+        from app.services.outcome_graph_deps import build_production_outcome_deps
+
+        planner = self._resolve_outcome_planner()
+        # ``overrides`` may contain a verbatim ``None`` (e.g. router=None
+        # in tests) so we cannot use ``or``-defaulting in the factory.
+        # Forwarding via ``**`` preserves explicit ``None`` values.
+        return build_production_outcome_deps(
+            planner=planner, **self._outcome_deps_overrides
+        )
+
+    def _outcome_workspace_for(self, course_run_id: str) -> Path:
+        """Return the workspace dir for an outcome run, creating parents."""
+        if self._outcome_workspace_root is not None:
+            base = Path(self._outcome_workspace_root)
+        else:
+            # Default sits alongside the existing ``workspaces`` tree so
+            # ops tooling can find both layouts.
+            base = Path(__file__).resolve().parents[2] / "workspaces" / "outcome"
+        workspace_root = base / course_run_id
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        return workspace_root
+
+    def _outcome_state_to_legacy_response(
+        self,
+        *,
+        state: Any,
+        course_run: CourseRun,
+        request: GenerateCourseFromBriefRequest,
+        status: CourseGenerationStatus,
+    ) -> GenerateCourseFromBriefResponse:
+        """Adapt an ``OutcomeWorkflowState`` to the legacy response shape.
+
+        The legacy ``GenerateCourseFromBriefResponse`` requires
+        ``source``, ``status``, ``plan``, ``course_run``, and ``review``.
+        The outcome state carries a ``CourseOutcomeSpec`` (when planning
+        succeeded), a stage, a status, and a list of blocking reasons.
+
+        Mapping:
+            - ``state.spec.title`` → ``plan.title`` (falls back to course_run.title)
+            - ``state.spec.goal`` → ``plan.summary`` (falls back to request.goal)
+            - ``state.spec.package_type`` → ``plan.package_type`` (falls back to
+              the placeholder's package_type)
+            - ``plan.deliverables = []`` — outcome mode has no deliverables.
+            - ``state.status`` ``blocked`` → CourseRunStatus.blocked +
+              CourseRunStage.blocked + ``last_error`` populated from
+              ``blocking_reasons``.
+            - ``state.status`` ``awaiting_human`` → CourseRunStatus.awaiting_human
+              + CourseRunStage.awaiting_course_review.
+            - ``state.status`` ``published`` → CourseRunStatus.published +
+              CourseRunStage.published.
+        """
+        spec = getattr(state, "spec", None)
+        state_status = getattr(state, "status", "running")
+        blocking_reasons = list(getattr(state, "blocking_reasons", []) or [])
+
+        # Plan: legacy ``GeneratedCoursePlan`` requires ``min_length=1``
+        # deliverables. Synthesize a single "outcome" deliverable that
+        # represents the whole single-outcome course. This is the
+        # impedance-matching shim — Wave 5 retires the deliverable model.
+        title = getattr(spec, "title", None) or course_run.title
+        goal_text = getattr(spec, "goal", None) or request.goal
+        package_type = getattr(spec, "package_type", None) or course_run.package_type
+        synthetic_deliverable = CreateCourseDeliverableRequest(
+            deliverable_slug="outcome",
+            title=title,
+            summary=goal_text,
+            learning_outcomes=list(request.learning_outcomes),
+            design_spec=course_run.shared_design_spec,
+        )
+        plan = GeneratedCoursePlan(
+            title=title,
+            summary=goal_text,
+            package_type=package_type,
+            shared_design_spec=course_run.shared_design_spec,
+            deliverables=[synthetic_deliverable],
+            notes=[
+                "Course generated via outcome-mode pipeline (Wave 4.6).",
+                *(
+                    [f"Stage paused at `{getattr(state, 'stage', 'unknown')}`."]
+                    if state_status == "awaiting_human"
+                    else []
+                ),
+            ],
+        )
+
+        # Update the placeholder course_run to reflect the graph state.
+        if state_status == "blocked":
+            course_run.stage = CourseRunStage.blocked
+            course_run.status = CourseRunStatus.blocked
+            course_run.last_error = "; ".join(blocking_reasons) or "Outcome generation blocked."
+        elif state_status == "awaiting_human":
+            course_run.stage = CourseRunStage.awaiting_course_review
+            course_run.status = CourseRunStatus.awaiting_human
+            course_run.last_error = None
+        elif state_status == "published":
+            course_run.stage = CourseRunStage.published
+            course_run.status = CourseRunStatus.published
+            course_run.last_error = None
+        else:
+            # ``running`` lands here when the graph returned mid-flight
+            # (shouldn't happen with the current dispatcher, but defend).
+            course_run.stage = CourseRunStage.drafting
+            course_run.status = CourseRunStatus.active
+            course_run.last_error = None
+
+        course_run.active_operation = None
         course_run.goal = request.goal
-        course_run.requested_learning_outcomes = self._derive_plan_learning_outcomes(
-            aligned_plan.deliverables,
-            aligned_plan.shared_design_spec,
+        course_run.requested_learning_outcomes = list(request.learning_outcomes)
+        # Do NOT assign ``plan`` to ``course_run.generated_plan`` here:
+        # ``CourseWorkflowService._compute_refreshed_run`` will rebuild
+        # the plan from ``course_run.deliverables`` whenever
+        # ``generated_plan`` is set, and the outcome path has no
+        # ``CourseDeliverableDraft`` rows. Keeping ``generated_plan`` as
+        # ``None`` lets ``review_run`` succeed; the synthetic plan still
+        # rides on the response below for API parity.
+        course_run.generated_plan = None
+        # The outcome path does not have an OpenAI / live source toggle
+        # baked into the planner status today; surface the planner status
+        # we sampled and tag the source as openai_live when the spec was
+        # produced, deterministic_fallback otherwise.
+        source = (
+            CourseGenerationSource.openai_live
+            if spec is not None
+            else CourseGenerationSource.deterministic_fallback
         )
-        course_run.generated_plan = aligned_plan
         course_run.generation_source = source
         course_run.generation_status = status
-        course_run.own_ai_usage = usage or AIUsageSummary()
-        course_run.ai_usage = course_run.own_ai_usage
-        course_run.notes.append(
-            (
-                f"Course brief generated via `{source.value}`."
-                if source == CourseGenerationSource.openai_live
-                else "Course brief generated via deterministic fallback planning."
+        course_run.notes = list(
+            dict.fromkeys(
+                [
+                    *course_run.notes,
+                    "Outcome-mode draft created from the brief.",
+                    *(
+                        [f"Blocked: {reason}" for reason in blocking_reasons]
+                        if blocking_reasons
+                        else []
+                    ),
+                ]
             )
         )
-        if status.model_id:
-            course_run.notes.append(f"Planner model: `{status.model_id}`.")
+        # Cost from the graph maps onto the course_run for parity with the
+        # legacy ai_usage accounting (graph emits cost_usd; we don't have
+        # token counts to plug into AIUsageSummary).
+        cost_usd = float(getattr(state, "cost_usd", 0.0) or 0.0)
+        if cost_usd:
+            course_run.own_ai_usage = AIUsageSummary(estimated_cost_usd=cost_usd)
+            course_run.ai_usage = course_run.own_ai_usage
+
+        # Persist the OutcomeWorkflowState onto the course_run row so the
+        # full graph state survives a reload / refresh / gate-resume.
+        # Without this, ``CourseWorkflowService._compute_refreshed_run``
+        # reclassifies zero-deliverable outcome runs as ``blocked`` on
+        # the next refresh — see ``tests/test_outcome_workflow_persistence.py``.
+        course_run.payload_json = {
+            **(course_run.payload_json or {}),
+            "outcome_state": self._serialize_outcome_state(state),
+        }
+
         self.course_workflow_service.store.save_course_run(course_run)
         self.course_workflow_service.store.append_course_event(
             course_run.id,
-            "course_brief_generated",
+            "outcome_course_generation_completed",
             {
+                "stage": getattr(state, "stage", "unknown"),
+                "status": state_status,
+                "blocking_reasons": blocking_reasons,
+                "cost_usd": cost_usd,
                 "source": source.value,
-                "provider": status.provider,
-                "model_id": status.model_id,
-                "message": status.message,
-                "ai_usage": (usage.model_dump(mode="json") if usage is not None else None),
             },
         )
+
         review = self.course_workflow_service.review_run(course_run.id)
         return GenerateCourseFromBriefResponse(
             source=source,
             status=status,
-            plan=aligned_plan,
+            plan=plan,
+            course_run=course_run,
+            review=review,
+        )
+
+    # ---------------- Outcome state persistence (Wave 5 durability) ----------------
+    #
+    # ``OutcomeWorkflowState`` is the source of truth between gates. The
+    # legacy ``CourseRun.deliverables`` model has nothing to say about an
+    # outcome-mode run, so we stash the entire serialized state on the
+    # ``CourseRun.payload_json`` blob under the ``"outcome_state"`` key:
+    #
+    #     course_run.payload_json = {"outcome_state": {... state.model_dump ...}}
+    #
+    # Loading is a mirror of the serialize step — we re-validate the
+    # blob back into a Pydantic ``OutcomeWorkflowState``. The
+    # ``request`` field on the state is intentionally typed ``Any`` (it
+    # may carry a ``GenerateCourseFromBriefRequest``); after round-trip
+    # it survives as the request's JSON dict, which the graph nodes
+    # treat identically since they only read fields by name.
+
+    def _serialize_outcome_state(self, state: Any) -> dict[str, Any]:
+        """Return a JSON-safe dict for the supplied OutcomeWorkflowState.
+
+        The state's request field is ``Any`` — when a pydantic model is
+        passed in (the common case from ``generate_outcome_course_from_brief``),
+        we coerce it through ``model_dump(mode="json")``. Path fields
+        become strings, enum fields become their string values, nested
+        pydantic models become dicts.
+        """
+        if hasattr(state, "model_dump"):
+            return state.model_dump(mode="json")
+        # Defensive: state is already a dict (e.g., test fixture).
+        return dict(state)
+
+    def _persist_outcome_state(self, course_run_id: str, state: Any) -> CourseRun:
+        """Write ``state`` to ``course_run.payload_json["outcome_state"]``.
+
+        Loads the course_run, writes the serialized state, saves. Raises
+        ``KeyError`` if the course_run is missing.
+
+        When ``state.status == "published"`` and the course_run doesn't
+        already carry a ``latest_publish_snapshot_id``, synthesize a
+        ``PublishSnapshot`` for the outcome bundle and link it. Without
+        this, ``LMSService._lms_support`` rejects the course as
+        "still being prepared" because the legacy publish flow (which
+        creates snapshots) is bypassed by ``node_publish``.
+        """
+        course_run = self.course_workflow_service.store.get_course_run(course_run_id)
+        if course_run is None:
+            raise KeyError(course_run_id)
+        course_run.payload_json = {
+            **(course_run.payload_json or {}),
+            "outcome_state": self._serialize_outcome_state(state),
+        }
+        # Refresh course_run.title from spec.title once the outcome planner
+        # has produced a real title (the initial title is a 6-word
+        # capitalize-truncation of the goal text — e.g. "A Service That
+        # Answers Questions Over" — and stays that way unless we update
+        # it here). The spec's title is the LLM-emitted, learner-facing
+        # course name and is what every UI surface should show.
+        spec_title = getattr(getattr(state, "spec", None), "title", None)
+        if spec_title and isinstance(spec_title, str) and spec_title.strip():
+            course_run.title = spec_title.strip()
+        # Synthesize the outcome publish snapshot once the graph reports
+        # ``published``. ``build_outcome_publish_snapshot`` reads the
+        # workspace files on disk so it must run after ``node_publish``
+        # has materialized README + course_spec + grader runner.
+        if (
+            getattr(state, "status", None) == "published"
+            and not course_run.latest_publish_snapshot_id
+            and getattr(state, "spec", None) is not None
+        ):
+            try:
+                from app.services.outcome_publish_snapshot import (
+                    build_outcome_publish_snapshot,
+                )
+
+                snapshot = build_outcome_publish_snapshot(course_run, state)
+                saved = self.course_workflow_service.store.save_publish_snapshot(
+                    snapshot
+                )
+                course_run.latest_publish_snapshot_id = saved.id
+                log_coursegen_event(
+                    "outcome_publish_snapshot_created",
+                    course_run_id=course_run.id,
+                    publish_snapshot_id=saved.id,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive boundary
+                # Codex pass 5 P0: previously we swallowed snapshot
+                # synthesis failures and still persisted the course as
+                # `published`. That left the LMS catalog unable to
+                # surface the course (no snapshot id) while
+                # course_run.status said "published" — a confusing
+                # half-state. Demote the run to `awaiting_human` so the
+                # operator sees a clear failure and the run isn't
+                # claimed-but-broken in the catalog.
+                log_coursegen_event(
+                    "outcome_publish_snapshot_failed",
+                    course_run_id=course_run.id,
+                    error=str(exc),
+                )
+                course_run.status = CourseRunStatus.awaiting_human
+                outcome_state = dict(course_run.payload_json.get("outcome_state") or {})
+                outcome_state["status"] = "blocked"
+                outcome_state["last_error"] = (
+                    "Outcome publish snapshot synthesis failed: " + str(exc)
+                )
+                course_run.payload_json = {
+                    **course_run.payload_json,
+                    "outcome_state": outcome_state,
+                }
+        course_run.updated_at = datetime.now(UTC)
+        self.course_workflow_service.store.save_course_run(course_run)
+        return course_run
+
+    def _load_outcome_state(self, course_run_id: str) -> Any:
+        """Return the persisted ``OutcomeWorkflowState`` or ``None``.
+
+        Returns ``None`` if the course_run does not exist OR if it has
+        no ``outcome_state`` blob (i.e., it's a legacy run).
+        """
+        course_run = self.course_workflow_service.store.get_course_run(course_run_id)
+        if course_run is None:
+            return None
+        blob = (course_run.payload_json or {}).get("outcome_state")
+        if blob is None:
+            return None
+        # Local import to keep langgraph_outcome_graph out of the import
+        # graph for legacy callers.
+        from app.services.langgraph_outcome_graph import OutcomeWorkflowState
+
+        return OutcomeWorkflowState.model_validate(blob)
+
+    def resume_outcome_workflow_after_gate(
+        self,
+        course_run_id: str,
+        *,
+        gate: Any,
+        decision: Any,
+    ) -> GenerateCourseFromBriefResponse:
+        """Resume an outcome run paused at a gate.
+
+        Loads the persisted ``OutcomeWorkflowState``, applies the
+        decision, drives the graph forward to the next pause / terminal
+        state, re-persists, and returns the adapted response.
+
+        Idempotency: if the persisted state is no longer paused at
+        ``gate`` (e.g., a prior approval already advanced past it), the
+        decision is a no-op and the current adapted response is
+        returned. This matches the "calling resume twice is a no-op
+        the second time" contract.
+
+        Routing
+        -------
+        TODO(wave 5 integration): the FastAPI gate route lives in
+        ``app/api/routes.py`` and operates on a workflow_run_id today.
+        Sibling Agent #2 owns wiring the course-run-scoped resume
+        endpoint to this method. Once wired, the route handler should
+        detect outcome runs via ``payload_json.get("outcome_state") is
+        not None`` and dispatch here.
+        """
+        # Local import for HILGate / DecisionOutcome enums; we accept
+        # either the enum or its ``.value`` string to keep the call site
+        # tolerant of route-handler shapes.
+        from app.domain.workflow import DecisionOutcome, HILGate
+
+        gate_value = gate.value if isinstance(gate, HILGate) else str(gate)
+        decision_value = (
+            decision.value if isinstance(decision, DecisionOutcome) else str(decision)
+        )
+
+        state = self._load_outcome_state(course_run_id)
+        if state is None:
+            raise KeyError(
+                f"No outcome_state found for course_run '{course_run_id}'."
+            )
+
+        course_run = self.course_workflow_service.store.get_course_run(course_run_id)
+        if course_run is None:
+            raise KeyError(course_run_id)
+
+        # Idempotency guard: if the state isn't paused at the requested
+        # gate, the decision is a no-op. The caller gets back the
+        # current adapted response.
+        gate_stage_map = {
+            HILGate.gate_1_spec_review.value: "awaiting_gate_1",
+            HILGate.gate_2_progression_review.value: "awaiting_gate_2",
+            HILGate.gate_3_pre_publish.value: "awaiting_gate_3",
+        }
+        expected_stage = gate_stage_map.get(gate_value)
+        if state.stage != expected_stage or state.status != "awaiting_human":
+            return self._build_response_from_state(state, course_run)
+
+        # Apply the decision.
+        if decision_value == DecisionOutcome.approve.value:
+            # Flip to running so the graph dispatcher knows we resumed.
+            state.status = "running"
+        elif decision_value == DecisionOutcome.reject.value:
+            state.status = "blocked"
+            state.blocking_reasons.append(
+                f"Gate {gate_value} rejected by reviewer."
+            )
+            course_run = self._persist_outcome_state(course_run_id, state)
+            return self._build_response_from_state(state, course_run)
+        else:
+            raise ValueError(f"Unknown gate decision '{decision_value}'.")
+
+        # Advance the graph from the current stage with the
+        # production-wired ``OutcomeGraphDeps``. Tests still stub
+        # ``OutcomeWorkflowGraph.execute`` for fine-grained behavioral
+        # assertions; the deps the test path receives may include
+        # placeholders that block downstream stages, but the dispatcher
+        # is guaranteed not to crash on a missing collaborator
+        # (Codex review #6 finding #2).
+        from app.services.langgraph_outcome_graph import OutcomeWorkflowGraph
+
+        deps = self._build_production_outcome_deps()
+        graph = OutcomeWorkflowGraph()
+        state = graph.execute(state, deps=deps)
+        course_run = self._persist_outcome_state(course_run_id, state)
+
+        self.course_workflow_service.store.append_course_event(
+            course_run_id,
+            "outcome_course_gate_decision_applied",
+            {
+                "gate": gate_value,
+                "decision": decision_value,
+                "stage": getattr(state, "stage", "unknown"),
+                "status": getattr(state, "status", "running"),
+            },
+        )
+
+        return self._build_response_from_state(state, course_run)
+
+    def _build_response_from_state(
+        self,
+        state: Any,
+        course_run: CourseRun,
+    ) -> GenerateCourseFromBriefResponse:
+        """Build a ``GenerateCourseFromBriefResponse`` from a loaded state.
+
+        Mirrors the same adapter logic ``_outcome_state_to_legacy_response``
+        uses but skips the placeholder-creation + initial save steps —
+        this variant operates on an already-persisted course_run.
+        Sharing the body would require refactoring side-effect-prone
+        sections; for now we duplicate the response synthesis and rely
+        on the shared serialization helper to keep both paths
+        consistent.
+        """
+        spec = getattr(state, "spec", None)
+        state_status = getattr(state, "status", "running")
+        blocking_reasons = list(getattr(state, "blocking_reasons", []) or [])
+
+        title = getattr(spec, "title", None) or course_run.title
+        goal_text = getattr(spec, "goal", None) or course_run.goal or course_run.summary
+        package_type = getattr(spec, "package_type", None) or course_run.package_type
+        synthetic_deliverable = CreateCourseDeliverableRequest(
+            deliverable_slug="outcome",
+            title=title,
+            summary=goal_text,
+            learning_outcomes=list(course_run.requested_learning_outcomes),
+            design_spec=course_run.shared_design_spec,
+        )
+        plan = GeneratedCoursePlan(
+            title=title,
+            summary=goal_text,
+            package_type=package_type,
+            shared_design_spec=course_run.shared_design_spec,
+            deliverables=[synthetic_deliverable],
+            notes=[
+                "Course generated via outcome-mode pipeline (Wave 4.6).",
+                *(
+                    [f"Stage paused at `{getattr(state, 'stage', 'unknown')}`."]
+                    if state_status == "awaiting_human"
+                    else []
+                ),
+            ],
+        )
+
+        # Mirror the course_run status updates the kick-off adapter
+        # performs so the response carries the post-resume snapshot.
+        if state_status == "blocked":
+            course_run.stage = CourseRunStage.blocked
+            course_run.status = CourseRunStatus.blocked
+            course_run.last_error = (
+                "; ".join(blocking_reasons) or "Outcome generation blocked."
+            )
+        elif state_status == "awaiting_human":
+            course_run.stage = CourseRunStage.awaiting_course_review
+            course_run.status = CourseRunStatus.awaiting_human
+            course_run.last_error = None
+        elif state_status == "published":
+            course_run.stage = CourseRunStage.published
+            course_run.status = CourseRunStatus.published
+            course_run.last_error = None
+        else:
+            course_run.stage = CourseRunStage.drafting
+            course_run.status = CourseRunStatus.active
+            course_run.last_error = None
+
+        course_run.updated_at = datetime.now(UTC)
+        # Re-persist so the response, refresh, and storage all agree.
+        self.course_workflow_service.store.save_course_run(course_run)
+
+        review = self.course_workflow_service.review_run(course_run.id)
+        return GenerateCourseFromBriefResponse(
+            source=course_run.generation_source
+            or CourseGenerationSource.deterministic_fallback,
+            status=course_run.generation_status
+            or self.live_planner.status(),
+            plan=plan,
             course_run=course_run,
             review=review,
         )
@@ -569,15 +1146,11 @@ class CourseGenerationService:
         if course_run is None:
             raise KeyError(course_run_id)
         if course_run.shared_workflow_run_id is not None:
-            log_coursegen_event(
-                "course_generation_workflow_execution_started",
-                course_run_id=course_run.id,
-                shared_workflow_run_id=course_run.shared_workflow_run_id,
-            )
-            if self.course_workflow_service.workflow_service.node_runtime is not None:
-                self.course_workflow_service.workflow_service.execute_langgraph_nodes(
-                    course_run.shared_workflow_run_id
-                )
+            # The per-deliverable LangGraph node loop is retired (Wave 5b).
+            # We still re-sync the course run so any state on the shared
+            # workflow shell flows through; the live authoring/reviewer
+            # execution now lives in the outcome graph and is invoked
+            # upstream of this background finalization step.
             course_run = self.course_workflow_service.sync_run(course_run.id)
             log_coursegen_event(
                 "course_generation_workflow_execution_completed",
@@ -1640,3 +2213,72 @@ class CourseGenerationService:
                 ),
             }
         )
+
+
+# ---------------- Outcome-mode entry point ----------------
+#
+# Wave 5 retired the legacy per-deliverable workflow; every brief is now
+# routed through the single-outcome graph
+# (``langgraph_outcome_graph.OutcomeWorkflowGraph``).
+
+
+def generate_outcome_course_from_brief(
+    request: GenerateCourseFromBriefRequest,
+    *,
+    planner: Any,
+    workspace_root: Path,
+    run_id: str,
+    deps: Any = None,
+):
+    """Run a brief through the single-outcome graph up to the first gate.
+
+    Returns the resulting ``OutcomeWorkflowState``. The caller is
+    responsible for persisting the state and resuming the graph after
+    each HIL gate approval.
+
+    Parameters
+    ----------
+    request
+        The same ``GenerateCourseFromBriefRequest`` the legacy path
+        consumes; the outcome planner extracts whatever it needs.
+    planner
+        An ``OutcomeCoursePlanner`` (or compatible fake) that turns the
+        request into a ``CourseOutcomeSpec``. Injected so tests can use
+        a hand-rolled fake without touching the live router.
+    workspace_root
+        Where the outcome graph will materialize the starter, oracle
+        bundle, and final spec.
+    run_id
+        Stable identifier for the workflow run; threaded into log
+        events and into the returned state.
+    deps
+        Optional ``OutcomeGraphDeps`` instance. When not provided, a
+        minimal deps object wrapping only the supplied planner is
+        built; downstream nodes that need a router / repo author /
+        sandbox runner will assert if invoked. For Wave 4 the caller
+        typically only drives the graph as far as gate 1, so the
+        downstream deps are unnecessary.
+    """
+    # Local imports to avoid creating an import cycle at module load
+    # time (langgraph_outcome_graph imports from this module's siblings).
+    from app.services.langgraph_outcome_graph import (
+        OutcomeGraphDeps,
+        OutcomeWorkflowGraph,
+        OutcomeWorkflowState,
+    )
+
+    if deps is None:
+        deps = OutcomeGraphDeps(planner=planner)
+    else:
+        # The caller-supplied deps may already carry a planner; favor
+        # the explicit ``planner`` argument so the entry-point contract
+        # remains "this brief, this planner".
+        deps.planner = planner
+
+    state = OutcomeWorkflowState(
+        run_id=run_id,
+        workspace_root=workspace_root,
+        request=request,
+    )
+    graph = OutcomeWorkflowGraph()
+    return graph.execute(state, deps=deps)

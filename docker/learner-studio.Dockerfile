@@ -17,7 +17,12 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /workspace
 
+# Lab tutor widget injection — gated at container start by LAB_TUTOR_BASE_URL env var.
+COPY docker/lab-tutor-inject.py /usr/local/bin/lab-tutor-inject.py
+COPY docker/lab-tutor-entrypoint.sh /usr/local/bin/lab-tutor-entrypoint.sh
+RUN chmod +x /usr/local/bin/lab-tutor-inject.py /usr/local/bin/lab-tutor-entrypoint.sh
+
 EXPOSE 8080 8000
 
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+ENTRYPOINT ["/usr/local/bin/lab-tutor-entrypoint.sh"]
 CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none", "--user-data-dir", "/tmp/code-server", "/workspace"]

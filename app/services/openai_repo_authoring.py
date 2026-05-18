@@ -19,6 +19,7 @@ from app.services.openai_runtime_support import (
     parse_structured_openai_response_with_hard_timeout,
     resolve_openai_env_file,
 )
+from app.services.runtime_normalization import normalize_runtime_protocol_dict
 from app.services.runtime_contract_surface import (
     dependency_contract_from_manifest,
     is_repo_contract_path,
@@ -70,13 +71,6 @@ class _GeneratedRepoBundle(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-class _GeneratedSharedRepoBundle(BaseModel):
-    runtime_protocol_files: list[_RepoFile] = Field(default_factory=list)
-    files: list[_RepoFile] = Field(default_factory=list)
-    dependency_contract: _GeneratedDependencyContract
-    notes: list[str] = Field(default_factory=list)
-
-
 _RESERVED_PATHS = {
     "README.md",
     ".vscode/tasks.json",
@@ -107,7 +101,10 @@ class OpenAIStarterRepoAuthoringService:
         env_file: str | None = None,
         model: str | None = None,
         client_factory=None,
-        request_timeout_s: float = 300.0,
+        # Bumped from 300s — repo authoring on Anthropic Sonnet 4.6 with
+        # max_tokens=16000 (Dockerfile + install.sh + full app source +
+        # dependency contract) can exceed 5 min wall-clock on cold paths.
+        request_timeout_s: float = 600.0,
         max_request_retries: int = 2,
     ) -> None:
         self.enabled = enabled
@@ -163,110 +160,70 @@ class OpenAIStarterRepoAuthoringService:
             else None
         )
         model_id = config.get("OPENAI_MODEL") or self.model or "gpt-5.4"
-        ordered_requested_ids = [
-            deliverable.id
-            for deliverable in spec.deliverables
-            if deliverable.id in requested_ids
-        ]
 
-        if spec.course_structure.shared_codebase:
-            # Deliverables are learner constructs — evaluation criteria,
-            # not authoring scopes. The shared-codebase author ALWAYS
-            # sees the full spec and produces the complete app; the
-            # caller-supplied `deliverable_ids` (if any) is purely
-            # advisory and discarded here. The prompt carries every
-            # deliverable's primary_editable_paths plus the union, so
-            # the model has the full file inventory regardless of
-            # which deliverables the reviewer flagged.
-            payload = self._progressive_prompt_payload(
-                run=run,
-                public_root=public_root,
+        for deliverable in spec.deliverables:
+            if deliverable.id not in requested_ids:
+                continue
+            starter_root = public_root / "starter" / deliverable.id
+            manifest_path = starter_root / HIDDEN_MANIFEST_PATH
+            if not starter_root.exists() or not manifest_path.exists():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload = self._prompt_payload(
+                run,
+                deliverable_id=deliverable.id,
+                starter_root=starter_root,
+                manifest=manifest,
                 failure_context=failure_context,
             )
-            bundle, response_usage = self._generate_progressive_bundle(
+            bundle, response_usage = self._generate_bundle(
                 client,
                 model_id=model_id,
                 api_key=config["OPENAI_API_KEY"],
                 base_url=config.get("OPENAI_BASE_URL"),
                 payload=payload,
                 workflow_run_id=run.id,
-                deliverable_ids=[deliverable.id for deliverable in spec.deliverables],
+                deliverable_id=deliverable.id,
             )
-            progressive_updates, bundle_notes = self._apply_progressive_bundle(
-                run=run,
-                public_root=public_root,
-                workspace_root=workspace_root,
-                visible_fixture_files=visible_fixture_files,
-                deliverable_ids=[deliverable.id for deliverable in spec.deliverables],
-                bundle=bundle,
+            normalized_files = self._normalize_repo_files(bundle.files)
+            normalized_contract = self._normalize_dependency_contract(
+                bundle.dependency_contract,
+                current_manifest=manifest,
             )
-            updated_files.extend(progressive_updates)
-            notes.extend(bundle_notes)
-            usage = merge_ai_usage(usage, response_usage)
-        else:
-            for deliverable in spec.deliverables:
-                if deliverable.id not in requested_ids:
-                    continue
-                starter_root = public_root / "starter" / deliverable.id
-                manifest_path = starter_root / HIDDEN_MANIFEST_PATH
-                if not starter_root.exists() or not manifest_path.exists():
-                    continue
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                payload = self._prompt_payload(
-                    run,
-                    deliverable_id=deliverable.id,
+            updated_files.extend(
+                self._replace_repo_files(
                     starter_root=starter_root,
                     manifest=manifest,
-                    failure_context=failure_context,
-                )
-                bundle, response_usage = self._generate_bundle(
-                    client,
-                    model_id=model_id,
-                    api_key=config["OPENAI_API_KEY"],
-                    base_url=config.get("OPENAI_BASE_URL"),
-                    payload=payload,
-                    workflow_run_id=run.id,
-                    deliverable_id=deliverable.id,
-                )
-                normalized_files = self._normalize_repo_files(bundle.files)
-                normalized_contract = self._normalize_dependency_contract(
-                    bundle.dependency_contract,
-                    current_manifest=manifest,
-                )
-                updated_files.extend(
-                    self._replace_repo_files(
-                        starter_root=starter_root,
-                        manifest=manifest,
-                        files=normalized_files,
-                        workspace_root=workspace_root,
-                        visible_fixture_files=visible_fixture_files,
-                    )
-                )
-                default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
-                starter_repo_bundle, runtime_protocol_bundle = self._bundle_state(
-                    starter_root=starter_root,
-                    manifest=manifest,
-                    default_starter_files=default_starter_files,
+                    files=normalized_files,
+                    workspace_root=workspace_root,
                     visible_fixture_files=visible_fixture_files,
                 )
-                manifest["starter_repo_bundle"] = {
-                    "generated_for_deliverable": deliverable.id,
-                    **starter_repo_bundle,
-                }
-                manifest["runtime_protocol_bundle"] = {
-                    "generated_for_deliverable": deliverable.id,
-                    **runtime_protocol_bundle,
-                }
-                manifest["dependency_contract"] = normalized_contract
-                updated_files.extend(
-                    self._write_if_changed(
-                        manifest_path,
-                        json.dumps(manifest, indent=2) + "\n",
-                        workspace_root,
-                    )
+            )
+            default_starter_files = build_task_agent_starter_files(spec, deliverable.id)
+            starter_repo_bundle, runtime_protocol_bundle = self._bundle_state(
+                starter_root=starter_root,
+                manifest=manifest,
+                default_starter_files=default_starter_files,
+                visible_fixture_files=visible_fixture_files,
+            )
+            manifest["starter_repo_bundle"] = {
+                "generated_for_deliverable": deliverable.id,
+                **starter_repo_bundle,
+            }
+            manifest["runtime_protocol_bundle"] = {
+                "generated_for_deliverable": deliverable.id,
+                **runtime_protocol_bundle,
+            }
+            manifest["dependency_contract"] = normalized_contract
+            updated_files.extend(
+                self._write_if_changed(
+                    manifest_path,
+                    json.dumps(manifest, indent=2) + "\n",
+                    workspace_root,
                 )
-                usage = merge_ai_usage(usage, response_usage)
-                notes.extend(bundle.notes)
+            )
+            usage = merge_ai_usage(usage, response_usage)
+            notes.extend(bundle.notes)
 
         if usage.request_count:
             run.artifacts.ai_usage = merge_ai_usage(run.artifacts.ai_usage, usage)
@@ -284,118 +241,6 @@ class OpenAIStarterRepoAuthoringService:
             message=message,
             available=True,
         )
-
-    def _progressive_prompt_payload(
-        self,
-        *,
-        run: WorkflowRun,
-        public_root: Path,
-        failure_context: FailureContext | None,
-    ) -> dict[str, Any]:
-        """Build the shared-codebase authoring prompt payload.
-
-        Deliverables are LEARNER CONSTRUCTS — milestones for course UX
-        and EVALUATION CRITERIA the reviewer uses to assess the app.
-        They are NOT authoring scopes. The model authors ONE shared
-        application that must satisfy every deliverable's criteria
-        simultaneously. There is no `repair_scope_deliverable_ids`,
-        no "fix only these deliverables, preserve the rest." Every
-        authoring call sees:
-          - The full spec (every deliverable's criteria visible)
-          - The full union of required editable paths
-          - The current codebase on disk
-          - A flat findings list from the reviewer (if repairing)
-        """
-        spec = run.artifacts.task_agent_spec
-        if spec is None:
-            raise ValueError("Task-agent spec is required for progressive repo authoring.")
-        if not spec.deliverables:
-            raise ValueError("At least one deliverable is required for progressive repo authoring.")
-        # Shared starter is now a single root at public/starter/. The hidden
-        # manifest lives under private/grader/<first_deliverable_id>/deliverable.json.
-        shared_root = public_root / "starter"
-        first_deliverable_id = spec.deliverables[0].id
-        workspace = run.artifacts.workspace_snapshot
-        if workspace is not None:
-            shared_manifest_path = (
-                Path(workspace.root_dir)
-                / "private"
-                / "grader"
-                / first_deliverable_id
-                / "deliverable.json"
-            )
-        else:
-            shared_manifest_path = (
-                public_root.parent
-                / "private"
-                / "grader"
-                / first_deliverable_id
-                / "deliverable.json"
-            )
-        shared_manifest = json.loads(shared_manifest_path.read_text(encoding="utf-8"))
-        prompt_files = build_starter_authoring_payload(
-            starter_root=shared_root,
-            manifest=shared_manifest,
-        )
-
-        # Compute the UNION of every deliverable's primary editable
-        # paths. The shared bundle must contain every path declared by
-        # any deliverable — d1's view alone is insufficient.
-        from app.services.task_agent_contract_surface import (
-            learner_editable_paths_for_deliverable,
-        )
-
-        seen_required: set[str] = set()
-        shared_required_paths: list[str] = []
-        deliverable_payloads: list[dict[str, Any]] = []
-        for deliverable in spec.deliverables:
-            per_deliverable_paths = learner_editable_paths_for_deliverable(
-                spec, deliverable
-            )
-            for path in per_deliverable_paths:
-                if path in seen_required:
-                    continue
-                seen_required.add(path)
-                shared_required_paths.append(path)
-            deliverable_payloads.append(
-                {
-                    "deliverable_id": deliverable.id,
-                    "title": deliverable.title,
-                    "objective": deliverable.objective,
-                    "learning_outcomes": list(deliverable.learning_outcomes),
-                    "learner_brief": (
-                        deliverable.learner_brief.model_dump(mode="json")
-                        if deliverable.learner_brief is not None
-                        else None
-                    ),
-                    "public_checks": [check.model_dump(mode="json") for check in deliverable.public_checks],
-                    # Required learner-editable files for this milestone.
-                    # The reviewer evaluates these per-deliverable; the
-                    # model needs the same view to author files that map
-                    # to each milestone's criteria.
-                    "primary_editable_paths": list(per_deliverable_paths),
-                }
-            )
-
-        return {
-            "workflow_title": run.title,
-            "problem_statement": run.intake.problem_statement,
-            "shared_codebase": True,
-            "course_starter_type": spec.runtime_dependencies.starter_type.value,
-            "shared_repo_root": shared_root.name,
-            "manifest": shared_manifest,
-            "current_files": prompt_files["learner_files"],
-            "dependency_contract_files": prompt_files["dependency_contract_files"],
-            "shared_runtime_protocol_files": prompt_files["runtime_protocol_files"],
-            "public_endpoints": prompt_files["public_endpoints"],
-            # The COMPLETE set of learner-editable files the shared
-            # bundle must contain. Authoring output MUST cover every
-            # path here — partial coverage leaves downstream
-            # deliverables with missing files.
-            "shared_required_paths": shared_required_paths,
-            "deliverables": deliverable_payloads,
-            "failure_context": failure_context.model_dump(mode="json") if failure_context is not None else None,
-        }
 
     def _prompt_payload(
         self,
@@ -473,256 +318,6 @@ class OpenAIStarterRepoAuthoringService:
             normalized.append(relative_path)
         return normalized
 
-    def _normalize_runtime_protocol_files(self, files: list[_RepoFile]) -> dict[str, str]:
-        normalized = self._normalize_repo_files(files)
-        return {
-            relative_path: content
-            for relative_path, content in normalized.items()
-            if relative_path in _RUNTIME_PROTOCOL_PATHS
-        }
-
-    def _generate_progressive_bundle(
-        self,
-        client,
-        *,
-        model_id: str,
-        api_key: str,
-        base_url: str | None,
-        payload: dict[str, Any],
-        workflow_run_id: str,
-        deliverable_ids: list[str],
-    ) -> tuple[_GeneratedSharedRepoBundle, AIUsageSummary | None]:
-        deliverable_label = (
-            f"{deliverable_ids[0]}..{deliverable_ids[-1]}"
-            if deliverable_ids
-            else "shared_course_repo"
-        )
-        response = self._create_response_with_retries(
-            client,
-            model=model_id,
-            api_key=api_key,
-            base_url=base_url,
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are authoring the single shared repo for a progressive shared-codebase course. "
-                        "Return JSON only with keys `runtime_protocol_files`, `files`, `dependency_contract`, and optional `notes`. "
-                        "`runtime_protocol_files` must contain the complete shared course-level runtime bundle with "
-                        "`Dockerfile`, `.coursegen/runtime/install.sh`, `.coursegen/runtime/verify.sh`, and `.coursegen/runtime/run.sh`. "
-                        "`files` must contain the complete learner-owned repo and dependency-contract snapshot for the shared course repo, "
-                        "but must not repeat the shared runtime protocol files. "
-                        "`dependency_contract` must describe the dependency/build contract for that shared repo. "
-                        "DELIVERABLES ARE LEARNER MILESTONES, NOT AUTHORING SCOPES. The `deliverables[]` field lists every milestone — each with its own `primary_editable_paths`, `learner_brief`, `public_checks`, and `learning_outcomes`. Your job is to author ONE complete app that satisfies the criteria of EVERY deliverable simultaneously. Do NOT treat deliverables as separate repo states or partial scopes. "
-                        "SHARED REQUIRED PATHS: the `shared_required_paths` field is the UNION of every deliverable's `primary_editable_paths` — the complete list of learner-editable files this shared bundle must contain. Your `files[]` output MUST include every path in `shared_required_paths`. Authoring a subset that only covers `deliverables[0]`'s paths is the most common failure mode: downstream reviewers will report `starter_primary_editable_missing` for every uncovered path and the run will fail. "
-                        "Treat deliverables only as milestone briefs/tests/gates over the same app, not as separate repo states. "
-                        "The course-level `course_starter_type` field in the payload is either `empty` or `partial`. Default to `partial` unless the payload explicitly says `empty`. "
-                        "For a `partial` starter: implement the full scaffold — project skeleton, framework wiring, dependency manifests, data schema, repository layer, type definitions, configuration, and any boilerplate the framework needs to boot. "
-                        "Leave every API handler, primary service method, and route body as an explicit unimplemented stub that throws or raises a language-appropriate not-implemented exception (`UnsupportedOperationException` in Java/Kotlin, `NotImplementedError` in Python, `errors.New(\"not implemented\")` in Go, `throw new Error('not implemented')` in TypeScript, etc.). "
-                        "Do not return placeholder data, default fixtures, hardcoded success responses, or `Optional.empty()` 200s. The starter MUST boot and stay up (health endpoint returns 200), but every business endpoint must throw the not-implemented exception when called. "
-                        "The visible and hidden tests are authored separately and are EXPECTED to fail against this starter — that is the whole point. If your starter accidentally implements deliverable logic, the test-strength baseline will catch it. "
-                        "For an `empty` starter: author only the minimum project skeleton needed to boot — framework wiring, dependency manifest, application entry, and a single health endpoint. No business code, no schema, no repository layer, no stubs. "
-                        "Preserve one package root, one build identity, and one shared module structure across the whole course. "
-                        "Do not write `README.md`, `.coursegen/grader/*`, `checks/*`, or `.vscode/*`; those belong to the harness protocol. "
-                        "Lockfiles, build artifacts, logs, generated tests, and other harness-managed outputs are intentionally omitted from the prompt and should not be treated as learner-owned source. "
-                        "Structured outputs can only carry text files. You cannot bundle binary assets such as `.mvn/wrapper/maven-wrapper.jar`, `gradle/wrapper/gradle-wrapper.jar`, JAR distributions, fonts, images, or compiled artifacts. "
-                        "If a build wrapper depends on a binary (e.g. `./mvnw` needs `maven-wrapper.jar`, `./gradlew` needs `gradle-wrapper.jar`), either have `install.sh` download or regenerate that binary before invoking the wrapper, OR drop the wrapper and use the system-installed tool from the creator-selected base image (e.g. `mvn` directly when the base image already provides Maven). Do not write an `install.sh` that invokes a wrapper script whose required binary is not present and not generated. "
-                        "The harness provides every dependency service in the runtime plan (e.g. `postgres`, `redis`, `mongodb`) as a separate sidecar container on a shared Docker network. Each service is reachable from the app container by its `service_id` as the hostname using the service's default port (for example `postgres:5432`, `redis:6379`, `mongodb:27017`). The app container has neither docker nor the dependency service binaries installed. "
-                        "Do not install, start, or initialize those services inside the app's `Dockerfile`, `install.sh`, `verify.sh`, or `run.sh` — that means no `initdb`, no `pg_ctl start`, no `redis-server`, no `docker run`, and no `apt-get install postgresql-server`. Configure the app to connect to the sidecar hostnames instead. "
-                        "Treat the manifest `dependency_contract` as the current contract source of truth and update it when the authored repo changes. "
-                        "The shared runtime bundle must stay coherent with the creator-owned stack contract and with the shared repo you return. "
-                        "When `failure_context.dependency_contracts` is present, treat those repo/runtime facts as authoritative for the failing deliverables and repair the shared dependency contract coherently instead of guessing from stderr alone. "
-                        "When inspecting `failure_context.sandbox.deliverable_reports[*]`, the structured fields below are the canonical diagnostic — the headline `error` field is just a label, not the source of truth: "
-                        "`stderr_excerpt` (8KB tail) is the primary error source for install/verify/boot failures; "
-                        "`stdout_excerpt` (8KB tail) is the framework boot log (Spring Boot, Logback, gunicorn, structured loggers) — read this when the failure is post-boot and stderr is sparse; "
-                        "`exit_state` carries the structured container exit reason — `oom_killed=true` means raise the container memory cap or trim resource use, `exit_code=137` usually pairs with OOM; "
-                        "`sidecar_diagnostics` carries every dependency service's stderr/stdout/exit_state keyed by service_id — check these first when the app shows 'connection refused' or 'no such host', because the real cause is often a postgres/redis sidecar that crashed or OOM-killed; "
-                        "`http_response` is only present for contract/checks failures and carries the verbatim response body+status+headers — the response_body_text is the canonical diagnostic for those stages. "
-                        "When `failure_context.previously_verified_runtime` is present, those files already passed sandbox verification for the listed deliverables. "
-                        "For every path listed in `failure_context.previously_verified_runtime.verified_files`, use the provided verified content as the preservation source of truth and emit that file verbatim in your response unless the current failure packet explicitly proves it caused the new failure. "
-                        "When `failure_context.last_attempted_runtime` is present, its `stage_outcomes` shows which harness stages (`image_build`, `install`, `verify`, `boot`, `contract`, `checks`) passed or failed in the most recent attempt, even if the overall sandbox failed. "
-                        "Treat every stage marked `passed` as verified by the harness: do not change files that contributed to that stage unless the current failure packet proves they caused the new failure. "
-                        "Specifically: if `boot` passed, preserve the runtime protocol bundle (`Dockerfile`, install/verify/run scripts) verbatim from `last_attempted_runtime.verified_files`; if `install` passed, preserve dependency-contract files. Use those `verified_files` entries (with `preserve_verbatim=true`) as the byte-for-byte source for those paths. "
-                        "If the only failed stage is `contract` or `checks`, do not touch the runtime protocol bundle or the dependency contract — fix the learner-owned source so the published smoke check can exercise it instead. "
-                        "Prefer preserving the exact matching content already present in `shared_runtime_protocol_files`, `dependency_contract_files`, and `current_files` when those paths overlap. "
-                        "Do not rewrite known-good runtime wiring or shared config to fix reviewer-only findings. "
-                        "Dependency manifests must be coherent with the chosen language, framework, package manager, and versions. "
-                        "Do not rely on unbounded latest dependency resolution; pin dependency versions and editions that the chosen toolchain can build today. "
-                        "TOOLCHAIN VERSION MISMATCH (language-agnostic): if a sandbox stage fails with a message of the form `running X, requires Y` where Y > X (e.g. Go `requires go >= 1.23 (running go 1.22.4)`, Python `requires-python >= 3.12` against a `python:3.11` base, Node `engines.node >= 20` against `FROM node:18`, Java `requires JDK 21` against `eclipse-temurin:17`, Rust `requires rustc >= 1.78` against `FROM rust:1.75`, .NET `requires net8.0` against `mcr.microsoft.com/dotnet/sdk:7.0`), the CANONICAL FIX is to (1) bump the Dockerfile `FROM` line to a base image that ships version Y or higher, AND (2) raise the in-manifest version constraint (`go.mod` `go` directive, `pyproject.toml` `requires-python`, `package.json` `engines`, `pom.xml`/`build.gradle` `<release>` or `sourceCompatibility`, `Cargo.toml` `rust-version`, `*.csproj` `TargetFramework`) to Y. Do not attempt to pin transitive dependencies to lower versions to work around it — toolchain-version requirements are non-negotiable upstream signals. Do not downgrade or constrain the dependency that surfaced the requirement; bump the toolchain. "
-                        "LOCKFILE INTEGRITY MISMATCH (language-agnostic): if a sandbox stage fails with a hash/checksum mismatch against a lockfile (Go `checksum mismatch` / `bits may have been replaced on the origin server`, npm `EINTEGRITY: sha512-... integrity checksum failed` from `npm ci`, pnpm `ERR_PNPM_LOCKFILE_BREAKING_CHANGE` / lockfile integrity errors, Yarn `Hash mismatch detected`, Cargo `the lockfile ... is corrupt`, Poetry `Lock file is not compatible`, pip `THESE PACKAGES DO NOT MATCH THE HASHES`), DO NOT author lockfile entries by hand with synthesized hashes. Lockfile content hashes are produced by the package registry and cannot be authored — they must come from a real download. The CANONICAL FIX is to (1) author `install.sh` so it REGENERATES the lockfile from the manifest using the language's native refresh command (`go mod tidy && go mod download` for Go — never hand-write `go.sum`; `npm install` (NOT `npm ci`) when lockfile is stale; `pnpm install --no-frozen-lockfile`; `cargo generate-lockfile`; `poetry lock --no-update`; `pip-compile` for pip-tools), and (2) if a stale lockfile keeps causing integrity failures, DELETE it inside the install script and let the install command rematerialize it from scratch. Lockfile-integrity errors are NEVER fixed by editing the lockfile — only by regenerating it from the manifest. "
-                        "BEFORE returning the bundle, perform an import-vs-manifest audit on every code file you author: walk every source file, collect every `import X` / `from X import ...` (Python), `require('X')` / `import ... from 'X'` (Node), `import \"X\"` (Go), `use X::...` / `extern crate X` (Rust), `import X.Y.Z` (Java/Kotlin) of a non-stdlib package, and confirm each one has a matching pinned entry in the dependency manifest (`requirements.txt`, `package.json` + `package-lock.json`, `go.mod` + `go.sum`, `Cargo.toml` + `Cargo.lock`, `pom.xml` / `build.gradle`). Common omissions that cost a full retry cycle: `pydantic_settings`, `psycopg2`/`psycopg`, `redis`, `httpx`, `sqlalchemy`, `alembic`, `uvicorn[standard]` extras, `python-jose`, `passlib` — if your code imports it, the manifest must list it. Do NOT ship code that imports a package you haven't pinned. "
-                        "When the ecosystem supports a lockfile, author the install script so it can generate or refresh that lockfile deterministically inside the creator-selected base image, "
-                        "and keep the checked-in dependency contract consistent with that install step so transitive dependency resolution stays reproducible under retries and fresh builds. "
-                        "Use `install.sh` for dependency setup and dependency-contract materialization. "
-                        "Use `verify.sh` only for essential dependency/build/runtime sanity checks needed after install and before boot. "
-                        "PATH CONVENTION: every `files[].path` you return MUST be relative to the shared starter root (the directory described by `shared_repo_root`), NOT prefixed with the repo name. The shared starter root is already named `starter` — prefixing your paths with `starter/` will create a duplicate `starter/starter/` directory and the reviewer will report your editable files as missing. Examples: emit `cmd/server/main.go`, NOT `starter/cmd/server/main.go`; emit `pom.xml`, NOT `starter/pom.xml`; emit `Dockerfile`, NOT `starter/Dockerfile`. If your language's module name happens to be `starter` (common for Go: `module starter`), keep that module name in import statements but DO NOT mirror it in the file layout — files live at the starter root. "
-                        "Do not invent internal platform hooks or manifest-driven runtime behavior."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload, indent=2)},
-            ],
-            temperature=0.1,
-            workflow_run_id=workflow_run_id,
-            deliverable_id=deliverable_label,
-            text_format=_GeneratedSharedRepoBundle,
-        )
-        bundle = response.output_parsed
-        if bundle is None:
-            raise ValueError("OpenAI shared repo authoring returned no parsed bundle.")
-        log_coursegen_event(
-            "workspace_repo_authoring_shared_completed",
-            workflow_run_id=workflow_run_id,
-            deliverable_id=deliverable_label,
-            model_id=model_id,
-            repo_file_count=len(bundle.files),
-            runtime_file_count=len(bundle.runtime_protocol_files),
-        )
-        return bundle, extract_openai_usage(response, model_id)
-
-    def _apply_progressive_bundle(
-        self,
-        *,
-        run: WorkflowRun,
-        public_root: Path,
-        workspace_root: Path,
-        visible_fixture_files: set[str],
-        deliverable_ids: list[str],
-        bundle: _GeneratedSharedRepoBundle,
-    ) -> tuple[list[str], list[str]]:
-        spec = run.artifacts.task_agent_spec
-        if spec is None:
-            raise ValueError("Task-agent spec is required for progressive repo authoring.")
-
-        normalized_runtime_files = self._normalize_runtime_protocol_files(bundle.runtime_protocol_files)
-        normalized_repo_files = {
-            relative_path: content
-            for relative_path, content in self._normalize_repo_files(bundle.files).items()
-            if relative_path not in _RUNTIME_PROTOCOL_PATHS
-        }
-        updated_files: list[str] = []
-        notes = list(bundle.notes)
-
-        if not spec.deliverables:
-            return updated_files, notes
-
-        # Write the authored files ONCE to the shared starter root.
-        shared_starter_root = public_root / "starter"
-        first_deliverable = spec.deliverables[0]
-        default_starter_files = build_task_agent_starter_files(spec, first_deliverable.id)
-        first_manifest_path = (
-            workspace_root
-            / "private"
-            / "grader"
-            / first_deliverable.id
-            / "deliverable.json"
-        )
-        first_manifest: dict[str, Any] = {}
-        if first_manifest_path.exists():
-            try:
-                first_manifest = json.loads(first_manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                first_manifest = {}
-
-        files_to_apply = {
-            **normalized_repo_files,
-            **normalized_runtime_files,
-        }
-        if files_to_apply or shared_starter_root.exists():
-            updated_files.extend(
-                self._replace_repo_files(
-                    starter_root=shared_starter_root,
-                    manifest=first_manifest,
-                    files=files_to_apply,
-                    workspace_root=workspace_root,
-                    visible_fixture_files=visible_fixture_files,
-                )
-            )
-
-        # Compute bundle-state metadata ONCE for the shared bundle and
-        # write the IDENTICAL payload to every per-deliverable manifest.
-        # The bundle is shared across all deliverables — `_bundle_state`
-        # describes that one shared bundle, so its result cannot
-        # legitimately vary per deliverable. Computing it per-iteration
-        # used to allow subtle per-deliverable manifest differences
-        # (e.g. empty `dependency_contract.manifest_paths`) to produce
-        # divergent results — observed on `course_72e0739fc3ab` where
-        # deliverable_2 recorded `source="starter_default"` while
-        # deliverables 1/3/4/5 recorded `source="openai_live"` for the
-        # exact same shared files, causing reviewer_tests to fail in an
-        # infinite loop on the metadata mismatch.
-        canonical_manifest = first_manifest
-        shared_starter_repo_bundle, shared_runtime_bundle = self._bundle_state(
-            starter_root=shared_starter_root,
-            manifest=canonical_manifest,
-            default_starter_files=default_starter_files,
-            visible_fixture_files=visible_fixture_files,
-        )
-        log_coursegen_event(
-            "apply_progressive_bundle_state_computed",
-            workflow_run_id=run.id,
-            shared_starter_source=shared_starter_repo_bundle.get("source"),
-            shared_starter_authored_path_count=len(shared_starter_repo_bundle.get("authored_paths") or []),
-            shared_runtime_source=shared_runtime_bundle.get("source"),
-            shared_runtime_authored_path_count=len(shared_runtime_bundle.get("authored_paths") or []),
-            normalized_runtime_files_present=bool(normalized_runtime_files),
-        )
-
-        # Update every per-deliverable manifest with the new dependency contract
-        # and bundle-state metadata. Manifests live at
-        # private/grader/<id>/deliverable.json.
-        for deliverable in spec.deliverables:
-            manifest_path = (
-                workspace_root
-                / "private"
-                / "grader"
-                / deliverable.id
-                / "deliverable.json"
-            )
-            manifest_exists = manifest_path.exists()
-            if not manifest_exists:
-                log_coursegen_event(
-                    "apply_progressive_bundle_manifest_skipped",
-                    workflow_run_id=run.id,
-                    deliverable_id=deliverable.id,
-                    manifest_path=str(manifest_path),
-                    reason="manifest_path_does_not_exist",
-                )
-                continue
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            pre_source = (manifest.get("starter_repo_bundle") or {}).get("source")
-            normalized_contract = self._normalize_dependency_contract(
-                bundle.dependency_contract,
-                current_manifest=manifest,
-            )
-            manifest["starter_repo_bundle"] = {
-                "generated_for_deliverable": deliverable.id,
-                **shared_starter_repo_bundle,
-            }
-            manifest["dependency_contract"] = normalized_contract
-            if normalized_runtime_files:
-                manifest["runtime_protocol_bundle"] = {
-                    "generated_for_deliverable": deliverable.id,
-                    **shared_runtime_bundle,
-                }
-            new_text = json.dumps(manifest, indent=2) + "\n"
-            wrote = self._write_if_changed(
-                manifest_path,
-                new_text,
-                workspace_root,
-            )
-            log_coursegen_event(
-                "apply_progressive_bundle_manifest_written",
-                workflow_run_id=run.id,
-                deliverable_id=deliverable.id,
-                manifest_path=str(manifest_path),
-                pre_source=pre_source,
-                post_source=manifest["starter_repo_bundle"].get("source"),
-                content_changed=bool(wrote),
-            )
-            updated_files.extend(wrote)
-
-        return updated_files, notes
-
     def _generate_bundle(
         self,
         client,
@@ -779,6 +374,13 @@ class OpenAIStarterRepoAuthoringService:
                         "Do not rely on unbounded latest dependency resolution; pin dependency versions and editions that the chosen toolchain can build today. "
                         "TOOLCHAIN VERSION MISMATCH (language-agnostic): if a sandbox stage fails with a message of the form `running X, requires Y` where Y > X (e.g. Go `requires go >= 1.23 (running go 1.22.4)`, Python `requires-python >= 3.12` against a `python:3.11` base, Node `engines.node >= 20` against `FROM node:18`, Java `requires JDK 21` against `eclipse-temurin:17`, Rust `requires rustc >= 1.78` against `FROM rust:1.75`, .NET `requires net8.0` against `mcr.microsoft.com/dotnet/sdk:7.0`), the CANONICAL FIX is to (1) bump the Dockerfile `FROM` line to a base image that ships version Y or higher, AND (2) raise the in-manifest version constraint (`go.mod` `go` directive, `pyproject.toml` `requires-python`, `package.json` `engines`, `pom.xml`/`build.gradle` `<release>` or `sourceCompatibility`, `Cargo.toml` `rust-version`, `*.csproj` `TargetFramework`) to Y. Do not attempt to pin transitive dependencies to lower versions to work around it — toolchain-version requirements are non-negotiable upstream signals. Do not downgrade or constrain the dependency that surfaced the requirement; bump the toolchain. "
                         "LOCKFILE INTEGRITY MISMATCH (language-agnostic): if a sandbox stage fails with a hash/checksum mismatch against a lockfile (Go `checksum mismatch` / `bits may have been replaced on the origin server`, npm `EINTEGRITY: sha512-... integrity checksum failed` from `npm ci`, pnpm `ERR_PNPM_LOCKFILE_BREAKING_CHANGE` / lockfile integrity errors, Yarn `Hash mismatch detected`, Cargo `the lockfile ... is corrupt`, Poetry `Lock file is not compatible`, pip `THESE PACKAGES DO NOT MATCH THE HASHES`), DO NOT author lockfile entries by hand with synthesized hashes. Lockfile content hashes are produced by the package registry and cannot be authored — they must come from a real download. The CANONICAL FIX is to (1) author `install.sh` so it REGENERATES the lockfile from the manifest using the language's native refresh command (`go mod tidy && go mod download` for Go — never hand-write `go.sum`; `npm install` (NOT `npm ci`) when lockfile is stale; `pnpm install --no-frozen-lockfile`; `cargo generate-lockfile`; `poetry lock --no-update`; `pip-compile` for pip-tools), and (2) if a stale lockfile keeps causing integrity failures, DELETE it inside the install script and let the install command rematerialize it from scratch. Lockfile-integrity errors are NEVER fixed by editing the lockfile — only by regenerating it from the manifest. "
+                        "NATIVE BUILD TOOLCHAIN DEPENDENCIES (language-agnostic): Some package installs trigger native code compilation that requires build tools INSIDE the Docker image. The package manager itself is NOT enough — the C toolchain and language-specific build prerequisites must be present BEFORE the install step, either baked into the base image or added in `install.sh`. PROACTIVELY include the relevant build toolchain on the FIRST authoring pass whenever the manifest pulls in a historically native-compiling dependency; do not wait for a failed attempt. Canonical signals and fixes by ecosystem: "
+                        "(1) npm/yarn/pnpm: `gyp ERR! stack Error: \\`gyp\\` failed with exit code: 1`, `ModuleNotFoundError: No module named 'gyp'`, `g++: not found`, `make: not found`. Common triggers are `better-sqlite3`, `bcrypt`, `node-pty`, `sharp`, `canvas`, `node-sass`, `node-gyp`, and ANY transitive dep pulled in by `promptfoo`, `playwright`, or `puppeteer`. FIX: either choose a Debian-based Node base image (`node:20-bookworm` / `node:20`, NOT `node:20-alpine` / `node:20-slim`), OR add `apt-get update && apt-get install -y --no-install-recommends python3 make g++` to `install.sh` BEFORE `npm install`. "
+                        "(2) pip C-extension wheels: `error: command 'gcc' failed`, `Failed building wheel for {Pillow,lxml,psycopg2,cryptography,bcrypt}`, `fatal error: Python.h: No such file or directory`, `pg_config executable not found`. Triggers: `Pillow`, `lxml`, `psycopg2` (not `psycopg2-binary`), `cryptography` on non-glibc bases, `bcrypt`, `numpy`/`pandas`/`scipy` on minimal images. FIX: add `apt-get install -y build-essential python3-dev libjpeg-dev zlib1g-dev libxml2-dev libxslt1-dev libpq-dev libssl-dev libffi-dev` to `install.sh`, OR pin to versions that ship binary wheels for the base image's CPU arch, OR substitute `psycopg2-binary` for `psycopg2`. "
+                        "(3) cargo `*-sys` crates (e.g. `openssl-sys`, `libsqlite3-sys`, `libgit2-sys`): `linking with cc failed`, `pkg-config exited with status code 1`, `could not find {openssl, zlib, sqlite3} in pkg-config`. FIX: `apt-get install -y pkg-config libssl-dev libsqlite3-dev` (plus the relevant `-dev` package for the missing sys lib). "
+                        "(4) go cgo: `cgo: C compiler \"gcc\" not found`, `exec: \"gcc\": executable file not found in $PATH`. FIX: switch off `golang:*-alpine` to `golang:*-bookworm`, OR `apk add --no-cache gcc musl-dev` for alpine. "
+                        "Treat `gyp failed with exit code: 1` (npm), `Failed building wheel` (pip), `linking with cc failed` (cargo), and `cgo: C compiler ... not found` (go) as missing-build-toolchain signals — NOT as dependency-version problems. Do not respond by downgrading the dependency; respond by adding the toolchain. "
+                        "DOCKERFILE FILE AVAILABILITY (language-agnostic): a Dockerfile build only sees files that have been brought into the image via `COPY` or `ADD`. `WORKDIR` sets the working directory but does NOT copy any files into the image. Before ANY `RUN` step that touches a relative path (chmod, cat, ./<script>, sh <script>, npm install, pip install, mvn, cargo, etc.), there MUST be a `COPY` (or `ADD`) step earlier in the Dockerfile that brings that path into the image. The canonical failing pattern is: `FROM python:3.11-slim / WORKDIR /app / RUN chmod +x .coursegen/runtime/install.sh` — this fails because no `COPY` has happened yet, so install.sh is not in /app inside the container even though it exists in the build context. The canonical FIX is: `FROM python:3.11-slim / WORKDIR /app / COPY . . / RUN chmod +x .coursegen/runtime/install.sh / RUN ./.coursegen/runtime/install.sh`. If your Dockerfile references `.coursegen/runtime/*.sh`, the application source, the dependency manifest, or any other build-context file, you MUST have a `COPY . .` (or a more selective `COPY <src> <dst>`) step BEFORE the first reference. The signal `chmod: cannot access '<path>': No such file or directory`, `cp: cannot stat '<path>'`, or `./<script>: No such file or directory` DURING the Docker BUILD is missing-COPY, NOT missing-file — do NOT respond by re-authoring the script (it is already present in your `runtime_protocol_files` / `files` output); add the missing `COPY` step to the Dockerfile and keep the script content untouched. "
                         "BEFORE returning the bundle, perform an import-vs-manifest audit on every code file you author: walk every source file, collect every `import X` / `from X import ...` (Python), `require('X')` / `import ... from 'X'` (Node), `import \"X\"` (Go), `use X::...` / `extern crate X` (Rust), `import X.Y.Z` (Java/Kotlin) of a non-stdlib package, and confirm each one has a matching pinned entry in the dependency manifest (`requirements.txt`, `package.json` + `package-lock.json`, `go.mod` + `go.sum`, `Cargo.toml` + `Cargo.lock`, `pom.xml` / `build.gradle`). Common omissions that cost a full retry cycle: `pydantic_settings`, `psycopg2`/`psycopg`, `redis`, `httpx`, `sqlalchemy`, `alembic`, `uvicorn[standard]` extras, `python-jose`, `passlib` — if your code imports it, the manifest must list it. Do NOT ship code that imports a package you haven't pinned. "
                         "When the ecosystem supports a lockfile, author the install script so it can generate or refresh that lockfile deterministically inside the creator-selected base image, "
                         "and keep the checked-in dependency contract consistent with that install step so transitive dependency resolution stays reproducible under retries and fresh builds. "
@@ -811,7 +413,9 @@ class OpenAIStarterRepoAuthoringService:
             model_id=model_id,
             file_count=len(bundle.files),
         )
-        return bundle, extract_openai_usage(response, model_id)
+        from app.services.llm_router import usage_summary_from_response
+
+        return bundle, usage_summary_from_response(response, model_id=model_id)
 
     def _normalize_repo_files(self, files: list[_RepoFile]) -> dict[str, str]:
         normalized: dict[str, str] = {}
@@ -1012,13 +616,24 @@ class OpenAIStarterRepoAuthoringService:
                         text_format=text_format,
                         timeout=self.request_timeout_s,
                     )
-                return parse_structured_openai_response_with_hard_timeout(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    input=input,
+                from app.services.llm_router import (
+                    LLMTier,
+                    get_default_router,
+                    messages_to_system_user,
+                )
+
+                router = get_default_router()
+                system, user = messages_to_system_user(input)
+                return router.parse_structured(
+                    tier=LLMTier.sonnet,
+                    system=system,
+                    user=user,
                     text_format=text_format,
                     request_timeout_s=self.request_timeout_s,
+                    # Repo authoring emits the full starter bundle —
+                    # source files + Dockerfile + install.sh + manifest —
+                    # so give the response room.
+                    max_tokens=16_000,
                     extra_request_kwargs={"temperature": temperature},
                 )
             except Exception as exc:  # pragma: no cover

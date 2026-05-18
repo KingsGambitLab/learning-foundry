@@ -1,0 +1,11 @@
+<header class="auth-header" style="display:flex; justify-content:flex-end; padding:0.5rem 1rem; gap:0.75rem; font-size:0.9rem; background:#f5f5f5;">
+  {% if current_user %}
+    <span>{{ current_user.display_name or current_user.email }} ({{ current_user.role.value if current_user.role.value is defined else current_user.role }})</span>
+    <form method="post" action="/auth/logout" style="display:inline">
+      <button type="submit" style="background:none;border:none;color:#06f;cursor:pointer;font:inherit;">Log out</button>
+    </form>
+  {% else %}
+    <a href="/login">Sign in</a>
+    <a href="/register">Register</a>
+  {% endif %}
+</header>

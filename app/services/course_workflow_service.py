@@ -31,6 +31,7 @@ from app.domain.course import (
     CreateCourseDeliverableRequest,
     CreateCourseRunRequest,
     GeneratedCoursePlan,
+    OutcomeFindingsBundle,
     QueueCourseOperationResponse,
     QueueCourseRevisionResponse,
 )
@@ -73,7 +74,7 @@ from app.services.lms_service import default_learner_workspace_dir
 from app.services.publish_learner_certification_service import PublishLearnerCertificationService
 from app.services.publish_snapshot_service import PublishSnapshotService
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 class CourseWorkflowConflictError(ValueError):
@@ -111,7 +112,7 @@ def _planner_deliverables_from_course_deliverables(
 class CourseWorkflowService:
     def __init__(
         self,
-        store: SQLiteWorkflowStore,
+        store: WorkflowStore,
         workflow_service: WorkflowService,
         materializer: CourseArtifactMaterializer | None = None,
         publish_snapshot_service: PublishSnapshotService | None = None,
@@ -347,6 +348,7 @@ class CourseWorkflowService:
         course_run.notes = list(dict.fromkeys(notes))
         course_run.goal = existing.goal
         course_run.requested_learning_outcomes = existing.requested_learning_outcomes
+        course_run.lab_tutor_enabled = existing.lab_tutor_enabled
         course_run.generated_plan = self.generated_plan_from_run(course_run, notes=plan.notes)
         course_run.generation_source = source
         course_run.generation_status = generation_status
@@ -897,6 +899,17 @@ class CourseWorkflowService:
         return self.materializer.read_bundle_file(course_run.materialized_bundle, relative_path)
 
     def _compute_refreshed_run(self, course_run: CourseRun) -> CourseRun:
+        # Outcome-mode early return (Wave 5 durability fix).
+        # When the course_run carries a persisted ``OutcomeWorkflowState``
+        # the deliverables-based classifier below MUST NOT run — outcome
+        # runs have zero ``CourseDeliverableDraft`` rows by design, and
+        # the legacy ``_course_stage_from_deliverables`` would
+        # incorrectly flip them to ``blocked``. Instead, derive the
+        # surface status from the persisted state's ``status`` field.
+        outcome_blob = (course_run.payload_json or {}).get("outcome_state")
+        if outcome_blob is not None:
+            return self._refresh_outcome_run(course_run, outcome_blob)
+
         if course_run.stage == CourseRunStage.drafting and not course_run.deliverables:
             course_run.ai_usage = course_run.own_ai_usage
             return course_run
@@ -974,6 +987,55 @@ class CourseWorkflowService:
             )
         return refreshed_run
 
+    def _refresh_outcome_run(
+        self,
+        course_run: CourseRun,
+        outcome_blob: dict,
+    ) -> CourseRun:
+        """Derive course_run surface status from the persisted OutcomeWorkflowState.
+
+        Mapping mirrors the original kick-off adapter
+        (``CourseGenerationService._outcome_state_to_legacy_response``):
+
+            state.status == "blocked"           → CourseRunStatus.blocked
+            state.status == "awaiting_human"    → CourseRunStatus.awaiting_human
+            state.status == "published"         → CourseRunStatus.published
+            state.status == "running"           → CourseRunStatus.active
+
+        The course_run row is treated as the durable record; we update
+        ``updated_at`` and ``ai_usage`` but leave ``deliverables``
+        empty — outcome runs do not have ``CourseDeliverableDraft``
+        rows and never will.
+        """
+        refreshed_run = course_run.model_copy(deep=True)
+        state_status = outcome_blob.get("status", "running")
+        blocking_reasons = list(outcome_blob.get("blocking_reasons") or [])
+
+        if state_status == "blocked":
+            refreshed_run.stage = CourseRunStage.blocked
+            refreshed_run.status = CourseRunStatus.blocked
+            refreshed_run.last_error = (
+                "; ".join(blocking_reasons) or "Outcome generation blocked."
+            )
+        elif state_status == "awaiting_human":
+            refreshed_run.stage = CourseRunStage.awaiting_course_review
+            refreshed_run.status = CourseRunStatus.awaiting_human
+            refreshed_run.last_error = None
+        elif state_status == "published":
+            refreshed_run.stage = CourseRunStage.published
+            refreshed_run.status = CourseRunStatus.published
+            refreshed_run.last_error = None
+        else:
+            # ``running`` lands here when the graph paused mid-step
+            # (shouldn't happen post-resume, but defend).
+            refreshed_run.stage = CourseRunStage.drafting
+            refreshed_run.status = CourseRunStatus.active
+            refreshed_run.last_error = None
+
+        refreshed_run.updated_at = datetime.now(UTC)
+        refreshed_run.ai_usage = refreshed_run.own_ai_usage
+        return refreshed_run
+
     def _execute_publish_run(self, course_run_id: str) -> CourseRun:
         course_run = self.sync_run(course_run_id)
         if course_run.stage != CourseRunStage.ready_to_publish:
@@ -1023,24 +1085,51 @@ class CourseWorkflowService:
             certification.failure_origin == PublishCertificationFailureOrigin.repairable_generation
             and course_run.shared_workflow_run_id is not None
         ):
-            self._route_publish_failure_to_shared_workflow_revision(
-                course_run,
-                linked_runs,
-                certification,
+            # Outcome-mode runs handle their own publish-time blocking via
+            # ``OutcomeWorkflowState.blocking_reasons`` (see
+            # ``_compute_refreshed_run`` for outcome blobs). Bail out here so
+            # we never touch outcome state from the legacy code path.
+            if course_run.payload_json.get("outcome_state") is not None:
+                return
+
+            # Legacy revision repair is no longer possible: Wave 5c retired the
+            # legacy node executor and the task-agent spec edit surface, and
+            # ``create_revision_from_run`` clears the prior workspace and node
+            # executions. Cloning the shared workflow into a fresh revision
+            # would produce a re-gateable but un-repairable shell, so block
+            # the original run with a clear ``last_error`` and emit a
+            # dedicated event explaining why the course cannot proceed.
+            cert_failure_summary = message
+            course_run.updated_at = datetime.now(UTC)
+            course_run.stage = CourseRunStage.blocked
+            course_run.status = CourseRunStatus.blocked
+            course_run.active_operation = None
+            course_run.last_error = (
+                f"Certification failed: {cert_failure_summary}. "
+                f"Legacy revision repair is no longer supported; this course run "
+                f"cannot proceed. Re-author the course with the new outcome mode."
             )
+            course_run.notes = list(
+                dict.fromkeys(
+                    [
+                        *course_run.notes,
+                        "Publish was blocked because the exact learner path failed "
+                        "certification and legacy revision repair is no longer supported.",
+                    ]
+                )
+            )
+            self.store.save_course_run(course_run)
             self.store.append_course_event(
                 course_run.id,
-                "course_publish_certification_failed",
+                "course_certification_failed_blocked",
                 {
-                    "message": "Learner-path certification failed and the shared assignment workflow was sent back for revision.",
+                    "reason": cert_failure_summary,
                     "failure_origin": certification.failure_origin.value,
                     "summary": summary,
                     "detail": detail,
                 },
             )
-            raise CourseWorkflowConflictError(
-                "Learner-path certification failed on the exact publish snapshot. We routed the shared assignment workflow back into revision with the certification findings."
-            )
+            raise CourseWorkflowConflictError(course_run.last_error)
 
         course_run.updated_at = datetime.now(UTC)
         course_run.active_operation = None
@@ -1312,6 +1401,18 @@ class CourseWorkflowService:
         deliverables_with_bundle = 0
         blockers: list[str] = [course_run.last_error] if course_run.last_error else []
 
+        # Outcome-mode review surfacing (Codex #6 finding #3).
+        # When the course_run carries a persisted ``OutcomeWorkflowState``
+        # we additionally fold the spec / starter / oracle / curated
+        # findings into both the new ``outcome_findings`` bundle (which
+        # preserves per-stage attribution) and the legacy ``blockers``
+        # / ``next_actions`` fields so existing consumers still see
+        # something actionable. The bundle is ``None`` for non-outcome
+        # runs so the legacy review surface is byte-identical for them.
+        outcome_findings = self._extract_outcome_findings(course_run)
+        if outcome_findings is not None:
+            blockers.extend(self._outcome_findings_to_blockers(outcome_findings))
+
         for position, deliverable in enumerate(course_run.deliverables, start=1):
             linked_run = linked_runs.get(deliverable.workflow_run_id) if deliverable.workflow_run_id else None
             linked_summary = self._linked_workflow_summary(linked_run)
@@ -1375,6 +1476,10 @@ class CourseWorkflowService:
             workflow_runs_with_bundle=sum(1 for item in linked_workflows if item.bundle is not None),
         )
 
+        next_actions = self._next_actions(course_run, linked_workflows)
+        if outcome_findings is not None:
+            next_actions = next_actions + self._outcome_findings_to_next_actions(outcome_findings)
+
         return CourseReviewReport(
             course_run_id=course_run.id,
             title=course_run.title,
@@ -1386,10 +1491,148 @@ class CourseWorkflowService:
             materialized_bundle=course_run.materialized_bundle,
             counts=counts,
             blockers=blockers,
-            next_actions=self._next_actions(course_run, linked_workflows),
+            next_actions=next_actions,
             linked_workflows=linked_workflows,
             deliverables=deliverable_reports,
+            outcome_findings=outcome_findings,
         )
+
+    # ---------------- outcome findings helpers ----------------
+    #
+    # ``payload_json["outcome_state"]`` is the persisted
+    # ``OutcomeWorkflowState`` blob written by the outcome graph
+    # adapter. Older runs (legacy progressive / survey flows) do not
+    # carry this key — the helpers below return ``None`` in that case
+    # so the legacy review surface is preserved byte-identically.
+    #
+    # We deliberately deserialize defensively: a malformed or partial
+    # blob (e.g. a schema drift after a forward-incompatible field
+    # rename) must not crash ``review_run`` / ``creator_view`` — those
+    # are the human-gate surfaces and must stay available so the
+    # operator can investigate.
+
+    def _extract_outcome_findings(self, course_run: CourseRun) -> OutcomeFindingsBundle | None:
+        """Return the outcome findings bundle or ``None`` for legacy runs.
+
+        Reads ``course_run.payload_json["outcome_state"]`` and converts
+        the serialized state's review surfaces into the bundle. On any
+        deserialization error returns ``None`` (legacy fallback).
+        """
+        outcome_blob = (course_run.payload_json or {}).get("outcome_state")
+        if not isinstance(outcome_blob, dict):
+            return None
+
+        # Local import to avoid pulling the outcome graph into the
+        # import graph for legacy callers.
+        try:
+            from app.services.langgraph_outcome_graph import OutcomeWorkflowState
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+        try:
+            state = OutcomeWorkflowState.model_validate(outcome_blob)
+        except Exception:
+            # Malformed state — degrade to legacy review surface.
+            return None
+
+        oracle_failures: list[str] = []
+        oracle_report = state.oracle_validation_report
+        if oracle_report is not None:
+            oracle_failures = list(oracle_report.blocking_reasons)
+
+        curated_failures: list[str] = []
+        curated_report = state.curated_validation_report
+        if curated_report is not None:
+            curated_failures = list(curated_report.blocking_reasons)
+
+        return OutcomeFindingsBundle(
+            spec_review=self._order_findings_by_severity(state.spec_review_findings),
+            starter_review=self._order_findings_by_severity(state.starter_review_findings),
+            oracle_validation_failures=oracle_failures,
+            curated_validation_failures=curated_failures,
+            blocking_reasons=list(state.blocking_reasons),
+            overall_status=str(state.status),
+            stage=str(state.stage),
+        )
+
+    @staticmethod
+    def _order_findings_by_severity(
+        findings: list[ReviewerFinding],
+    ) -> list[ReviewerFinding]:
+        """Return findings sorted errors-first, then warnings, then info.
+
+        Ordering within a severity class is preserved (stable sort) so
+        the relative order produced by the graph nodes survives.
+        """
+        order = {
+            ReviewerFindingSeverity.error: 0,
+            ReviewerFindingSeverity.warning: 1,
+            ReviewerFindingSeverity.info: 2,
+        }
+        return sorted(findings, key=lambda f: order.get(f.severity, 99))
+
+    @staticmethod
+    def _outcome_findings_to_blockers(bundle: OutcomeFindingsBundle) -> list[str]:
+        """Fold the outcome findings bundle into the legacy ``blockers`` list.
+
+        Ordering, errors first across all stages: spec_review errors,
+        then starter_review errors, then oracle/curated blocking
+        reasons (which are already failure-grade), then the
+        state-level ``blocking_reasons``. Warnings are intentionally
+        not folded into ``blockers`` (they're advisory) — they remain
+        visible via ``outcome_findings.spec_review`` /
+        ``outcome_findings.starter_review``.
+        """
+        out: list[str] = []
+        for finding in bundle.spec_review:
+            if finding.severity == ReviewerFindingSeverity.error:
+                out.append(f"spec_review: {finding.title}: {finding.detail}")
+        for finding in bundle.starter_review:
+            if finding.severity == ReviewerFindingSeverity.error:
+                out.append(f"starter_review: {finding.title}: {finding.detail}")
+        for reason in bundle.oracle_validation_failures:
+            out.append(f"oracle_validation: {reason}")
+        for reason in bundle.curated_validation_failures:
+            out.append(f"curated_validation: {reason}")
+        # State-level blocking_reasons live last because they are
+        # typically the highest-level summary (e.g. "planner failed")
+        # and tend to repeat the upstream cause already surfaced
+        # above; we keep them so a blocked outcome run with no other
+        # findings still shows something concrete.
+        for reason in bundle.blocking_reasons:
+            out.append(reason)
+        # De-duplicate while preserving order — the state-level
+        # blocking_reasons sometimes mirror an upstream finding.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for blocker in out:
+            if blocker in seen:
+                continue
+            seen.add(blocker)
+            deduped.append(blocker)
+        return deduped
+
+    @staticmethod
+    def _outcome_findings_to_next_actions(
+        bundle: OutcomeFindingsBundle,
+    ) -> list[str]:
+        """Surface the ``hint`` field on findings as actionable next steps.
+
+        Reviewer findings that carry a tailored hint string (populated
+        by the judge / fallback in oracle / spec validators) are the
+        actionable revision guidance the repair LLM consumes. We
+        forward them to ``next_actions`` so the same UI surface that
+        renders next steps for legacy runs gets repair guidance for
+        outcome runs.
+        """
+        actions: list[str] = []
+        for finding in bundle.spec_review:
+            if finding.hint:
+                actions.append(finding.hint)
+        for finding in bundle.starter_review:
+            if finding.hint:
+                actions.append(finding.hint)
+        return actions
 
     def _create_survey_deliverable(self, deliverable: CreateCourseDeliverableRequest, course_title: str, course_summary: str) -> CourseDeliverableDraft:
         intake = self._generation_intake_from_design_context(

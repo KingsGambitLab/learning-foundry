@@ -24,11 +24,11 @@ from app.services.learner_brief_builder import (
 )
 from app.services.task_agent_starter_templates import default_preview_command
 from app.services.workflow_service import WorkflowService
-from app.storage.sqlite_store import SQLiteWorkflowStore
+from app.storage.workflow_store import WorkflowStore
 
 
 class PublishSnapshotService:
-    def __init__(self, store: SQLiteWorkflowStore, workflow_service: WorkflowService) -> None:
+    def __init__(self, store: WorkflowStore, workflow_service: WorkflowService) -> None:
         self.store = store
         self.workflow_service = workflow_service
 
@@ -284,6 +284,9 @@ class PublishSnapshotService:
             visible_check_command=spec.runtime_dependencies.visible_check_command or "sh .coursegen/runtime/check_visible.sh",
             preview_command=spec.runtime_dependencies.preview_command or default_preview_command(spec, host="127.0.0.1"),
             public_checks=public_checks,
+            implementation_language=spec.runtime_dependencies.implementation_language,
+            language_version=spec.runtime_dependencies.language_version,
+            package_manager=spec.runtime_dependencies.package_manager,
         )
 
     def _workspace_seed_files(

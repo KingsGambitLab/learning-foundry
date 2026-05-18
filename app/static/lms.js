@@ -43,6 +43,106 @@
       .replaceAll("'", "&#39;");
   }
 
+  // Display-only: strip a leading marketing prefix ("Production" /
+  // "Production-Quality ") from course/lab titles. Does NOT mutate data.
+  function cleanTitle(t) {
+    return String(t ?? "").replace(/^\s*Production(?:-Quality)?\s+/i, "").trim();
+  }
+
+  // 15+/18 (>=15 marks) is treated as "solved"/green in the UI. The
+  // backend status stays authoritative for data; this is render-only.
+  const GOOD_ACCURACY_MARKS = 15;
+
+  // Concept-level hint per failing rubric — bridges the gap between
+  // "what's wrong" (the worked example) and the IR/technique a learner
+  // should reach for. Deliberately a CONCEPT nudge, never the answer.
+  const RUBRIC_HINTS = {
+    llm_judge_semantic_eq:
+      "Checks your answer means the same as the reference. If it's off-topic, that's usually a retrieval problem — you answered from the wrong source, not a wording problem.",
+    llm_judge_false_premise:
+      "This question can't be answered from the provided knowledge base — the service must abstain. The skill: verify the question's core premise is actually grounded in the sources before you answer.",
+    literal_match:
+      "An exact-value check (often abstained==true on unanswerable questions). Detect when no provided source supports the question's premise.",
+    oracle_set_overlap:
+      "Citation recall: a source that supports the answer is missing from your `citations`. Revisit how you decide which sources to cite.",
+    subset_match:
+      "Citation precision: you cited a source that isn't an accepted supporting source. Only cite sources that actually support the answer.",
+    schema_match:
+      "Your response shape doesn't match the contract — check the required fields and their types.",
+    behavioral_equivalence:
+      "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
+    extractive_stub_resistance:
+      "Your output shifts (or stays templated) under reordered/distractor inputs. Make the answer depend on evidence content, not position or fixed patterns.",
+    regex_match:
+      "The field doesn't match the required format. Compare your value against the expected pattern and fix the shape, not just the content.",
+    numeric_range:
+      "A numeric field is out of the allowed range. Check the bound shown in Expected and clamp/compute the value accordingly.",
+    llm_judge_coverage:
+      "Your answer is missing key points it must convey. Make sure each required fact from the evidence is actually stated.",
+    llm_judge_false_premise:
+      "The question's premise isn't supported by the evidence — the service must abstain/refuse rather than answer.",
+  };
+  // Target-specific hints: many distinct skills grade via the same
+  // rubric kind (literal_match on action vs redactions vs abstained),
+  // so a kind-only hint is misleading. failing_rubric is now a label
+  // like "literal_match on action" — key the hint on kind + target.
+  const TARGET_HINTS = {
+    "literal_match on action":
+      "Your routing decision was wrong. Decide the policy: should this be answered, asked-to-clarify, escalated to a human, or refused?",
+    "literal_match on abstained":
+      "You should have refused/abstained — the request can't be answered from what's provided (off-scope or no supporting evidence).",
+    "literal_match on redactions":
+      "PII wasn't handled. Detect and redact emails / phones / cards / SSNs in echoed content and report how many you redacted.",
+    "literal_match on escalation_reason":
+      "When you escalate, you must include a clear escalation_reason.",
+  };
+  function hintForRubric(label) {
+    if (!label) return "";
+    const s = String(label).trim();
+    if (TARGET_HINTS[s]) return TARGET_HINTS[s];
+    const kind = s.split(" on ")[0].trim();
+    return RUBRIC_HINTS[kind] ||
+      "Re-read this scenario's Expected vs Your output above and adjust the step that produced the difference.";
+  }
+
+  // Plain-English name for the failing check. The internal rubric label
+  // ("oracle_set_overlap on citations") still drives hintForRubric, but
+  // learners never see rubric-kind jargon. Keyed on kind + target;
+  // unknown combos degrade to a readable field-oriented phrase.
+  const CHECK_LABELS = {
+    "oracle_set_overlap on citations": "Citations — a required source is missing",
+    "subset_match on citations": "Citations — an unsupported source was cited",
+    "literal_match on action": "Routing decision (answer / clarify / escalate / refuse)",
+    "behavioral_equivalence on action": "Routing decision stability",
+    "literal_match on abstained": "Abstain / refuse decision",
+    "llm_judge_false_premise on abstained": "Abstain on an unanswerable question",
+    "literal_match on redactions": "PII redaction count",
+    "numeric_range on redactions": "PII redaction count",
+    "literal_match on escalation_reason": "Escalation reason",
+    "regex_match on escalation_reason": "Escalation reason",
+    "llm_judge_semantic_eq on reply": "Answer quality (meaning)",
+    "llm_judge_coverage on reply": "Answer completeness",
+  };
+  function friendlyCheckLabel(label) {
+    if (!label) return "";
+    const s = String(label).trim();
+    if (CHECK_LABELS[s]) return CHECK_LABELS[s];
+    const [kind, field] = s.split(" on ").map((x) => x && x.trim());
+    if (kind && kind.indexOf("schema_match") === 0) return "Response shape (contract)";
+    if (!field || field === "response") {
+      if (kind && kind.indexOf("schema_match") === 0) return "Response shape (contract)";
+      return "Response check";
+    }
+    if (kind === "regex_match") return `Format of \`${field}\``;
+    if (kind === "numeric_range") return `\`${field}\` out of allowed range`;
+    return `\`${field}\` is incorrect`;
+  }
+
+  function isSolved(passed, total, backendStatus) {
+    const p = Number(passed || 0);
+    return backendStatus === "passed" || p >= GOOD_ACCURACY_MARKS || (total && p === Number(total));
+  }
+
   function titleCase(value) {
     return String(value || "")
       .replaceAll("_", " ")
@@ -139,7 +239,7 @@
     if (course.supported_for_lms) {
       return "Includes a shared learner workspace, visible checks, and assignment review.";
     }
-    return course.support_reason || "This course is being prepared and is not ready for learners yet.";
+    return course.support_reason || "This lab is being prepared and is not ready for learners yet.";
   }
 
   function courseStatusCopy(summary) {
@@ -160,9 +260,21 @@
     return kinds[summary?.status] || "neutral";
   }
 
+  function deliverableSolved(deliverable) {
+    // Display-only: a deliverable is "solved"/green when its latest
+    // submission clears the >=15 marks bar (or is a full backend pass).
+    // Defensive: fall back to false if the summary lacks per-mark data.
+    const sub = deliverable?.latest_submission;
+    if (!sub) return false;
+    return isSolved(sub.passed_tests, sub.total_tests, sub.status);
+  }
+
   function deliverableStatusCopy(deliverable, enrollment) {
     if (enrollment?.status === "completed" && deliverable.status === "passed") {
       return "Completed";
+    }
+    if (deliverableSolved(deliverable)) {
+      return "Solved";
     }
     if (enrollment?.current_deliverable_id === deliverable.deliverable_id && enrollment?.status !== "completed") {
       return "In progress";
@@ -178,6 +290,9 @@
   function deliverableStatusKind(deliverable, enrollment) {
     if (enrollment?.current_deliverable_id === deliverable.deliverable_id && enrollment?.status !== "completed") {
       return "in-progress";
+    }
+    if (deliverableSolved(deliverable)) {
+      return "passed";
     }
     const kinds = {
       available: "ready",
@@ -255,7 +370,7 @@
     if (!url) {
       return false;
     }
-    window.location.assign(url);
+    window.open(url, "_blank", "noopener,noreferrer");
     return true;
   }
 
@@ -333,10 +448,10 @@
   function updateDocumentTitle() {
     const experience = uiState.currentExperience;
     if (!experience?.enrollment) {
-      document.title = "Learner LMS · Course Gen Codex";
+      document.title = "Scaler Labs";
       return;
     }
-    const courseTitle = experience.enrollment.course_title || "Learner LMS";
+    const courseTitle = cleanTitle(experience.enrollment.course_title) || "Learner LMS";
     document.title = `${courseTitle} · Learner LMS`;
   }
 
@@ -400,7 +515,7 @@
     if (action === "enroll") {
       if (/not ready/i.test(detail) || /prepared/i.test(detail) || /learner/i.test(detail)) {
         return {
-          message: "This course is still being prepared and is not ready for learners yet.",
+          message: "This lab is still being prepared and is not ready for learners yet.",
           detail,
         };
       }
@@ -419,14 +534,14 @@
 
     if (action === "catalog") {
       return {
-        message: "We couldn't refresh the published course catalog.",
+        message: "We couldn't refresh the published lab catalog.",
         detail,
       };
     }
 
     if (action === "enrollments") {
       return {
-        message: "We couldn't refresh your course list right now.",
+        message: "We couldn't refresh your lab list right now.",
         detail,
       };
     }
@@ -452,8 +567,19 @@
     return null;
   }
 
+  // Shared trusted VS Code glyph (used on the workspace launch control
+  // and via the `:vscode:` markdown shortcode). Static SVG — safe to
+  // inject after escapeHtml since it is ours, not user input.
+  const VSCODE_GLYPH =
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" ' +
+    'style="width:15px;height:15px;vertical-align:-2px;margin-right:6px" ' +
+    'fill="currentColor"><path d="M17.6 2.3 9.9 9.6 5.3 6.1 3 7.2v9.6l2.3 1.1 ' +
+    '4.6-3.5 7.7 7.3L21 20V4l-3.4-1.7Zm.4 4.9v9.6l-5.2-4.8 5.2-4.8ZM6 9.1l2.7 ' +
+    '2.9L6 14.9V9.1Z"/></svg>';
+
   function inlineFormat(text) {
     let out = text;
+    out = out.replace(/:vscode:/g, VSCODE_GLYPH);
     out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
     out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
@@ -587,15 +713,24 @@
     `;
   }
 
-  function renderLearnerGuidance(feedback) {
+  function renderLearnerGuidance(feedback, opts) {
     if (!feedback) return "";
     const strengths = Array.isArray(feedback.strengths) ? feedback.strengths.filter(Boolean) : [];
     const whyItMatters = Array.isArray(feedback.why_it_matters) ? feedback.why_it_matters.filter(Boolean) : [];
     const likelyRootCause = Array.isArray(feedback.likely_root_cause) ? feedback.likely_root_cause.filter(Boolean) : [];
     const investigationSteps = Array.isArray(feedback.investigation_steps) ? feedback.investigation_steps.filter(Boolean) : [];
+    // When the deliverable already passes, improvements are optional —
+    // render a calm neutral panel (never the red "needs work" treatment)
+    // and soften the wording so it reads as refinement, not failure.
+    const isReady = Boolean(opts && opts.isReady);
+    const panelClass = isReady
+      ? " is-ready"
+      : (opts && opts.isStrong ? " is-strong" : "");
+    const summaryLabel = isReady ? "Optional improvements" : "Summary feedback";
+    const rootCauseLabel = isReady ? "Optional refinements" : "Likely root cause";
     return `
-      <details class="review-guidance" open>
-        <summary>Tech lead feedback</summary>
+      <details class="review-guidance${panelClass}"${isReady ? "" : " open"}>
+        <summary>${summaryLabel}</summary>
         ${feedback.learner_feedback ? `<p class="review-guidance-summary">${escapeHtml(feedback.learner_feedback)}</p>` : ""}
         ${feedback.fundamental_gap ? `
           <div class="review-guidance-section">
@@ -617,7 +752,7 @@
         ` : ""}
         ${likelyRootCause.length ? `
           <div class="review-guidance-section">
-            <h5>Likely root cause</h5>
+            <h5>${rootCauseLabel}</h5>
             <ul>${likelyRootCause.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
           </div>
         ` : ""}
@@ -628,6 +763,242 @@
           </div>
         ` : ""}
       </details>
+    `;
+  }
+
+  function summarizeDiagnostics(diagnostics) {
+    // Compress the per-rubric diagnostic list into a SHORT one-line
+    // headline + a cleaned-up tail. The dominant noise pattern when a
+    // scenario fails early is N rubrics independently reporting
+    // "<some.path> not found in captures" — all cascading from the
+    // same first failure. Detect that cluster, surface one path with
+    // "+N more", and keep other rubric kinds intact.
+    if (!Array.isArray(diagnostics) || !diagnostics.length) return { headline: "", details: [] };
+    const cleanedRaw = diagnostics.map((d) => String(d).trim()).filter(Boolean);
+    if (!cleanedRaw.length) return { headline: "", details: [] };
+    // Exact dedupe: when two rubrics emit identical diagnostic text
+    // (e.g. two ``schema_match`` instances both report
+    // "target dict failed schema check"), show it once.
+    const seen = new Set();
+    const cleaned = cleanedRaw.filter((d) => {
+      if (seen.has(d)) return false;
+      seen.add(d);
+      return true;
+    });
+
+    // Group "not found in captures" / "not present in captures" diagnostics.
+    const missingPathRe = /not (?:found|present) in captures/i;
+    const missing = cleaned.filter((d) => missingPathRe.test(d));
+    const other = cleaned.filter((d) => !missingPathRe.test(d));
+
+    const details = [...other];
+    if (missing.length) {
+      const first = missing[0];
+      if (missing.length === 1) {
+        details.push(first);
+      } else {
+        details.push(`${first} (+${missing.length - 1} more missing path${missing.length - 1 === 1 ? "" : "s"})`);
+      }
+    }
+    return { headline: details[0] || cleaned[0], details };
+  }
+
+  function parseCourseSummary(text) {
+    // Course summaries follow a stable shape:
+    //
+    //   <overview paragraph(s)>
+    //
+    //   Skills you'll learn:
+    //   - skill bullet 1       OR    1. skill bullet 1
+    //   - skill bullet 2              2. skill bullet 2
+    //   ...
+    //
+    //   <optional trailing paragraph(s)>
+    //
+    // We pull skills from the bullet block ONLY — lines that don't
+    // start with a bullet marker (``-``/``*``/``•``) or a numeric
+    // ordinal (``1.``/``2.``) are skipped, so post-bullet paragraphs
+    // like "Graded against 18 hidden scenarios..." don't pollute the
+    // skill list.
+    if (!text) return { overview: "", skills: [] };
+    const trimmed = String(text).trim();
+    const headerMatch = trimmed.match(/^([\s\S]*?)\n+\s*skills you('?ll)? learn:?\s*\n([\s\S]*)$/i);
+    if (!headerMatch) {
+      return { overview: trimmed, skills: [] };
+    }
+    const overview = headerMatch[1].trim();
+    const skillsBlock = headerMatch[3] || "";
+
+    const bulletPattern = /^\s*(?:[-*•]|\d+[.)])\s+/;
+    const skills = [];
+    for (const rawLine of skillsBlock.split(/\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (!bulletPattern.test(line)) {
+        // First non-bullet line ends the skills block — anything after
+        // is descriptive trailing prose, not a skill.
+        break;
+      }
+      const cleaned = line.replace(bulletPattern, "").trim();
+      if (cleaned) skills.push(cleaned);
+    }
+    return { overview, skills };
+  }
+
+  function shortenOverview(text, maxSentences = 1) {
+    // The first 1-2 sentences carry the elevator pitch; later sentences
+    // ("It is interesting because...") are usually marketing prose.
+    // Trim conservatively so we never cut mid-sentence.
+    if (!text) return "";
+    const sentences = text.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+    if (!sentences || !sentences.length) return text.trim();
+    return sentences.slice(0, maxSentences).join("").trim();
+  }
+
+  function skillTagLabel(skill) {
+    // The bullet sentence is long. Show just the headline noun phrase
+    // so the tag stays compact; the full sentence is preserved in the
+    // hover title.
+    if (!skill) return "";
+    const cleaned = skill.trim();
+    // Strategy 1 (most reliable): courses written as
+    //   ``Name - Description`` / ``Name — Description`` / ``Name: Description``
+    // — split on the FIRST separator and use the left as the label.
+    // Cap the label at 80 chars so a hyphen buried deep in prose can't
+    // sneak through; that's enough room for any reasonable skill name
+    // (longest seen in published courses: ~60 chars).
+    const sepMatch = cleaned.match(/^(.{1,80}?)\s+[-–—:]\s+/);
+    if (sepMatch && sepMatch[1]) {
+      return sepMatch[1].trim();
+    }
+    // Strategy 2 (no explicit separator): cut at the first connector
+    // word — these mark the end of the skill's headline noun phrase
+    // and the start of its explanation. The character class includes
+    // ``.`` so prefixes like ``Foo (Okapi)`` don't break the regex.
+    const connectorMatch = cleaned.match(
+      /^([\w\s\-/().'&]+?)\s+(?:for|using|across|with|so|that|including|which|where|based|of|to|via|by|when)\b/i
+    );
+    if (connectorMatch && connectorMatch[1]) {
+      return connectorMatch[1].trim();
+    }
+    // Strategy 3 (fallback): first 4 words.
+    const words = cleaned.split(/\s+/);
+    if (words.length <= 4) return cleaned;
+    return words.slice(0, 4).join(" ");
+  }
+
+  function renderSkillTags(skills) {
+    if (!skills || !skills.length) return "";
+    const chips = skills.map((skill) => {
+      const label = skillTagLabel(skill);
+      // Full sentence stays accessible as the hover tooltip — no data lost.
+      return `<span class="skill-tag" title="${escapeHtml(skill)}">${escapeHtml(label)}</span>`;
+    });
+    return `<div class="skill-tags" aria-label="Skills you'll learn">${chips.join("")}</div>`;
+  }
+
+  function renderTestResults(gradeReport) {
+    // Render per-test results from a DeliverableGradeReport. Outcome-mode
+    // graders set ``feedback=None`` on the ReviewArea — the actionable
+    // signal lives in each TestGradeResult's diagnostics. We keep the
+    // top-level "N checks need attention" container open by default but
+    // collapse each individual scenario's diagnostics behind a
+    // per-row <details>, with the headline (first / deduped diagnostic)
+    // shown alongside the scenario name. Cascading "not found in
+    // captures" diagnostics get folded into one line "+N more".
+    const results = Array.isArray(gradeReport?.results) ? gradeReport.results : [];
+    if (!results.length) return "";
+    const failed = results.filter((r) => r.status !== "passed");
+    const passed = results.filter((r) => r.status === "passed");
+
+    const renderOne = (result) => {
+      const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
+      const { headline, details } = summarizeDiagnostics(diagnostics);
+      const statusKind = result.status === "passed" ? "passed" : "blocked";
+      const hasMoreDetails = details.length > 1;
+      const countLabel = details.length
+        ? `${details.length} diagnostic${details.length === 1 ? "" : "s"}`
+        : "";
+      // Worked example (failed scenarios only): the actual question,
+      // the expected/gold reference, the learner's own output, and
+      // which rubric failed — so a learner fixes in one pass instead
+      // of guessing against hidden inputs.
+      const exRow = (label, val) =>
+        val
+          ? `<div class="we-row"><span class="we-label">${escapeHtml(label)}</span><code class="we-val">${escapeHtml(String(val))}</code></div>`
+          : "";
+      const isPassed = result.status === "passed";
+      const workedExample =
+        !isPassed &&
+        (result.example_question || result.example_expected || result.example_actual || result.failing_rubric)
+          ? `<div class="test-result-example">
+              ${exRow("What failed", friendlyCheckLabel(result.failing_rubric))}
+              ${exRow("Question", result.example_question)}
+              ${exRow("Expected", result.example_expected)}
+              ${exRow("Your output", result.example_actual)}
+              <div class="we-hint"><span class="we-label">How to think about it</span><span class="we-hint-text">${escapeHtml(hintForRubric(result.failing_rubric))}</span></div>
+            </div>`
+          // Passing scenarios: a positive worked example — the question
+          // and the learner's own response that satisfied every check.
+          // No Expected/failing-check/hint (nothing failed).
+          : isPassed && (result.example_question || result.example_actual)
+          ? `<div class="test-result-example test-result-example-passed">
+              ${exRow("Question", result.example_question)}
+              ${exRow("Your output", result.example_actual)}
+            </div>`
+          : "";
+      // Each test is a <details> whose summary carries the head row + the
+      // one-line headline. The diagnostic count sits on the right of the
+      // head row (uses the previously-dead space) and doubles as the
+      // expand affordance. Body is the full deduped diagnostic list.
+      // A row is expandable when it has a body: extra diagnostics or a
+      // worked example (failing OR the new passing positive example).
+      const expandable = hasMoreDetails || !!workedExample;
+      return `
+        <li class="test-result test-result-${escapeHtml(statusKind)}">
+          <details class="test-result-row${expandable ? " is-expandable" : ""}">
+            <summary class="test-result-summary-row">
+              <div class="test-result-head">
+                <span class="test-result-head-left">
+                  ${renderStatusPill(statusKind, titleCase(result.status))}
+                  <strong class="test-result-name">${escapeHtml(result.test_id)}</strong>
+                  ${result.kind ? `<span class="test-result-kind">${escapeHtml(result.kind)}</span>` : ""}
+                </span>
+                <span class="test-result-meta">
+                  ${countLabel ? `<span class="test-result-count">${escapeHtml(countLabel)}</span>` : ""}
+                  ${expandable ? `<span class="test-result-toggle" aria-hidden="true"></span>` : ""}
+                </span>
+              </div>
+              ${headline ? `<p class="test-result-headline">${escapeHtml(headline)}</p>` : ""}
+            </summary>
+            ${hasMoreDetails ? `
+              <ul class="test-result-diagnostics">
+                ${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
+              </ul>
+            ` : ""}
+            ${workedExample}
+          </details>
+        </li>
+      `;
+    };
+
+    // Per-scenario detail collapses by default. The headline summary
+    // (rendered by ``renderLearnerGuidance`` from the populated
+    // ``feedback`` object) is the primary view; drill into the full
+    // list only when the learner wants to see every scenario.
+    return `
+      ${failed.length ? `
+        <details class="review-guidance">
+          <summary>${escapeHtml(`See all ${failed.length} failing check${failed.length === 1 ? "" : "s"}`)}</summary>
+          <ul class="test-result-list">${failed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
+      ${passed.length ? `
+        <details class="review-guidance is-strong">
+          <summary>${escapeHtml(`See all ${passed.length} passing check${passed.length === 1 ? "" : "s"}`)}</summary>
+          <ul class="test-result-list">${passed.map(renderOne).join("")}</ul>
+        </details>
+      ` : ""}
     `;
   }
 
@@ -663,7 +1034,7 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy">
           <p class="eyebrow">Continue where you left off</p>
-          <h1>Loading your latest course...</h1>
+          <h1>Loading your latest lab...</h1>
           <p class="focus-subcopy">We are fetching your project brief, workspace status, and review history.</p>
         </div>
       `;
@@ -674,7 +1045,7 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy">
           <p class="eyebrow">Continue where you left off</p>
-          <h1>${escapeHtml(selectedSummary.course_title)}</h1>
+          <h1>${escapeHtml(cleanTitle(selectedSummary.course_title))}</h1>
           <p class="focus-subtitle">Loading your project brief...</p>
         </div>
       `;
@@ -687,10 +1058,10 @@
       learnerFocus.innerHTML = `
         <div class="hero-copy empty-state">
           <p class="eyebrow">Learner LMS</p>
-          <h1>Pick a published course and start building.</h1>
-          <p>Enroll once and we will keep your shared workspace, project brief, and review history pinned here. ${escapeHtml(String(readyCourses))} learner-ready course${readyCourses === 1 ? "" : "s"} below.</p>
+          <h1>Pick a published lab and start building.</h1>
+          <p>Enroll once and we will keep your shared workspace, project brief, and review history pinned here. ${escapeHtml(String(readyCourses))} learner-ready lab${readyCourses === 1 ? "" : "s"} below.</p>
           <div class="focus-actions">
-            <a class="button primary" href="#catalog-panel">Browse published courses ↓</a>
+            <a class="button primary" href="/courses">Browse published labs</a>
           </div>
         </div>
       `;
@@ -711,10 +1082,12 @@
     const canLaunchWorkspace = enrollment.status !== "completed";
     const canSubmit = enrollment.status !== "completed";
 
+    // Workspace control reuses the shared VS Code glyph (module const).
+    const labelWithIcon = VSCODE_GLYPH + escapeHtml(launchLabel);
     const workspaceRunning = experience?.workspace_session?.status === "running";
     const workspaceAction = session?.editor_url
       ? `
-        <a class="button primary" href="${escapeHtml(session.editor_url)}">${escapeHtml(launchLabel)}</a>
+        <a class="button primary" href="${escapeHtml(session.editor_url)}" target="_blank" rel="noopener noreferrer">${labelWithIcon}</a>
       `
       : `
         <button
@@ -722,11 +1095,11 @@
           type="button"
           data-action="launch-workspace"
           ${canLaunchWorkspace ? "" : "disabled"}
-        >${escapeHtml(launchLabel)}</button>
+        >${labelWithIcon}</button>
       `;
 
     const eyebrowText = enrollment.status === "completed"
-      ? "Course complete"
+      ? "Lab complete"
       : latestSubmission
         ? "Resume your project"
         : `Project review areas: ${progress.total}`;
@@ -735,13 +1108,18 @@
       ? `${latestSubmission.passed_tests}/${latestSubmission.total_tests} checks passed`
       : "Not submitted yet";
 
+    const parsedSummary = parseCourseSummary(enrollment.course_summary);
+    const shortOverview = shortenOverview(parsedSummary.overview)
+      || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.";
+
     learnerFocus.innerHTML = `
       <div class="focus-layout">
         <div class="focus-main">
-          <p class="course-chip">${escapeHtml(enrollment.course_title)}</p>
+          <p class="course-chip">${escapeHtml(cleanTitle(enrollment.course_title))}</p>
           <p class="eyebrow">${escapeHtml(eyebrowText)}</p>
-          <h1>${escapeHtml(enrollment.course_title)}</h1>
-          <p class="focus-subcopy">${escapeHtml(enrollment.course_summary || "Build the shared project in one workspace and use the deliverable scorecard to see what still needs work.")}</p>
+          <h1>${escapeHtml(cleanTitle(enrollment.course_title))}</h1>
+          <p class="focus-subcopy">${escapeHtml(shortOverview)}</p>
+          ${renderSkillTags(parsedSummary.skills)}
 
           <dl class="deliverable-quickref" aria-label="Project at a glance">
             <div class="quickref-row">
@@ -832,9 +1210,9 @@
     const experience = uiState.currentExperience;
     if (!experience) {
       deliverablesPanel.classList.add("hidden");
-      deliverablesBody.innerHTML = '<p class="empty">Open a course to see its deliverables.</p>';
+      deliverablesBody.innerHTML = '<p class="empty">Open a lab to see its deliverables.</p>';
       submissionHistory.classList.add("hidden");
-      submissionHistoryBody.innerHTML = "<p class=\"empty\">Open a course to see its review history.</p>";
+      submissionHistoryBody.innerHTML = "<p class=\"empty\">Open a lab to see its review history.</p>";
       return;
     }
 
@@ -844,7 +1222,19 @@
     const latestReport = experience.latest_assignment_report;
     const latestSubmission = experience.latest_assignment_submission;
 
-    deliverablesPanel.classList.remove("hidden");
+    // Outcome-mode courses always ship a single ``outcome_main``
+    // deliverable; in that case the per-deliverable Project Review
+    // panel is redundant with the header (which already shows the
+    // latest score) and the Summary feedback panel below (which
+    // surfaces the actionable detail). Hide it so the page reads
+    // cleanly. Multi-deliverable legacy courses keep the panel
+    // because it's the only place the per-deliverable scorecard
+    // lives.
+    if (deliverables.length <= 1) {
+      deliverablesPanel.classList.add("hidden");
+    } else {
+      deliverablesPanel.classList.remove("hidden");
+    }
     submissionHistory.classList.remove("hidden");
     deliverablesTitle.textContent = `${progress.total} deliverable${progress.total === 1 ? "" : "s"}`;
     deliverablesCaption.textContent = latestReport
@@ -853,8 +1243,11 @@
 
     deliverablesBody.innerHTML = deliverables.map((deliverable) => {
       const latestGrade = deliverable.latest_submission;
+      const latestGradeSolved = latestGrade
+        ? isSolved(latestGrade.passed_tests, latestGrade.total_tests, latestGrade.status)
+        : false;
       const statusLabel = latestGrade
-        ? (latestGrade.status === "passed" ? "Ready" : "Needs work")
+        ? (latestGradeSolved ? "Solved" : "Needs work")
         : "Not reviewed";
       return `
         <div class="deliverable-row">
@@ -863,7 +1256,7 @@
             <h4>${escapeHtml(deliverable.title)}</h4>
             <p>${escapeHtml(deliverable.objective || "")}</p>
             <div class="deliverable-row-meta">
-              ${renderStatusPill(latestGrade ? (latestGrade.status === "passed" ? "passed" : "blocked") : "neutral", statusLabel)}
+              ${renderStatusPill(latestGrade ? (latestGradeSolved ? "passed" : "blocked") : "neutral", statusLabel)}
               ${latestGrade ? renderInfoPill("Last review", `${latestGrade.passed_tests}/${latestGrade.total_tests}`) : ""}
             </div>
           </div>
@@ -871,12 +1264,15 @@
       `;
     }).join("");
 
+    const latestSubmissionSolved = latestSubmission
+      ? isSolved(latestSubmission.passed_tests, latestSubmission.total_tests, latestSubmission.status)
+      : false;
     const latestCard = latestSubmission ? `
-      <div class="latest-grade-card ${latestSubmission.status === "passed" ? "passed" : "needs-work"}">
+      <div class="latest-grade-card ${latestSubmissionSolved ? "passed" : "needs-work"}">
         <p class="card-eyebrow">Latest project review</p>
         <div class="latest-grade-row">
           <strong>${escapeHtml(`${latestSubmission.passed_tests}/${latestSubmission.total_tests} tests passed`)}</strong>
-          ${renderStatusPill(latestSubmission.status === "passed" ? "passed" : "blocked", titleCase(latestSubmission.status))}
+          ${renderStatusPill(latestSubmissionSolved ? "passed" : "blocked", latestSubmissionSolved ? "Solved" : titleCase(latestSubmission.status))}
         </div>
         <p class="latest-grade-meta">${escapeHtml(`Pass rate ${percent(latestSubmission.pass_rate)} · Submitted ${formatDate(latestSubmission.created_at)}`)}</p>
       </div>
@@ -913,17 +1309,29 @@
         <p>Each submission reviews the whole project, then groups the findings by deliverable.</p>
         ${latestReport ? `
           <div class="submission-list review-area-list">
-            ${latestReport.review_areas.map((reviewArea) => `
-              <div class="submission-item">
+            ${latestReport.review_areas.map((reviewArea) => {
+              const gr = reviewArea.grade_report;
+              // Tri-state status: passed (100%), strong (>=83%), needs-work.
+              // 83% matches the user's "15+/18 turns green" calibration —
+              // captures "good solution" without requiring perfection.
+              const passRate = gr.total_tests ? (gr.passed_tests / gr.total_tests) : 0;
+              const isPassed = isSolved(gr.passed_tests, gr.total_tests, gr.status);
+              const isStrong = !isPassed && passRate >= 0.83;
+              const pillKind = isPassed ? "passed" : (isStrong ? "passed" : "blocked");
+              const pillLabel = isPassed ? "Ready" : (isStrong ? "Strong" : "Needs work");
+              return `
+              <div class="submission-item ${isStrong ? "is-strong" : ""} ${isPassed ? "is-ready" : ""}">
                 <strong>${escapeHtml(reviewArea.title)}</strong>
                 <p>${escapeHtml(reviewArea.objective)}</p>
                 <div class="submission-item-meta">
-                  ${renderStatusPill(reviewArea.grade_report.status === "passed" ? "passed" : "blocked", reviewArea.grade_report.status === "passed" ? "Ready" : "Needs work")}
-                  ${renderInfoPill("Checks", `${reviewArea.grade_report.passed_tests}/${reviewArea.grade_report.total_tests}`)}
+                  ${renderStatusPill(pillKind, pillLabel)}
+                  ${renderInfoPill("Checks", `${gr.passed_tests}/${gr.total_tests}`)}
                 </div>
-                ${reviewArea.feedback && reviewArea.grade_report.status !== "passed" ? renderLearnerGuidance(reviewArea.feedback) : ""}
+                ${reviewArea.feedback ? renderLearnerGuidance(reviewArea.feedback, { isStrong, isReady: isPassed }) : ""}
+                ${renderTestResults(gr)}
               </div>
-            `).join("")}
+              `;
+            }).join("")}
           </div>
         ` : ""}
         <div class="submission-list">
@@ -949,8 +1357,8 @@
     if (!enrollments.length) {
       enrollmentList.innerHTML = `
         <div class="summary-card empty-state">
-          <h3>No courses yet</h3>
-          <p>Choose a learner-ready course below and we will pin it here once you enroll.</p>
+          <h3>No labs yet</h3>
+          <p>Choose a learner-ready lab below and we will pin it here once you enroll.</p>
         </div>
       `;
       return;
@@ -969,7 +1377,7 @@
               ${renderStatusPill(courseStatusKind(item), courseStatusCopy(item))}
               ${renderInfoPill("Deliverables", `${item.completed_deliverable_count}/${item.deliverable_count}`)}
             </div>
-            <h3>${escapeHtml(item.course_title)}</h3>
+            <h3>${escapeHtml(cleanTitle(item.course_title))}</h3>
             <p>${escapeHtml(summaryLine)}</p>
             <div class="micro-progress"><span style="width: ${progress.positionPercent}%"></span></div>
           </div>
@@ -1023,7 +1431,7 @@
               ${renderInfoPill("Deliverables", String(course.deliverable_count))}
               ${renderInfoPill("Published", formatDate(course.published_at))}
             </div>
-            <h3>${escapeHtml(course.title)}</h3>
+            <h3>${escapeHtml(cleanTitle(course.title))}</h3>
             <p>${escapeHtml(course.summary)}</p>
             <p class="catalog-helper ${isBlocked ? "warning" : ""}">
               ${escapeHtml(isBlocked
@@ -1125,6 +1533,7 @@
       await refreshEnrollments();
       await loadEnrollment(enrollment.id);
       syncUrlState();
+      syncLabTutor();
       showToast("success", "Enrollment created", "Your project workspace is ready to open.");
     } catch (error) {
       const friendly = normalizeError("enroll", error);
@@ -1269,6 +1678,7 @@
       await loadEnrollment(target.dataset.openEnrollment);
       syncUrlState();
       renderAll();
+      syncLabTutor();
       return;
     }
 
@@ -1284,11 +1694,68 @@
     }
   });
 
+  // ── Lab Tutor widget integration ──────────────────────────────────────────
+  // Dynamically injects lab-tutor.js and mounts/unmounts the floating chat
+  // widget based on the active enrollment's course lab_tutor_enabled flag.
+
+  let labTutorScriptInjected = false;
+
+  function labTutorEnabledForCurrentEnrollment() {
+    const experience = uiState.currentExperience;
+    if (!experience?.enrollment?.course_run_id) return false;
+    const courseRunId = experience.enrollment.course_run_id;
+    const catalog = state.catalog?.courses || [];
+    const course = catalog.find((c) => c.course_run_id === courseRunId);
+    return course?.lab_tutor_enabled === true;
+  }
+
+  function syncLabTutor() {
+    const enabled = labTutorEnabledForCurrentEnrollment();
+    if (!enabled) {
+      if (typeof window.__labTutorUnmount === "function") {
+        window.__labTutorUnmount();
+      }
+      return;
+    }
+
+    const experience = uiState.currentExperience;
+    const enrollmentId = experience?.enrollment?.id || "anon";
+    const courseTitle = experience?.enrollment?.course_title || "";
+
+    if (!labTutorScriptInjected) {
+      labTutorScriptInjected = true;
+      const script = document.createElement("script");
+      script.src = "/static/lab-tutor.js";
+      script.dataset.sessionId = "lms-" + enrollmentId;
+      script.dataset.assignmentTitle = courseTitle;
+      script.dataset.enrollmentId = enrollmentId;
+      script.addEventListener("load", () => {
+        if (typeof window.__labTutorMount === "function") {
+          window.__labTutorMount({
+            sessionId: "lms-" + enrollmentId,
+            assignmentTitle: courseTitle,
+            enrollmentId: enrollmentId,
+          });
+        }
+      });
+      document.head.appendChild(script);
+    } else if (typeof window.__labTutorMount === "function") {
+      window.__labTutorMount({
+        sessionId: "lms-" + enrollmentId,
+        assignmentTitle: courseTitle,
+        enrollmentId: enrollmentId,
+      });
+    }
+  }
+
   renderAll();
+  syncLabTutor();
 
   const initialEnrollment = selectedEnrollmentSummary();
   if (initialEnrollment?.id) {
-    loadEnrollment(initialEnrollment.id).catch(() => {
+    loadEnrollment(initialEnrollment.id).then(() => {
+      syncLabTutor();
+    }).catch(() => {
       renderAll();
     });
   }
@@ -1307,12 +1774,14 @@
     if (nextEnrollment?.id && nextEnrollment.id !== uiState.currentEnrollmentId) {
       try {
         await loadEnrollment(nextEnrollment.id);
+        syncLabTutor();
       } catch (_error) {
         renderAll();
       }
       return;
     }
 
+    syncLabTutor();
     renderAll();
   });
 })();

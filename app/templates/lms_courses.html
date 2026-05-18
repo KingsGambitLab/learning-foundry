@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>My Courses · Course Gen Codex</title>
+    <title>Labs · __BRAND_NAME__</title>
+    <link rel="icon" href="__BRAND_ICON_URL__" />
     <link rel="stylesheet" href="/static/app-shell.css?v=__LMS_ASSET_VERSION__" />
     <link rel="stylesheet" href="/static/lms.css?v=__LMS_ASSET_VERSION__" />
   </head>
@@ -11,61 +12,27 @@
     <div class="page">
       <div class="page-shell">
         <header class="topbar">
-          <a class="brand" href="/">
-            <span class="brand-mark">CG</span>
+          <a class="brand" href="/courses">
+            <img class="brand-mark-img" src="__BRAND_ICON_URL__" alt="Scaler" />
             <span class="brand-copy">
-              <span class="brand-label">Learner experience</span>
-              <span class="brand-title">Course Gen Codex</span>
+              <span class="brand-title">__BRAND_NAME__</span>
             </span>
           </a>
-          <nav class="topnav" aria-label="Primary">
-            <a class="topnav-link" href="/">Learner LMS</a>
-            <a class="topnav-link active" href="/courses">Courses</a>
-            <a class="topnav-link" href="/create-course">Course builder</a>
-            <a class="topnav-link" href="/docs">API docs</a>
-          </nav>
+          __LMS_NAV__
         </header>
 
         <main class="container">
           <div id="page-message" class="message"></div>
 
           <header class="courses-page-header">
-            <p class="eyebrow">Courses</p>
-            <h1>My courses &amp; published catalog</h1>
-            <p class="page-subtitle">Resume an enrollment or browse new courses to start a fresh codebase.</p>
+            <p class="eyebrow">Labs</p>
+            <h1>Your labs</h1>
+            <p class="page-subtitle">Resume a lab you’ve started, or enrol in a new one.</p>
           </header>
 
-          <div class="courses-tabs" role="tablist" aria-label="Courses views">
-            <button
-              id="my-courses-tab"
-              class="courses-tab active"
-              type="button"
-              role="tab"
-              aria-selected="true"
-              aria-controls="my-courses-pane"
-              data-courses-tab="my"
-            >My courses</button>
-            <button
-              id="all-courses-tab"
-              class="courses-tab"
-              type="button"
-              role="tab"
-              aria-selected="false"
-              aria-controls="all-courses-pane"
-              data-courses-tab="all"
-            >All courses</button>
-          </div>
-
-          <section id="my-courses-pane" class="courses-pane">
-            <div id="enrollment-list" class="course-rows">
-              <div class="empty">No enrollments yet. Switch to All courses to enroll in something.</div>
-            </div>
-          </section>
-
-          <section id="all-courses-pane" class="courses-pane hidden">
-            <p id="catalog-caption" class="page-subtitle catalog-caption"></p>
-            <div id="catalog-list" class="catalog-grid">
-              <div class="empty">Checking for published courses...</div>
+          <section class="courses-pane">
+            <div id="labs-list" class="course-rows">
+              <div class="empty">Loading labs…</div>
             </div>
           </section>
         </main>

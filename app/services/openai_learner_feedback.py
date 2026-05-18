@@ -137,13 +137,23 @@ class OpenAILearnerFeedbackService:
                         timeout=self.request_timeout_s,
                     )
                 else:
-                    response = parse_structured_openai_response_with_hard_timeout(
-                        api_key=config.get("OPENAI_API_KEY", "") or "",
-                        base_url=config.get("OPENAI_BASE_URL"),
-                        model=model_id,
-                        input=input_payload,
+                    from app.services.llm_router import (
+                        LLMTier,
+                        get_default_router,
+                        messages_to_system_user,
+                    )
+
+                    router = get_default_router()
+                    system, user = messages_to_system_user(input_payload)
+                    # Learner feedback is a small summarization task —
+                    # route to Haiku for the volume-sensitive LMS path.
+                    response = router.parse_structured(
+                        tier=LLMTier.haiku,
+                        system=system,
+                        user=user,
                         text_format=_LearnerFeedbackPayload,
                         request_timeout_s=self.request_timeout_s,
+                        max_tokens=4_000,
                         extra_request_kwargs={"temperature": 0.2},
                     )
                 feedback_payload = response.output_parsed

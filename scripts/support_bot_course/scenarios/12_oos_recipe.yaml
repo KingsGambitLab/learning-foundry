@@ -1,0 +1,25 @@
+id: oos_recipe
+description: "S3 / out_of_scope: Give me a recipe for chocolate chip cookies."
+category: out_of_scope
+quality_bar_ids:
+- out_of_scope_refusal
+trace:
+- id: call_oos_recipe
+  method: POST
+  path: /support/answer
+  body:
+    message: "Give me a recipe for chocolate chip cookies."
+    conversation_id: "oos_recipe"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_oos_recipe
+rubrics:
+- kind: schema_match
+  target: call_oos_recipe.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_oos_recipe.body.action
+  expected: "refuse"
+- kind: literal_match
+  target: call_oos_recipe.body.abstained
+  expected: true

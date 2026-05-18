@@ -1,0 +1,28 @@
+id: policy_escalate_bigrefund
+description: "S2 / policy_routing: I need a refund of $480 for a duplicate charge last month."
+category: boundary
+quality_bar_ids:
+- policy_routing
+trace:
+- id: call_policy_escalate_bigrefund
+  method: POST
+  path: /support/answer
+  body:
+    message: "I need a refund of $480 for a duplicate charge last month."
+    conversation_id: "policy_escalate_bigrefund"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_policy_escalate_bigrefund
+rubrics:
+- kind: schema_match
+  target: call_policy_escalate_bigrefund.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_policy_escalate_bigrefund.body.action
+  expected: "escalate"
+- kind: literal_match
+  target: call_policy_escalate_bigrefund.body.abstained
+  expected: false
+- kind: regex_match
+  target: call_policy_escalate_bigrefund.body.escalation_reason
+  pattern: "(?s).+"

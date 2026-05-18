@@ -1,0 +1,28 @@
+id: policy_escalate_security
+description: "S2 / policy_routing: Someone logged into my account without permission and I think it was hacked."
+category: boundary
+quality_bar_ids:
+- policy_routing
+trace:
+- id: call_policy_escalate_security
+  method: POST
+  path: /support/answer
+  body:
+    message: "Someone logged into my account without permission and I think it was hacked."
+    conversation_id: "policy_escalate_security"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_policy_escalate_security
+rubrics:
+- kind: schema_match
+  target: call_policy_escalate_security.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_policy_escalate_security.body.action
+  expected: "escalate"
+- kind: literal_match
+  target: call_policy_escalate_security.body.abstained
+  expected: false
+- kind: regex_match
+  target: call_policy_escalate_security.body.escalation_reason
+  pattern: "(?s).+"

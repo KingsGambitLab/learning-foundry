@@ -89,6 +89,12 @@ class ReviewerFinding(BaseModel):
     detail: str
     code: str | None = None
     location: str | None = None
+    # Optional, actionable revision guidance for the repair LLM. Populated
+    # from BundleValidationIssue.hint (LLM-judge or substring fallback) so
+    # the repair node sees concrete copy-pasteable suggestions instead of
+    # having to guess from the message alone. ``None`` for findings that
+    # do not have a tailored hint.
+    hint: str | None = None
 
 
 class FailureContextValidationIssue(BaseModel):

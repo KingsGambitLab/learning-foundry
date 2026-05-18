@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.domain.course import CourseRunStatus, CourseRunSummary
 from app.domain.grading import AssignmentGradeReport, DeliverableGradeReport
@@ -44,6 +44,7 @@ class PublishedCourseSummary(BaseModel):
     support_reason: str | None = None
     course_run_status: CourseRunStatus
     published_at: datetime
+    lab_tutor_enabled: bool = False
 
     @classmethod
     def from_run(
@@ -58,6 +59,7 @@ class PublishedCourseSummary(BaseModel):
         support_reason: str | None,
         publish_snapshot_id: str | None,
         published_at: datetime | None = None,
+        lab_tutor_enabled: bool = False,
     ) -> "PublishedCourseSummary":
         return cls(
             course_run_id=run.id,
@@ -71,6 +73,7 @@ class PublishedCourseSummary(BaseModel):
             support_reason=support_reason,
             course_run_status=run.status,
             published_at=published_at or run.updated_at,
+            lab_tutor_enabled=lab_tutor_enabled,
         )
 
 
@@ -79,6 +82,13 @@ class PublishedCourseCatalog(BaseModel):
 
 
 class LearnerWorkspaceSession(BaseModel):
+    """Workspace session record.
+
+    Internal fields (server-side authoring/runtime paths and ports) are
+    typed optional so the API layer can null them out before returning
+    to a learner client. Only `editor_url` is meant to be learner-facing.
+    """
+
     id: str
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
@@ -86,12 +96,28 @@ class LearnerWorkspaceSession(BaseModel):
     created_at: datetime
     updated_at: datetime
     status: LearnerWorkspaceSessionStatus
-    workspace_root: str
+    workspace_root: str | None = None
     container_name: str | None = None
     host_port: int | None = None
     editor_url: str | None = None
     image_name: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+    def redact_for_learner(self) -> "LearnerWorkspaceSession":
+        """Return a copy without server-internal paths/ports.
+
+        Learners only need `editor_url` + `status` to render the editor
+        launch button; the workspace_root / container_name / host_port /
+        image_name fields are operator-only.
+        """
+        return self.model_copy(
+            update={
+                "workspace_root": None,
+                "container_name": None,
+                "host_port": None,
+                "image_name": None,
+            }
+        )
 
 
 class LearnerSubmissionRecord(BaseModel):
@@ -106,6 +132,12 @@ class LearnerSubmissionRecord(BaseModel):
     pass_rate: float = Field(ge=0.0, le=1.0)
     grade_report: DeliverableGradeReport
     assignment_report: AssignmentGradeReport | None = None
+    # SHA-256 of the grader bundle that was used to grade this submission.
+    # Populated for outcome-mode submissions so post-hoc drift detection
+    # is possible if a course author modifies the bundle between
+    # submissions against the same publish snapshot. None for legacy or
+    # non-outcome submissions.
+    grader_bundle_digest: str | None = None
 
 
 class LearnerDeliverableProgress(BaseModel):
@@ -203,8 +235,9 @@ class LearnerEnrollmentList(BaseModel):
 
 
 class CreateEnrollmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     course_run_id: str
-    learner_id: str = "local-learner"
 
 
 class LaunchWorkspaceRequest(BaseModel):
@@ -224,14 +257,17 @@ class LearnerWorkspaceFileSummary(BaseModel):
 class LearnerWorkspaceFileList(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    # `workspace_root` is the absolute server path. It is internal —
+    # learners get an empty string. Operators/creators see the real path
+    # via creator-side audit tools, not this learner-facing API.
+    workspace_root: str = ""
     files: list[LearnerWorkspaceFileSummary] = Field(default_factory=list)
 
 
 class LearnerWorkspaceFileContent(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    workspace_root: str = ""
     relative_path: str
     media_type: str
     content: str
@@ -246,7 +282,7 @@ class WriteLearnerWorkspaceFileRequest(BaseModel):
 class LearnerWorkspaceFileWriteResult(BaseModel):
     enrollment_id: str
     deliverable_id: str = Field(validation_alias="deliverable_id")
-    workspace_root: str
+    workspace_root: str = ""
     relative_path: str
     media_type: str
     size_bytes: int = Field(ge=0)

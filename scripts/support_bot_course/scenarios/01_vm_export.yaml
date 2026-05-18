@@ -1,0 +1,38 @@
+id: vm_export
+description: "S1 / happy_path: We're switching tools soon \u2014 before we leave, how do I take a complete copy of all the stu"
+category: happy_path
+quality_bar_ids:
+- grounded_citations
+- answer_faithfulness
+trace:
+- id: call_vm_export
+  method: POST
+  path: /support/answer
+  body:
+    message: "We're switching tools soon \u2014 before we leave, how do I take a complete copy of all the stuff we've stored with you?"
+    conversation_id: "vm_export"
+    history: []
+    kb_articles: "${setup_data.kb.articles}"
+  capture: call_vm_export
+rubrics:
+- kind: schema_match
+  target: call_vm_export.body
+  must_have_fields: ["reply", "action", "citations", "redactions", "abstained"]
+- kind: literal_match
+  target: call_vm_export.body.action
+  expected: "answer"
+- kind: literal_match
+  target: call_vm_export.body.abstained
+  expected: false
+- kind: oracle_set_overlap
+  target: call_vm_export.body.citations
+  gold_set_path: setup_data.gold.vm_export.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_vm_export.body.citations
+  acceptable_source: setup_data.gold.vm_export.citations
+  min_overlap: 1.0
+- kind: llm_judge_semantic_eq
+  target: call_vm_export.body.reply
+  gold_path: setup_data.gold.vm_export.reply
+  strictness: lenient
