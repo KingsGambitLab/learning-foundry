@@ -96,9 +96,20 @@ _SKIP_DIRS = {
 _SKIP_SUFFIXES = {".lock", ".pyc", ".pyo", ".so", ".o", ".a", ".class", ".jar"}
 _BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz", ".bin"}
 
-# Hard size limits to keep prompt cost bounded.
-_PER_FILE_MAX_BYTES = 8 * 1024   # skip a file if it exceeds this on its own
-_TOTAL_CODE_MAX_BYTES = 40 * 1024  # truncate code-snapshot collection at this aggregate
+# Hard size limits to keep prompt cost bounded. NOTE: over-limit files
+# are TRUNCATED, never skipped — a learner's implemented app.py is
+# routinely >8KB and dropping it entirely is why the tutor used to say
+# "I can't see your app.py, paste it".
+_PER_FILE_MAX_BYTES = 24 * 1024
+_TOTAL_CODE_MAX_BYTES = 64 * 1024
+
+# Source files the learner actually edits — these win the snapshot
+# budget over README/sample-data/config so the tutor always sees code.
+_CODE_SUFFIXES = {
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt", ".swift",
+    ".scala", ".sql", ".sh", ".rs", ".ex", ".exs",
+}
 
 # Failure detail caps.
 _FAILURE_MAX_BYTES = 4 * 1024
@@ -125,12 +136,19 @@ def _load_env_file(path: str | None) -> None:
 
 
 def _read_text_safely(path: Path, max_bytes: int) -> str | None:
+    """Read up to ``max_bytes`` of text. Over-limit files are
+    TRUNCATED (with a marker), never dropped — the learner's main code
+    file is frequently large and silently skipping it blinds the tutor.
+    Returns None only for non-files / OS errors."""
     try:
         if not path.is_file():
             return None
-        if path.stat().st_size > max_bytes:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fh:
+            raw = fh.read(max_bytes + 1)
+        text = raw[:max_bytes].decode("utf-8", errors="replace")
+        if len(raw) > max_bytes:
+            text += "\n... [truncated]\n"
+        return text
     except OSError as exc:
         logger.debug("[tutor] could not read %s: %s", path, exc)
         return None
@@ -158,8 +176,19 @@ def _build_code_snapshot(root: Path) -> str:
     if not files:
         return ""
 
-    # Sort by modification time (newest first) so the learner's recent edits win the budget.
-    files.sort(key=lambda pair: pair[1].stat().st_mtime, reverse=True)
+    # Learner source code first (so app.py always wins the budget over
+    # README / sample data / config, whose mtimes get bumped by platform
+    # re-publishes), then most-recently-modified within each group.
+    def _rank(pair):
+        rel, abs_path = pair
+        is_code = abs_path.suffix.lower() in _CODE_SUFFIXES
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (0 if is_code else 1, -mtime)
+
+    files.sort(key=_rank)
 
     tree_lines = [str(rel) for rel, _ in files[:80]]
     body_lines: list[str] = []
