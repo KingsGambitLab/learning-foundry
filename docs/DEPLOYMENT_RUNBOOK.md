@@ -143,11 +143,11 @@ mandatory.
 
 ### Prerequisites (gather before touching the host)
 
-- `<DOMAIN>` — the hostname that will serve the app (e.g.
+- `labs.scaler.com` — the hostname that will serve the app (e.g.
   `labs.example.com`). Fill in everywhere below.
-- DNS: an **A record** `<DOMAIN> → 18.236.242.248`, propagated
-  (`dig +short <DOMAIN>` returns the IP) BEFORE running certbot
-  (HTTP-01 challenge hits `<DOMAIN>:80`).
+- DNS: an **A record** `labs.scaler.com → 18.236.242.248`, propagated
+  (`dig +short labs.scaler.com` returns the IP) BEFORE running certbot
+  (HTTP-01 challenge hits `labs.scaler.com:80`).
 - EC2 **security group**: inbound **443/tcp** open (and keep 80/tcp
   open — certbot HTTP-01 + the 80→443 redirect need it). AWS
   console/CLI op, separate from the app deploy.
@@ -164,44 +164,89 @@ going live, never before:
   (`samesite=lax` already). If set true while still on http, the
   cookie is never sent → total lockout. Honored by
   `app/api/auth_routes.py` `_set_session_cookie`.
-- `COURSE_GEN_EDITOR_PUBLIC_BASE=https://<DOMAIN>` — in-editor URLs
+- `COURSE_GEN_EDITOR_PUBLIC_BASE=https://labs.scaler.com` — in-editor URLs
   (`learner_studio_service.py`) become https; avoids mixed-content /
   insecure code-server links.
 
 No source changes: grep confirmed no hardcoded `http://18.236...` in
 `app/` templates/JS; both couplings are env-driven.
 
+### HTTPS-safety audit (code, verified $0 — 2026-05-18)
+
+- **Tutor: HTTPS-safe, no change.** Both the page widget and the
+  in-editor widget use a **relative** base. `lab-tutor-editor-boot.js`
+  mounts with `baseUrl:""`; `lab-tutor.js` fetches `cfg.baseUrl +
+  "/v1/tutor/*"` with `credentials:"same-origin"`. On
+  `https://labs.scaler.com` (app) and `https://labs.scaler.com/editor/
+  <port>/` (code-server) the origin is identical → calls stay
+  same-origin https, the `Secure`+`lax` cookie is sent, no mixed
+  content. `LAB_TUTOR_BASE_URL` is **irrelevant** to the browser widget
+  (not used by the boot path) — no env needed for the tutor.
+- **Tutor history: preserved.** Server-authoritative (Postgres, M34)
+  keyed by `(user_id, session_id)`; `session_id = lms-<enrollment.id>`
+  (origin/scheme-independent). The widget rehydrates via the relative
+  `GET /v1/tutor/history` on open. The old origin's localStorage cache
+  isn't visible at the new domain (origin-scoped) but is transparently
+  rebuilt from the server — **no history loss** (exactly the failure
+  mode M34 prevents).
+- **Editor (code-server): no app change.** The existing
+  `conf.d/course-gen-codex.conf` editor location already sets
+  `Upgrade $http_upgrade` / `Connection upgrade` and
+  `X-Forwarded-Proto $scheme` — over the 443 server `$scheme`=https, so
+  code-server auto-serves over `wss`. The ONLY risk is nginx-config
+  mechanics (below), not code.
+
 ### Procedure (run on unfreeze, in this order)
 
-1. Confirm DNS: `dig +short <DOMAIN>` → `18.236.242.248`.
+1. Confirm DNS: `dig +short labs.scaler.com` → `18.236.242.248`.
 2. Open :443 in the EC2 SG; confirm 80 still open.
-3. Issue cert + auto-rewrite nginx (keeps :80 serving during issuance):
-   `sudo certbot --nginx -d <DOMAIN> --redirect -m <ops-email>
-   --agree-tos -n`
-   - `--redirect` adds the 80→443 redirect; certbot installs the
-     renewal timer (`systemctl status certbot-renew.timer`).
-4. Verify nginx still proxies BOTH the app and the editor over TLS:
-   - `curl -sI https://<DOMAIN>/login` → 200
-   - `curl -sI https://<DOMAIN>/static/lms.js` → 200
-   - editor path: open a live `/editor/<port>/` over https.
-   Ensure the `/editor/<port>/` `location` block survived the certbot
-   rewrite (it edits the default server block; re-add the editor proxy
-   to the 443 server if missing).
+3. **Use `certbot certonly`, NOT `certbot --nginx`.** The live
+   `conf.d/course-gen-codex.conf` has **regex `location ~
+   ^/editor/(?<eport>…)`** blocks, WS upgrade headers, and a
+   `sub_filter` that injects `lab-tutor-editor-boot.js` — `--nginx`
+   auto-rewrite is known to mangle regex locations / drop `sub_filter`.
+   Instead:
+   - `sudo certbot certonly --webroot -w /usr/share/nginx/html
+     -d labs.scaler.com -m <ops-email> --agree-tos -n`
+     (or `--standalone` on :80 briefly if no webroot).
+   - **Hand-edit `conf.d/course-gen-codex.conf`**: add `listen 443
+     ssl;` + `ssl_certificate /etc/letsencrypt/live/labs.scaler.com/
+     fullchain.pem;` + `ssl_certificate_key …/privkey.pem;` +
+     `server_name labs.scaler.com;` to the **existing** server block
+     (which already has the app + editor + sub_filter + WS directives —
+     reuse it verbatim, just add TLS). Add a second tiny server:
+     `listen 80; server_name labs.scaler.com; return 301
+     https://$host$request_uri;`.
+   - `sudo nginx -t && sudo systemctl reload nginx`.
+   - Confirm auto-renew: `systemctl status certbot-renew.timer`
+     (`certonly` still installs the renewal timer; renewal needs no
+     nginx rewrite since we edited by hand).
+4. Verify BOTH app and editor over TLS:
+   - `curl -sI https://labs.scaler.com/login` → 200
+   - `curl -sI https://labs.scaler.com/static/lms.js` → 200
+   - open a live `/editor/<port>/` over https → code-server loads, its
+     **websocket connects** (DevTools → Network → WS shows `101`), and
+     the lab-tutor bubble appears (the `sub_filter` injection survived).
 5. Flip the two env vars (`SESSION_COOKIE_SECURE=true`,
-   `COURSE_GEN_EDITOR_PUBLIC_BASE=https://<DOMAIN>`) →
+   `COURSE_GEN_EDITOR_PUBLIC_BASE=https://labs.scaler.com`) →
    `sudo systemctl restart course-gen-codex.service`.
-6. Smoke (the standard block, but https): login, static assets,
-   `/v1/tutor/*` 401, a full register→enroll→editor round-trip; verify
-   the session cookie shows `Secure`; no mixed-content console errors;
-   editor opens over https.
+6. Smoke (standard block, https): login, static assets, `/v1/tutor/*`
+   401 unauth, a full register→enroll→editor round-trip; verify the
+   session cookie shows `Secure`; **open the in-editor tutor, send a
+   message, reopen — history rehydrates**; no mixed-content console
+   errors.
 
 ### Rollback
 
 - App: revert the two env vars → restart (instant; back to working
   http behavior).
-- Edge: certbot kept a backup of the nginx config
-  (`/etc/nginx/…*.bak` / `certbot rollback`); `sudo nginx -t &&
-  sudo systemctl reload nginx`. Cert files are inert if unreferenced.
+- Edge: **before hand-editing, `sudo cp conf.d/course-gen-codex.conf
+  conf.d/course-gen-codex.conf.pre-tls.bak`** (there are already
+  `.bak.<ts>` siblings — follow that convention). Rollback = restore
+  the `.bak`, `sudo nginx -t && sudo systemctl reload nginx`. Cert
+  files are inert if unreferenced. (We use `certbot certonly` + a
+  hand-edit, so there's no `certbot rollback` of nginx — the `.bak` is
+  the rollback.)
 - DNS/SG changes are independently reversible.
 
 ### Notes
@@ -211,4 +256,4 @@ No source changes: grep confirmed no hardcoded `http://18.236...` in
 - Renewal is automatic (certbot timer); no app redeploy on renew.
 - After cutover, update the smoke-test base in this runbook and any
   `COURSE_GEN_EDITOR_PUBLIC_BASE` references from
-  `http://18.236.242.248` to `https://<DOMAIN>`.
+  `http://18.236.242.248` to `https://labs.scaler.com`.
