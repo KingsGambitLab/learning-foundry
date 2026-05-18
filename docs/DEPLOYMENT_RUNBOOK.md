@@ -136,10 +136,40 @@ design. Keep that index line if you edit the file.
 
 ## HTTPS migration (HTTP → TLS via nginx + certbot)
 
-**Status: PLANNED — not executed (deploy freeze + needs a domain).**
-Decision: domain + nginx + Let's Encrypt (`certbot`). A trusted cert
-**cannot** be issued for the bare IP `18.236.242.248` — a domain is
-mandatory.
+**Status: EXECUTED 2026-05-18 — live at https://labs.scaler.com.**
+What was actually done (differs slightly from the original plan, kept
+for the renewal/rollback record):
+- `dnf install -y certbot python3-certbot-nginx` (was not installed).
+- Cert issued with the **nginx authenticator, certonly** (no
+  installer/rewrite): `certbot certonly --nginx -d labs.scaler.com
+  --agree-tos --register-unsafely-without-email -n`. Auto-renew timer
+  installed by certbot; renewal re-uses the nginx authenticator (no
+  webroot needed). **No ops email** — add one later via `certbot
+  update_account` if expiry mail is wanted.
+- nginx conf **hand-written** (not via `--nginx` installer, which
+  mangles the regex `/editor/` locations + `sub_filter`): a `listen 80
+  … return 301 https://$host$request_uri;` redirect server + a `listen
+  443 ssl default_server` server that reuses the editor regex
+  locations / `sub_filter` / WS-upgrade / `X-Forwarded-Proto $scheme`
+  **verbatim**. Backups: `/etc/nginx/conf.d/course-gen-codex.conf
+  .pre-tls.bak.<ts>`; the staged source is in the repo at
+  `infra/nginx/labs.scaler.com.conf` (committed) — rollback = restore
+  the `.bak`, `nginx -t && systemctl reload nginx`.
+- Env cutover in `/opt/course-gen-codex/.env` (backed up to
+  `.env.pre-tls.bak.<ts>`): `SESSION_COOKIE_SECURE=true`,
+  `COURSE_GEN_EDITOR_PUBLIC_BASE=https://labs.scaler.com`; then
+  `systemctl restart course-gen-codex.service`.
+- Verified end-to-end over https: 301 redirect; `Secure` session
+  cookie; catalog/enroll/seed; in-editor tutor `editor-context`
+  returns the stable `lms-<enrollment.id>` (not `editor-<port>`);
+  tutor chat persisted + rehydrated; a full baseline submission
+  round-trip (grader Docker pipeline) returned a scorecard.
+
+Original plan/notes below retained for renewals & rollback.
+
+**Decision: domain + nginx + Let's Encrypt (`certbot`).** A trusted
+cert **cannot** be issued for the bare IP `18.236.242.248` — a domain
+is mandatory.
 
 ### Prerequisites (gather before touching the host)
 
