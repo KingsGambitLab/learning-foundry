@@ -131,3 +131,84 @@ for the exact, idempotent procedure (backs up the snapshot payload first).
 `pip install -r requirements.txt` pulls the CPU PyTorch wheel and **zero**
 `nvidia-*`/CUDA packages. `faiss-cpu` and `rank_bm25` are CPU-only by
 design. Keep that index line if you edit the file.
+
+---
+
+## HTTPS migration (HTTP → TLS via nginx + certbot)
+
+**Status: PLANNED — not executed (deploy freeze + needs a domain).**
+Decision: domain + nginx + Let's Encrypt (`certbot`). A trusted cert
+**cannot** be issued for the bare IP `18.236.242.248` — a domain is
+mandatory.
+
+### Prerequisites (gather before touching the host)
+
+- `<DOMAIN>` — the hostname that will serve the app (e.g.
+  `labs.example.com`). Fill in everywhere below.
+- DNS: an **A record** `<DOMAIN> → 18.236.242.248`, propagated
+  (`dig +short <DOMAIN>` returns the IP) BEFORE running certbot
+  (HTTP-01 challenge hits `<DOMAIN>:80`).
+- EC2 **security group**: inbound **443/tcp** open (and keep 80/tcp
+  open — certbot HTTP-01 + the 80→443 redirect need it). AWS
+  console/CLI op, separate from the app deploy.
+- Host has `nginx`; install certbot: `sudo dnf install -y certbot
+  python3-certbot-nginx` (AL2023) or distro equivalent.
+
+### App-side changes (no code — env only; flip AT cutover)
+
+Both live in the service env (systemd unit / `.env` consumed by
+`course-gen-codex.service`). They must change **together with** TLS
+going live, never before:
+
+- `SESSION_COOKIE_SECURE=true` — auth cookies then carry `Secure`
+  (`samesite=lax` already). If set true while still on http, the
+  cookie is never sent → total lockout. Honored by
+  `app/api/auth_routes.py` `_set_session_cookie`.
+- `COURSE_GEN_EDITOR_PUBLIC_BASE=https://<DOMAIN>` — in-editor URLs
+  (`learner_studio_service.py`) become https; avoids mixed-content /
+  insecure code-server links.
+
+No source changes: grep confirmed no hardcoded `http://18.236...` in
+`app/` templates/JS; both couplings are env-driven.
+
+### Procedure (run on unfreeze, in this order)
+
+1. Confirm DNS: `dig +short <DOMAIN>` → `18.236.242.248`.
+2. Open :443 in the EC2 SG; confirm 80 still open.
+3. Issue cert + auto-rewrite nginx (keeps :80 serving during issuance):
+   `sudo certbot --nginx -d <DOMAIN> --redirect -m <ops-email>
+   --agree-tos -n`
+   - `--redirect` adds the 80→443 redirect; certbot installs the
+     renewal timer (`systemctl status certbot-renew.timer`).
+4. Verify nginx still proxies BOTH the app and the editor over TLS:
+   - `curl -sI https://<DOMAIN>/login` → 200
+   - `curl -sI https://<DOMAIN>/static/lms.js` → 200
+   - editor path: open a live `/editor/<port>/` over https.
+   Ensure the `/editor/<port>/` `location` block survived the certbot
+   rewrite (it edits the default server block; re-add the editor proxy
+   to the 443 server if missing).
+5. Flip the two env vars (`SESSION_COOKIE_SECURE=true`,
+   `COURSE_GEN_EDITOR_PUBLIC_BASE=https://<DOMAIN>`) →
+   `sudo systemctl restart course-gen-codex.service`.
+6. Smoke (the standard block, but https): login, static assets,
+   `/v1/tutor/*` 401, a full register→enroll→editor round-trip; verify
+   the session cookie shows `Secure`; no mixed-content console errors;
+   editor opens over https.
+
+### Rollback
+
+- App: revert the two env vars → restart (instant; back to working
+  http behavior).
+- Edge: certbot kept a backup of the nginx config
+  (`/etc/nginx/…*.bak` / `certbot rollback`); `sudo nginx -t &&
+  sudo systemctl reload nginx`. Cert files are inert if unreferenced.
+- DNS/SG changes are independently reversible.
+
+### Notes
+
+- One cert covers app + editor (same host, nginx path-proxy) — no
+  per-editor-port cert needed.
+- Renewal is automatic (certbot timer); no app redeploy on renew.
+- After cutover, update the smoke-test base in this runbook and any
+  `COURSE_GEN_EDITOR_PUBLIC_BASE` references from
+  `http://18.236.242.248` to `https://<DOMAIN>`.
