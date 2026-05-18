@@ -95,6 +95,38 @@ class TutorRoutesTest(unittest.TestCase):
         for q in body["viva_questions"]:
             self.assertTrue(q["prompt"])
 
+    def test_editor_context_never_returns_ephemeral_port_session(self) -> None:
+        """§27: a port that maps to no workspace session must NOT yield
+        an `editor-<port>` session_id (ephemeral → fragments tutor
+        history on every code-server restart). It must resolve to the
+        learner's stable enrollment session, else a stable per-user id."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        # (a) learner has an enrollment → stable lms-<enrollment.id>
+        store = MagicMock()
+        store.list_all_learner_workspace_sessions.return_value = []  # no port match
+        store.list_learner_enrollments.return_value = [
+            SimpleNamespace(id="enr_abc", course_title="Customer Support Bot")
+        ]
+        with patch("app.api.tutor._store", return_value=store):
+            r = self.client.get("/v1/tutor/editor-context", params={"port": 47213})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["session_id"], "lms-enr_abc")
+        self.assertNotIn("editor-47213", body["session_id"])
+
+        # (b) no enrollment → stable per-user id, still never editor-<port>
+        store2 = MagicMock()
+        store2.list_all_learner_workspace_sessions.return_value = []
+        store2.list_learner_enrollments.return_value = []
+        with patch("app.api.tutor._store", return_value=store2):
+            r2 = self.client.get("/v1/tutor/editor-context", params={"port": 47213})
+        self.assertEqual(r2.status_code, 200)
+        sid = r2.json()["session_id"]
+        self.assertTrue(sid.startswith("editor-user-"))
+        self.assertNotIn("editor-47213", sid)
+
     def test_chat_rejects_missing_session_id(self) -> None:
         resp = self.client.post("/v1/tutor/chat", json={"message": "hi"})
         self.assertEqual(resp.status_code, 422)
