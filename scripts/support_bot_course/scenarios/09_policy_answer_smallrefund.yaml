@@ -23,3 +23,11 @@ rubrics:
 - kind: literal_match
   target: call_policy_answer_smallrefund.body.abstained
   expected: false
+- kind: oracle_set_overlap
+  target: call_policy_answer_smallrefund.body.citations
+  gold_set_path: setup_data.gold.policy_answer_smallrefund.citations
+  min_recall: 0.5
+- kind: subset_match
+  target: call_policy_answer_smallrefund.body.citations
+  acceptable_source: setup_data.gold.policy_answer_smallrefund.citations
+  min_overlap: 1.0

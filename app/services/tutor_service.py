@@ -96,9 +96,20 @@ _SKIP_DIRS = {
 _SKIP_SUFFIXES = {".lock", ".pyc", ".pyo", ".so", ".o", ".a", ".class", ".jar"}
 _BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".tar", ".gz", ".bin"}
 
-# Hard size limits to keep prompt cost bounded.
-_PER_FILE_MAX_BYTES = 8 * 1024   # skip a file if it exceeds this on its own
-_TOTAL_CODE_MAX_BYTES = 40 * 1024  # truncate code-snapshot collection at this aggregate
+# Hard size limits to keep prompt cost bounded. NOTE: over-limit files
+# are TRUNCATED, never skipped — a learner's implemented app.py is
+# routinely >8KB and dropping it entirely is why the tutor used to say
+# "I can't see your app.py, paste it".
+_PER_FILE_MAX_BYTES = 24 * 1024
+_TOTAL_CODE_MAX_BYTES = 64 * 1024
+
+# Source files the learner actually edits — these win the snapshot
+# budget over README/sample-data/config so the tutor always sees code.
+_CODE_SUFFIXES = {
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt", ".swift",
+    ".scala", ".sql", ".sh", ".rs", ".ex", ".exs",
+}
 
 # Failure detail caps.
 _FAILURE_MAX_BYTES = 4 * 1024
@@ -125,12 +136,19 @@ def _load_env_file(path: str | None) -> None:
 
 
 def _read_text_safely(path: Path, max_bytes: int) -> str | None:
+    """Read up to ``max_bytes`` of text. Over-limit files are
+    TRUNCATED (with a marker), never dropped — the learner's main code
+    file is frequently large and silently skipping it blinds the tutor.
+    Returns None only for non-files / OS errors."""
     try:
         if not path.is_file():
             return None
-        if path.stat().st_size > max_bytes:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fh:
+            raw = fh.read(max_bytes + 1)
+        text = raw[:max_bytes].decode("utf-8", errors="replace")
+        if len(raw) > max_bytes:
+            text += "\n... [truncated]\n"
+        return text
     except OSError as exc:
         logger.debug("[tutor] could not read %s: %s", path, exc)
         return None
@@ -158,8 +176,34 @@ def _build_code_snapshot(root: Path) -> str:
     if not files:
         return ""
 
-    # Sort by modification time (newest first) so the learner's recent edits win the budget.
-    files.sort(key=lambda pair: pair[1].stat().st_mtime, reverse=True)
+    # Learner source code first (so it wins the budget over README /
+    # sample data / config, whose mtimes get bumped by platform
+    # re-publishes), then most-recently-modified within each group.
+    def _rank(pair):
+        rel, abs_path = pair
+        is_code = abs_path.suffix.lower() in _CODE_SUFFIXES
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (0 if is_code else 1, -mtime)
+
+    files.sort(key=_rank)
+
+    # TODO(tutor-context): the set of "the file(s) the learner edits"
+    # is hardcoded to app.py for now. Generalise this — derive it from
+    # the deliverable's editable/visible files (the course spec already
+    # knows `learner_brief.files_to_edit` / `visible_files`) so any
+    # course's primary file(s) get the same guaranteed inclusion.
+    # Until then: pin app.py (prefer public/starter/app.py) to the very
+    # front so it is ALWAYS included regardless of ranking/budget.
+    _APP_PY = "public/starter/app.py"
+    files.sort(
+        key=lambda pair: (
+            0 if str(pair[0]) == _APP_PY else
+            1 if pair[1].name == "app.py" else 2
+        )
+    )
 
     tree_lines = [str(rel) for rel, _ in files[:80]]
     body_lines: list[str] = []
@@ -183,8 +227,22 @@ def _build_code_snapshot(root: Path) -> str:
     return "File tree:\n" + "\n".join(f"  {ln}" for ln in tree_lines) + "\n\nFile contents:\n" + "".join(body_lines)
 
 
+# Learner workspaces live at <repo>/learner_workspaces/<learner_id>/
+# <shared_workflow_run_id>/workspace (mirrors lms_service._workspace_root).
+# tutor_service is app/services/, so parents[2] == repo root.
+_LEARNER_WS_BASE = Path(__file__).resolve().parents[2] / "learner_workspaces"
+
+
 def _read_brief_files(root: Path) -> tuple[str, str]:
-    """Return (project_brief, deliverables) as strings."""
+    """Return (project_brief, deliverables) as strings.
+
+    Workspaces now seed a single consolidated ``README.md`` (the brief
+    + a Deliverables section); ``project_brief.md`` / ``deliverables.md``
+    are legacy and no longer written. Prefer README; fall back to the
+    legacy split files for older workspaces."""
+    readme = _read_text_safely(root / "README.md", 48 * 1024) or ""
+    if readme.strip():
+        return readme.strip(), ""
     brief = _read_text_safely(root / "project_brief.md", 32 * 1024) or ""
     delivs = _read_text_safely(root / "deliverables.md", 32 * 1024) or ""
     return brief.strip(), delivs.strip()
@@ -303,30 +361,63 @@ class TutorService:
         if enrollment_id is None and session is not None:
             enrollment_id = getattr(session, "enrollment_id", None)
 
+        # Resolve the enrollment once — used both to locate the live
+        # learner workspace and for the snapshot-brief fallback.
+        enr = None
+        if enrollment_id:
+            try:
+                enr = self._store.get_learner_enrollment(enrollment_id)
+            except Exception as exc:
+                logger.debug("[tutor] enrollment lookup failed for %s: %s", session_id, exc)
+                enr = None
+
+        # Find the learner's live workspace dir so the tutor can READ
+        # their code (the #1 thing it needs to actually help). Prefer the
+        # session's workspace_root; it is frequently unset on editor
+        # sessions, so fall back to the deterministic LMS path
+        # learner_workspaces/<learner_id>/<shared_workflow_run_id>/workspace.
         brief, delivs, code = "", "", ""
+        ws_dir: Path | None = None
         if session is not None:
-            workspace_root = Path(getattr(session, "workspace_root", "") or "")
-            if str(workspace_root) and workspace_root.exists():
-                brief, delivs = _read_brief_files(workspace_root)
-                code = _build_code_snapshot(workspace_root)
+            sroot = Path(getattr(session, "workspace_root", "") or "")
+            if str(sroot) and sroot.exists():
+                ws_dir = sroot
+        if ws_dir is None and enr is not None:
+            cand = (
+                _LEARNER_WS_BASE
+                / str(enr.learner_id)
+                / str(enr.shared_workflow_run_id)
+                / "workspace"
+            )
+            if cand.exists():
+                ws_dir = cand
+        if ws_dir is not None:
+            brief, delivs = _read_brief_files(ws_dir)
+            code = _build_code_snapshot(ws_dir)
 
         # No materialized workspace yet (learner hasn't opened the editor)
         # — use the publish snapshot's brief so the tutor still has the
         # full spec. The tutor must NEVER ask the learner to paste it.
-        if not brief and enrollment_id:
+        if not brief and enr is not None:
             try:
-                enr = self._store.get_learner_enrollment(enrollment_id)
-                if enr is not None:
-                    snap = self._store.get_publish_snapshot(enr.publish_snapshot_id)
-                    if snap is not None:
+                snap = self._store.get_publish_snapshot(enr.publish_snapshot_id)
+                if snap is not None:
                         from app.services.learner_package_runtime import (
                             deliverables_markdown,
                             project_brief_markdown,
                         )
-                        brief = project_brief_markdown(snap) or brief
+                        # Only accept real, non-empty strings — a
+                        # malformed snapshot (or a test double) must not
+                        # let a non-str flow into _build_system_prompt's
+                        # "".join (TypeError).
+                        _b = project_brief_markdown(snap)
+                        if isinstance(_b, str) and _b.strip():
+                            brief = _b
                         lp = getattr(snap, "learner_package", None)
                         if lp is not None and getattr(lp, "deliverables", None):
-                            delivs = deliverables_markdown(lp.deliverables) or delivs
+                            _d = deliverables_markdown(lp.deliverables)
+                            if isinstance(_d, str) and _d.strip():
+                                delivs = _d
             except Exception as exc:
                 logger.debug("[tutor] snapshot brief fallback failed for %s: %s", session_id, exc)
 

@@ -97,9 +97,12 @@ class TutorServiceTest(unittest.TestCase):
         system_text = call_kwargs["system"][0]["text"]
         user_content = call_kwargs["messages"][0]["content"]
 
-        # System prompt should be plain persona with no project_brief
-        self.assertNotIn("<project_brief>", system_text)
-        self.assertNotIn("<deliverables>", system_text)
+        # No CONTEXT BLOCK injected. (The persona prose itself mentions
+        # "<project_brief> / <deliverables>" as an instruction, so check
+        # for the closing tag — that only appears when a real block is
+        # wrapped in by _build_system_prompt.)
+        self.assertNotIn("</project_brief>", system_text)
+        self.assertNotIn("</deliverables>", system_text)
         # User content should be the raw message
         self.assertEqual(user_content, "help me")
 
@@ -117,7 +120,7 @@ class TutorServiceTest(unittest.TestCase):
         system_text = call_kwargs["system"][0]["text"]
         user_content = call_kwargs["messages"][0]["content"]
 
-        self.assertNotIn("<project_brief>", system_text)
+        self.assertNotIn("</project_brief>", system_text)
         self.assertEqual(user_content, "what do I do?")
 
     def test_chat_with_store_and_matching_session_includes_context(self) -> None:

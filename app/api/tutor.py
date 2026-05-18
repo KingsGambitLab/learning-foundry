@@ -105,12 +105,37 @@ def editor_context(
     LMS-page widget. Owner-checked; generic fallback on any miss so
     the widget always mounts and never leaks another learner's title.
     """
-    fallback = TutorEditorContext(
-        assignment_title="Lab workspace", session_id=f"editor-{port}"
-    )
     store = _store(request)
+
+    def _fallback() -> TutorEditorContext:
+        # NEVER key on the ephemeral code-server port: it changes on
+        # every container restart, so an `editor-<port>` session_id
+        # silently fragments/orphans the learner's tutor history. Fall
+        # back to the learner's own enrollment (the SAME stable
+        # `lms-<enrollment.id>` the LMS-page widget uses — shared
+        # history); only if they have no enrollment, a stable per-user
+        # key. Both survive editor restarts.
+        try:
+            if store is not None:
+                enrs = store.list_learner_enrollments(
+                    learner_id=str(user.id), limit=50
+                )
+                if enrs:  # store returns most-recently-updated first
+                    e = enrs[0]
+                    return TutorEditorContext(
+                        assignment_title=getattr(e, "course_title", None)
+                        or "Lab workspace",
+                        session_id=f"lms-{e.id}",
+                    )
+        except Exception:
+            pass
+        return TutorEditorContext(
+            assignment_title="Lab workspace",
+            session_id=f"editor-user-{user.id}",
+        )
+
     if store is None:
-        return fallback
+        return _fallback()
     try:
         sessions = [
             s
@@ -121,13 +146,13 @@ def editor_context(
         sessions.sort(key=lambda s: (s.status.value == "running", s.updated_at), reverse=True)
         session = sessions[0] if sessions else None
         if session is None:
-            return fallback
+            return _fallback()
         enrollment = store.get_learner_enrollment(session.enrollment_id)
         if enrollment is None or enrollment.learner_id != str(user.id):
-            return fallback
+            return _fallback()
         return TutorEditorContext(
             assignment_title=enrollment.course_title or "Lab workspace",
             session_id=f"lms-{enrollment.id}",
         )
     except Exception:
-        return fallback
+        return _fallback()

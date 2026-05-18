@@ -430,14 +430,18 @@
   background: #fff;
   border-radius: 10px;
   padding: 20px;
-  max-width: 94vw;
-  max-height: 82vh;
+  width: 92vw;
+  max-width: 92vw;
+  max-height: 84vh;
   overflow: auto;
 }
+/* Force the diagram to scale UP to fill the lightbox. Mermaid emits an
+   inline max-width/width on the <svg> that otherwise pins it at its
+   small in-panel size, so "Click to enlarge" appeared to do nothing. */
 .lt-mermaid-modal-inner svg {
-  width: auto;
-  height: auto;
-  max-width: 88vw;
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
   display: block;
 }
 .lt-mermaid pre {
