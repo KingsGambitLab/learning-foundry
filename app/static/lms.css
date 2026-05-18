@@ -948,7 +948,7 @@
 
 .review-guidance-summary {
   margin: 10px 0 0;
-  color: var(--ink);
+  color: var(--text);
   line-height: 1.55;
 }
 
@@ -971,7 +971,7 @@
 .review-guidance-section ul,
 .review-guidance-section ol {
   margin: 0;
-  color: var(--ink);
+  color: var(--text);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -1083,7 +1083,7 @@
 
 .test-result-name {
   font-weight: 600;
-  color: var(--ink);
+  color: var(--text);
   font-size: 13px;
   word-break: break-word;
 }
@@ -1136,7 +1136,7 @@
 
 .test-result-headline {
   margin: 6px 0 0;
-  color: var(--ink);
+  color: var(--text);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -1145,7 +1145,7 @@
   list-style: disc;
   margin: 0;
   padding: 12px 16px 14px 36px;
-  color: var(--ink);
+  color: var(--text);
   font-size: 13px;
   line-height: 1.55;
   border-top: 1px solid var(--line);
@@ -1186,7 +1186,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--ink);
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
   background: transparent;
@@ -1207,7 +1207,7 @@
 .test-result-example .we-hint-text {
   font-size: 13px;
   line-height: 1.55;
-  color: var(--ink);
+  color: var(--text);
 }
 
 .writeup-shell {
