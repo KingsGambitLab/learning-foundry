@@ -69,6 +69,8 @@ def _configure_logging() -> Path:
 
 
 _LOG_PATH = _configure_logging()
+from urllib.parse import quote
+
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -303,12 +305,28 @@ def _user_state(user) -> dict | None:
     }
 
 
+def _login_redirect(request: Request) -> RedirectResponse:
+    """Send an unauthenticated user to /login but PRESERVE where they
+    were going (login.html honours ?next), so a deep link like
+    /?enrollment=<id> returns them there after sign-in instead of
+    dumping them on /courses. Target is server-derived (path+query) so
+    it is inherently same-site; non-relative values fall back."""
+    target = request.url.path
+    if request.url.query:
+        target += "?" + request.url.query
+    if not target.startswith("/") or target.startswith("//"):
+        target = "/courses"
+    return RedirectResponse(
+        url="/login?next=" + quote(target, safe=""), status_code=302
+    )
+
+
 @app.get("/", tags=["system"], include_in_schema=False)
 def root(request: Request):
     user = current_user_optional(request)
     # Logged-out experience is just the login form.
     if user is None:
-        return RedirectResponse(url="/login", status_code=302)
+        return _login_redirect(request)
     # The bare "/" hero is deprecated — /courses is the canonical
     # landing. Only "/?enrollment=<id>" still renders here: that is the
     # pinned learner workspace/brief/review experience (where enrolling
@@ -328,7 +346,7 @@ def root(request: Request):
 def courses(request: Request):
     user = current_user_optional(request)
     if user is None:
-        return RedirectResponse(url="/login", status_code=302)
+        return _login_redirect(request)
     svc = _ensure_lms_service(request.app)
     lms_state = build_lms_state(
         catalog=svc.list_catalog(),
