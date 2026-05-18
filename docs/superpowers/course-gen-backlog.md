@@ -852,6 +852,34 @@ nothing but the internal `workspace_seeded.txt` marker.
 
 ---
 
+## 27. In-editor tutor history fragments under the ephemeral `editor-<port>` session
+
+**Status:** Backlog. Generic — affects every lab with the lab tutor.
+
+**Originating direct fix:** Customer Support Bot. Audited tutor history
+across IP↔CNAME (2026-05-18). The DB is fine: history is keyed
+`(user_id, session_id)` with `session_id = lms-<enrollment.id>`
+(origin/scheme-independent), so IP vs `labs.scaler.com` does **not**
+lose data — the apparent break is just host-scoped auth cookie +
+origin-scoped localStorage on the transition (re-login on the new host
+restores it). But the live data showed one `editor-35517` session:
+`tutor.py` `editor-context` falls back to
+`TutorEditorContext(session_id=f"editor-{port}")` when it can't map the
+code-server port to an enrollment. Code-server ports are **ephemeral**
+(reassigned per container/restart), so any history persisted under
+`editor-<port>` is orphaned on the next editor restart — the in-editor
+tutor "forgets" independent of any domain change.
+
+**Generalization:** the in-editor widget must always resolve to the
+stable `lms-<enrollment.id>` session. Options: make `editor-context`
+fail closed (no tutor / clear "not linked" state) instead of minting a
+volatile `editor-<port>` session; or have the port→enrollment mapping
+be authoritative and never persist/serve chat under `editor-<port>`.
+Where: `app/api/tutor.py` (`editor-context`), `tutor_service` history
+key, `lab-tutor-editor-boot.js`.
+
+---
+
 ## How to add to this list
 
 When making a direct course fix:
