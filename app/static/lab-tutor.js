@@ -10,6 +10,80 @@
 (function () {
   "use strict";
 
+  // ── Narrated-whiteboard pure helpers (also unit-tested under Node) ─────────
+  // Parse an lt-narrated block body into { steps: [{say, mermaid}] } or null.
+  function parseNarrated(body) {
+    function tryParse(s) {
+      try { return JSON.parse(s); } catch { return undefined; }
+    }
+    let obj = tryParse(body);
+    if (obj === undefined) {
+      let repaired = String(body);
+      const open = repaired.indexOf("{");
+      const close = repaired.lastIndexOf("}");
+      if (open !== -1 && close > open) repaired = repaired.slice(open, close + 1);
+      repaired = repaired.replace(/,(\s*[}\]])/g, "$1"); // trailing commas
+      obj = tryParse(repaired);
+    }
+    if (!obj || !Array.isArray(obj.steps)) return null;
+    const steps = obj.steps.filter(
+      (st) =>
+        st &&
+        typeof st.say === "string" &&
+        st.say.trim() !== "" &&
+        typeof st.mermaid === "string" &&
+        st.mermaid.trim() !== ""
+    ).map((st) => ({ say: st.say, mermaid: st.mermaid }));
+    return steps.length > 0 ? { steps } : null;
+  }
+
+  // No-audio / muted pacing: max(2s, words*240ms) (pattern from OpenMAIC).
+  function computeNoAudioMs(say) {
+    const words = String(say).trim().split(/\s+/).filter(Boolean).length;
+    return Math.max(2000, words * 240);
+  }
+
+  // Pure playback state machine. State: {mode,step,total}.
+  // mode: "idle" | "playing" | "paused" | "done".
+  function narratedReducer(state, action) {
+    const s = state;
+    switch (action.type) {
+      case "PLAY":
+        if (s.mode === "done") return { mode: "playing", step: 0, total: s.total };
+        return { mode: "playing", step: s.step, total: s.total };
+      case "PAUSE":
+        if (s.mode !== "playing") return s;
+        return { mode: "paused", step: s.step, total: s.total };
+      case "ADVANCE": {
+        // Stale-callback guard: only the active "playing" mode advances.
+        if (s.mode !== "playing") return s;
+        const next = s.step + 1;
+        if (next >= s.total) return { mode: "done", step: s.total - 1, total: s.total };
+        return { mode: "playing", step: next, total: s.total };
+      }
+      case "NEXT": {
+        const next = Math.min(s.step + 1, s.total - 1);
+        const done = s.step + 1 >= s.total;
+        return { mode: done ? "done" : s.mode, step: next, total: s.total };
+      }
+      case "PREV":
+        return { mode: s.mode, step: Math.max(s.step - 1, 0), total: s.total };
+      case "REPLAY":
+        return { mode: "playing", step: 0, total: s.total };
+      case "STOP":
+        return { mode: "idle", step: 0, total: s.total };
+      default:
+        return s;
+    }
+  }
+
+  // Node-only export hook for unit tests. In the browser `module` is
+  // undefined so this is skipped and the widget bootstraps normally.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { parseNarrated, computeNoAudioMs, narratedReducer };
+    return;
+  }
+
   // ── Config from script tag ────────────────────────────────────────────────
   const me = document.currentScript
     || document.querySelector('script[src*="lab-tutor.js"]');
