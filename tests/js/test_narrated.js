@@ -156,3 +156,26 @@ test("extractNodeLabels: adversarial long word-run completes fast (no ReDoS)", (
   assert.ok(out.includes("End"), "still extracts the valid labeled node");
   assert.ok(ms < 1000, "must complete well under 1s (was O(n^2) before cap), took " + ms + "ms");
 });
+
+test("extractNodeLabels: strips surrounding quotes (matches rendered text)", () => {
+  const out = lt.extractNodeLabels('flowchart LR\n A["Build Context"]-->B[Plain]');
+  assert.deepEqual(out.slice().sort(), ["Build Context", "Plain"]);
+});
+
+test("extractNodeLabels: single-quoted label", () => {
+  const out = lt.extractNodeLabels("flowchart LR\n A['Embed Query']");
+  assert.deepEqual(out, ["Embed Query"]);
+});
+
+test("extractNodeLabels: removes <br> tags from labels", () => {
+  const out = lt.extractNodeLabels("flowchart LR\n A[Line1<br/>Line2]-->B[C<br>D]");
+  assert.deepEqual(out.slice().sort(), ["CD", "Line1Line2"]);
+});
+
+test("diffNewNodeLabels: quoted labels still diff correctly", () => {
+  const out = lt.diffNewNodeLabels(
+    'flowchart LR\n A["Q"]-->B["E"]',
+    'flowchart LR\n A["Q"]-->B["E"]-->C["Rerank Hits"]'
+  );
+  assert.deepEqual(out, ["Rerank Hits"]);
+});

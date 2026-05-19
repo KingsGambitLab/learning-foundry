@@ -102,6 +102,23 @@
   // source, in declaration order. Pure; never throws. Used to spotlight
   // the node added by the current step. Worst case (exotic markup): a
   // label is missed and the spotlight simply no-ops — never breakage.
+  // Normalize a raw Mermaid label to the text the SVG actually renders:
+  // Mermaid strips one pair of surrounding quotes and turns <br> tags
+  // into line breaks (textContent has no tag). Matching the helper's
+  // output to rendered node textContent is what makes the spotlight hit.
+  function normalizeLabel(raw) {
+    let s = String(raw).trim();
+    if (s.length >= 2) {
+      const a = s[0];
+      const b = s[s.length - 1];
+      if ((a === '"' && b === '"') || (a === "'" && b === "'")) {
+        s = s.slice(1, -1);
+      }
+    }
+    s = s.replace(/<br\s*\/?>/gi, "");
+    return s.trim();
+  }
+
   function extractNodeLabels(src) {
     if (!src || typeof src !== "string") return [];
     const RESERVED = new Set([
@@ -142,6 +159,11 @@
       lines[0] = "";
     }
     work = lines.join("\n");
+    // Strip <br> tags so they do not confuse the >asymmetric] shape
+    // regex: `C<br>D` would otherwise produce a spurious br>D] match.
+    // normalizeLabel already removes them from captured label text; this
+    // removes them from the source so the surrounding parse is clean too.
+    work = work.replace(/<br\s*\/?>/gi, "");
     // Invariant: exec on the stable `work` (so captured groups stay
     // reliable across patterns) while accumulating blanking on a separate
     // `stripped` copy (so each successive pattern sees a progressively
@@ -152,7 +174,7 @@
       let m;
       while ((m = re.exec(work)) !== null) {
         const id = m[1];
-        const label = m[2].trim();
+        const label = normalizeLabel(m[2]);
         if (!(id in labelById) && label !== "") {
           labelById[id] = label;
           order.push(id);
