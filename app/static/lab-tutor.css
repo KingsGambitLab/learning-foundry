@@ -452,6 +452,27 @@
   color: var(--lt-text);
   min-height: 1.5em;
 }
+.lt-narrated-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.lt-narrated-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lt-border);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.lt-narrated-dot--active {
+  background: var(--lt-accent, #1f6feb);
+  transform: scale(1.4);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lt-narrated-dot {
+    transition: none;
+  }
+}
 .lt-narrated-controls {
   display: flex;
   align-items: center;

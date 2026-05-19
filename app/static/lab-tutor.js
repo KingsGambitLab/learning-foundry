@@ -332,6 +332,18 @@
     caption.className = "lt-narrated-caption";
     card.appendChild(caption);
 
+    const dots = document.createElement("div");
+    dots.className = "lt-narrated-dots";
+    dots.setAttribute("aria-hidden", "true");
+    const dotEls = [];
+    for (let d = 0; d < spec.steps.length; d++) {
+      const dot = document.createElement("span");
+      dot.className = "lt-narrated-dot";
+      dots.appendChild(dot);
+      dotEls.push(dot);
+    }
+    card.appendChild(dots);
+
     const controls = document.createElement("div");
     controls.className = "lt-narrated-controls";
     const mkBtn = (label, aria) => {
@@ -424,6 +436,9 @@
       );
       prevBtn.disabled = state.step === 0;
       nextBtn.disabled = state.step >= total - 1 && state.mode !== "playing";
+      for (let d = 0; d < dotEls.length; d++) {
+        dotEls[d].classList.toggle("lt-narrated-dot--active", d === state.step);
+      }
     }
 
     function advance() {
@@ -458,7 +473,7 @@
       if (state.mode === "playing") speakCurrent();
     }
 
-    playBtn.addEventListener("click", () => {
+    function doPlayPause() {
       if (state.mode === "playing") {
         state = narratedReducer(state, { type: "PAUSE" });
         stopSpeech();
@@ -468,19 +483,23 @@
         state = narratedReducer(state, { type: wasDone ? "REPLAY" : "PLAY" });
         run();
       }
-    });
-    prevBtn.addEventListener("click", () => {
+    }
+    function doPrev() {
       stopSpeech();
       state = narratedReducer(state, { type: "PREV" });
       if (state.mode === "playing") { state = narratedReducer(state, { type: "PAUSE" }); }
       renderStep(state.step).then(syncControls);
-    });
-    nextBtn.addEventListener("click", () => {
+    }
+    function doNext() {
       stopSpeech();
       state = narratedReducer(state, { type: "NEXT" });
       if (state.mode === "playing") { state = narratedReducer(state, { type: "PAUSE" }); }
       renderStep(state.step).then(syncControls);
-    });
+    }
+
+    playBtn.addEventListener("click", doPlayPause);
+    prevBtn.addEventListener("click", doPrev);
+    nextBtn.addEventListener("click", doNext);
     muteBtn.addEventListener("click", () => {
       muted = !muted;
       muteBtn.textContent = muted ? "🔇" : "🔊";
@@ -495,6 +514,24 @@
             computeNoAudioMs(spec.steps[state.step].say)
           );
         }
+      }
+    });
+
+    // Card-scoped keyboard (NEVER document-level — must not leak into
+    // code-server / Monaco / page shortcuts).
+    card.tabIndex = 0;
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-label", "Narrated whiteboard");
+    card.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        doPlayPause();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        doNext();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        doPrev();
       }
     });
 
