@@ -237,7 +237,6 @@
 
 
   // Render a narrated-whiteboard card: stepwise Mermaid reveal + TTS.
-  let narratedIdCounter = 0;
   function renderNarratedInto(parent, spec) {
     const card = document.createElement("div");
     card.className = "lt-narrated";
@@ -313,18 +312,18 @@
       nextBtn.disabled = state.step >= total - 1 && state.mode !== "playing";
     }
 
+    function advance() {
+      state = narratedReducer(state, { type: "ADVANCE" });
+      if (state.mode === "playing") {
+        run();
+      } else {
+        syncControls();
+      }
+    }
+
     function speakCurrent() {
       const step = spec.steps[state.step];
       stopSpeech();
-      const advance = () => {
-        const tokenMode = state.mode;
-        state = narratedReducer(state, { type: "ADVANCE" });
-        if (state.mode === "playing" && tokenMode === "playing") {
-          run();
-        } else {
-          syncControls();
-        }
-      };
       if (!muted && ttsOk) {
         const u = new SpeechSynthesisUtterance(step.say);
         u.onend = () => { if (state.mode === "playing") advance(); };
@@ -372,7 +371,17 @@
       muted = !muted;
       muteBtn.textContent = muted ? "🔇" : "🔊";
       muteBtn.setAttribute("aria-label", muted ? "Unmute narration" : "Mute narration");
-      if (muted) stopSpeech();
+      if (muted) {
+        stopSpeech();
+        // Muting mid-playback must not rely on cancel() firing onerror to
+        // advance — restart pacing via the no-audio timer explicitly.
+        if (state.mode === "playing") {
+          noAudioTimer = setTimeout(
+            () => { if (state.mode === "playing") advance(); },
+            computeNoAudioMs(spec.steps[state.step].say)
+          );
+        }
+      }
     });
 
     // Initial paint: first step visible, idle (no autoplay).
