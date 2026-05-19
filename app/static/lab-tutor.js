@@ -369,6 +369,33 @@
       if (ttsOk) { try { synth.cancel(); } catch {} }
     }
 
+    function spotlightNew(i) {
+      try {
+        if (i <= 0) return;
+        const labels = diffNewNodeLabels(
+          spec.steps[i - 1].mermaid,
+          spec.steps[i].mermaid
+        );
+        if (!labels.length) return;
+        let nodes = stage.querySelectorAll("g.node");
+        if (!nodes.length) nodes = stage.querySelectorAll('[class*="node"]');
+        const wanted = new Set(labels);
+        const hit = new Set();
+        nodes.forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          if (wanted.has(txt) && !hit.has(txt)) {
+            hit.add(txt);
+            el.classList.add("lt-narrated-spot");
+            setTimeout(() => {
+              try { el.classList.remove("lt-narrated-spot"); } catch {}
+            }, 1000);
+          }
+        });
+      } catch {
+        /* spotlight is a nicety — never a failure path */
+      }
+    }
+
     async function renderStep(i) {
       const step = spec.steps[i];
       caption.textContent = step.say;
@@ -378,6 +405,7 @@
       void stage.offsetWidth;
       await renderMermaidInto(stage, step.mermaid);
       stage.classList.add("lt-narrated-stage--in");
+      spotlightNew(i);
     }
 
     function syncControls() {
