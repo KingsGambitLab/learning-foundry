@@ -378,6 +378,9 @@
         );
         if (!labels.length) return;
         let nodes = stage.querySelectorAll("g.node");
+        // '[class*="node"]' is intentionally broader than the design
+        // spec's ".nodeLabel/text" — it absorbs Mermaid version variation;
+        // textContent equality + the `hit` dedup prevent false positives.
         if (!nodes.length) nodes = stage.querySelectorAll('[class*="node"]');
         const wanted = new Set(labels);
         const hit = new Set();
