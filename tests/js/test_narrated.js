@@ -78,3 +78,18 @@ test("narratedReducer: PAUSE/NEXT/PREV/REPLAY", () => {
   s = lt.narratedReducer({ mode: "done", step: 2, total: 3 }, { type: "REPLAY" });
   assert.deepEqual(s, { mode: "playing", step: 0, total: 3 });
 });
+
+test("parseNarrated: repairs literal newlines/tabs inside string values", () => {
+  // Raw newline + tab inside the mermaid value (invalid JSON as-is).
+  const body = '{"steps":[{"say":"Build it.","mermaid":"flowchart LR\n\tA-->B\n\tB-->C"}]}';
+  const out = lt.parseNarrated(body);
+  assert.ok(out, "expected a parsed object, got null");
+  assert.equal(out.steps.length, 1);
+  assert.equal(out.steps[0].say, "Build it.");
+  assert.equal(out.steps[0].mermaid, "flowchart LR\n\tA-->B\n\tB-->C");
+});
+
+test("narratedReducer: STOP resets to idle/step 0", () => {
+  const s = lt.narratedReducer({ mode: "playing", step: 2, total: 4 }, { type: "STOP" });
+  assert.deepEqual(s, { mode: "idle", step: 0, total: 4 });
+});

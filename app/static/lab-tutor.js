@@ -11,6 +11,26 @@
   "use strict";
 
   // ── Narrated-whiteboard pure helpers (also unit-tested under Node) ─────────
+  // Escape literal newline/carriage-return/tab chars that appear INSIDE JSON
+  // string literals (LLMs often emit raw newlines in multiline values like
+  // mermaid source). Structural whitespace between tokens is left untouched.
+  function escapeControlCharsInStrings(src) {
+    let out = "";
+    let inStr = false;
+    let esc = false;
+    for (let i = 0; i < src.length; i++) {
+      const ch = src[i];
+      if (esc) { out += ch; esc = false; continue; }
+      if (ch === "\\" && inStr) { out += ch; esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; out += ch; continue; }
+      if (inStr && ch === "\n") { out += "\\n"; continue; }
+      if (inStr && ch === "\r") { out += "\\r"; continue; }
+      if (inStr && ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+    }
+    return out;
+  }
+
   // Parse an lt-narrated block body into { steps: [{say, mermaid}] } or null.
   function parseNarrated(body) {
     function tryParse(s) {
@@ -23,6 +43,7 @@
       const close = repaired.lastIndexOf("}");
       if (open !== -1 && close > open) repaired = repaired.slice(open, close + 1);
       repaired = repaired.replace(/,(\s*[}\]])/g, "$1"); // trailing commas
+      repaired = escapeControlCharsInStrings(repaired); // raw \n \r \t in values
       obj = tryParse(repaired);
     }
     if (!obj || !Array.isArray(obj.steps)) return null;
