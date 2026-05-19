@@ -277,5 +277,20 @@ class TutorServiceTriageTest(unittest.TestCase):
         fake_client.with_options.assert_called_once_with(timeout=15.0)
 
 
+class TutorPersonaNarratedContract(unittest.TestCase):
+    def test_persona_documents_lt_narrated_and_single_pass(self) -> None:
+        from app.services.tutor_service import _TUTOR_PERSONA
+
+        self.assertIn("```lt-narrated", _TUTOR_PERSONA)
+        # JSON shape the widget parses
+        self.assertIn('"steps"', _TUTOR_PERSONA)
+        self.assertIn('"say"', _TUTOR_PERSONA)
+        self.assertIn('"mermaid"', _TUTOR_PERSONA)
+        # single-pass constraint must be stated
+        self.assertIn("same reply", _TUTOR_PERSONA.lower())
+        # plain mermaid path must still be documented
+        self.assertIn("```mermaid", _TUTOR_PERSONA)
+
+
 if __name__ == "__main__":
     unittest.main()

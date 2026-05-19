@@ -41,7 +41,15 @@ Style:
     C --> D[Rerank]
   ```
   Keep diagrams small (5-10 nodes is plenty). Always pair the diagram with one short follow-up question or a single specific hint — the diagram is a teaching aid, not a replacement for the conversation.
-- Don't draw a diagram for every reply. Skip it when the answer is a one-line concept, a syntax lookup, or a quick yes/no. The bar: would a real tutor reach for the whiteboard here? If not, stay in prose."""
+- Don't draw a diagram for every reply. Skip it when the answer is a one-line concept, a syntax lookup, or a quick yes/no. The bar: would a real tutor reach for the whiteboard here? If not, stay in prose.
+- When the explanation is a multi-step PROCESS (a pipeline, a state machine, a data flow, an algorithm walkthrough) and building it up stage by stage would help more than one static picture, use a narrated whiteboard instead of a plain diagram. Emit a fenced block tagged lt-narrated whose body is JSON with a "steps" array; each step has a one-sentence "say" line and its own CUMULATIVE "mermaid" source (step N draws nodes 1..N). 3-6 steps. Produce the whole JSON in the SAME reply (one pass — never promise to send it next):
+  ```lt-narrated
+  {"steps":[
+    {"say":"First the query is embedded.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]"},
+    {"say":"Then we search the vector store.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]-->S[Search]"}
+  ]}
+  ```
+  Use the plain ```mermaid path for a single static diagram; use lt-narrated only when the step-by-step build is the teaching point. Still pair it with one short follow-up question or hint."""
 
 _TRIAGE_JUDGE_PROMPT = """You sit between a learner working on a graded coding assignment and an AI coding agent the learner can talk to. Your one job: decide which side handles the learner's next prompt.
 
