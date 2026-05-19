@@ -73,9 +73,11 @@ The tutor emits a fenced block tagged `lt-narrated` whose body is JSON:
 
 A new renderer registered alongside the existing mermaid renderer.
 
-- Parser: detect ```` ```lt-narrated ```` fences, `JSON.parse` the body.
-  Malformed JSON or missing/empty `steps` → graceful fallback card showing the
-  raw text (mirrors the existing `.lt-mermaid--failed` behavior).
+- Parser: detect ```` ```lt-narrated ```` fences. Parse with a small
+  robustness ladder (LLMs occasionally emit trailing commas / stray prose):
+  `JSON.parse` → a minimal repair pass (strip trailing commas, trim to the
+  outermost `{...}`) → fallback card. Missing/empty `steps` → fallback card
+  showing the raw text (mirrors the existing `.lt-mermaid--failed` behavior).
 - Render: a card with a **▶ Play narration** button. No autoplay:
   1. Browsers gate audio/speech behind a user gesture.
   2. Surprise speech at a learner mid-task is poor UX.
@@ -84,6 +86,22 @@ A new renderer registered alongside the existing mermaid renderer.
   - On entering step i: render `steps[i].mermaid` into the card's diagram
     slot; show `steps[i].say` as a visible caption; speak `say` via
     `SpeechSynthesis`; on utterance `onend` advance to i+1; at end → `done`.
+  - **Stale-callback guard:** the `onend` handler must re-check the card's
+    `mode` before advancing. If the user paused/stopped between utterance
+    start and end, a late `onend` must NOT advance the cursor. (Borrowed
+    pattern: a single cursor advanced only by the active mode's callbacks.)
+- **Sync mechanism (validated approach): event-based, no timeline.** There
+  is no precomputed timeline or per-word timing. Advance is driven purely by
+  the speech `onend` event (or the no-audio timer below). Authoring controls
+  pacing purely by ordering/sizing steps. This is deliberately simpler than
+  timestamp scrubbing and needs zero duration metadata.
+- **No-audio / muted timer:** when muted or `speechSynthesis` is
+  unavailable, advance step i on `setTimeout` of
+  `max(2000ms, wordCount(say) * 240ms)` so the visual still paces sensibly.
+- **Per-step entry transition (polish):** when a step's diagram renders,
+  apply a short CSS entry transition on the diagram container
+  (opacity/translate/scale, ~150-250ms) so each reveal feels deliberate
+  rather than a hard swap. Pure CSS; no animation library.
 - Controls: Play/Pause, Prev, Next, Replay, Mute. Caption text is **always**
   visible regardless of audio (accessibility, sound-off, and
   `prefers-reduced-motion` users get a "show all steps" static fallback).
@@ -137,6 +155,34 @@ Add guidance next to the existing Mermaid nudge in the persona/system prompt:
   trigger a narrated explanation, verify reveal+voice sync, controls,
   reload persistence, and the no-audio fallback. Evidence before any
   "it works" claim (verification-before-completion).
+
+## Techniques Borrowed from OpenMAIC (concepts only — AGPL, no code copied)
+
+OpenMAIC's implementation was studied (read-only) to de-risk this design.
+We adopt **patterns**, not code. Key validations and borrowed ideas:
+
+- **Event-based sequential cursor** (their `PlaybackEngine.processNext`):
+  speech actions block on the audio `ended` event before advancing; no
+  global timeline, no precomputed durations. This validated our core
+  approach and is the backbone of the playback loop.
+- **No-audio degradation timer:** their fallback of
+  `max(2s, words*240ms)` is adopted verbatim as our muted/no-TTS pacing.
+- **Mode-checked callbacks:** they re-check engine `mode` inside every
+  `onEnded` so a stale callback can't advance after pause/stop. Adopted as
+  our stale-callback guard.
+- **Per-element entry transition:** they reveal each whiteboard element with
+  a short staggered CSS/Framer entry transition rather than path-drawing.
+  We apply the same idea as a pure-CSS per-step container transition (we
+  re-render a cumulative Mermaid diagram instead of appending elements,
+  since Mermaid owns its SVG).
+- **Parser robustness ladder:** their `JSON.parse → jsonrepair →
+  partial-json` chain motivated our lighter `JSON.parse → minimal repair →
+  fallback card`.
+
+Explicitly NOT adopted: their full discriminated-union action engine,
+fire-and-forget action class, server-TTS pre-gen + IndexedDB audio cache,
+and multi-agent classroom machinery — all heavier than a single in-IDE
+narrated explanation needs (YAGNI for V1).
 
 ## Rollout
 
