@@ -235,6 +235,150 @@
     }
   }
 
+
+  // Render a narrated-whiteboard card: stepwise Mermaid reveal + TTS.
+  let narratedIdCounter = 0;
+  function renderNarratedInto(parent, spec) {
+    const card = document.createElement("div");
+    card.className = "lt-narrated";
+
+    const stage = document.createElement("div");
+    stage.className = "lt-narrated-stage";
+    card.appendChild(stage);
+
+    const caption = document.createElement("div");
+    caption.className = "lt-narrated-caption";
+    card.appendChild(caption);
+
+    const controls = document.createElement("div");
+    controls.className = "lt-narrated-controls";
+    const mkBtn = (label, aria) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "lt-narrated-btn";
+      b.textContent = label;
+      b.setAttribute("aria-label", aria);
+      return b;
+    };
+    const playBtn = mkBtn("▶ Play narration", "Play narration");
+    const prevBtn = mkBtn("‹", "Previous step");
+    const nextBtn = mkBtn("›", "Next step");
+    const muteBtn = mkBtn("🔊", "Mute narration");
+    controls.append(playBtn, prevBtn, nextBtn, muteBtn);
+    card.appendChild(controls);
+    parent.appendChild(card);
+
+    const total = spec.steps.length;
+    let state = { mode: "idle", step: 0, total };
+    let muted = false;
+    let noAudioTimer = null;
+    const synth = window.speechSynthesis || null;
+    const ttsOk = !!(synth && window.SpeechSynthesisUtterance);
+    if (!ttsOk) {
+      muteBtn.style.display = "none";
+      muted = true;
+    }
+
+    function clearTimer() {
+      if (noAudioTimer) { clearTimeout(noAudioTimer); noAudioTimer = null; }
+    }
+    function stopSpeech() {
+      clearTimer();
+      if (ttsOk) { try { synth.cancel(); } catch {} }
+    }
+
+    async function renderStep(i) {
+      const step = spec.steps[i];
+      caption.textContent = step.say;
+      stage.classList.remove("lt-narrated-stage--in");
+      stage.innerHTML = "";
+      // reflow so the entry transition re-triggers
+      void stage.offsetWidth;
+      await renderMermaidInto(stage, step.mermaid);
+      stage.classList.add("lt-narrated-stage--in");
+    }
+
+    function syncControls() {
+      playBtn.textContent =
+        state.mode === "playing" ? "⏸ Pause"
+        : state.mode === "done" ? "↻ Replay"
+        : "▶ Play narration";
+      playBtn.setAttribute(
+        "aria-label",
+        state.mode === "playing" ? "Pause narration"
+        : state.mode === "done" ? "Replay narration"
+        : "Play narration"
+      );
+      prevBtn.disabled = state.step === 0;
+      nextBtn.disabled = state.step >= total - 1 && state.mode !== "playing";
+    }
+
+    function speakCurrent() {
+      const step = spec.steps[state.step];
+      stopSpeech();
+      const advance = () => {
+        const tokenMode = state.mode;
+        state = narratedReducer(state, { type: "ADVANCE" });
+        if (state.mode === "playing" && tokenMode === "playing") {
+          run();
+        } else {
+          syncControls();
+        }
+      };
+      if (!muted && ttsOk) {
+        const u = new SpeechSynthesisUtterance(step.say);
+        u.onend = () => { if (state.mode === "playing") advance(); };
+        u.onerror = () => { if (state.mode === "playing") advance(); };
+        try { synth.speak(u); }
+        catch { noAudioTimer = setTimeout(() => { if (state.mode === "playing") advance(); }, computeNoAudioMs(step.say)); }
+      } else {
+        noAudioTimer = setTimeout(
+          () => { if (state.mode === "playing") advance(); },
+          computeNoAudioMs(step.say)
+        );
+      }
+    }
+
+    async function run() {
+      await renderStep(state.step);
+      syncControls();
+      if (state.mode === "playing") speakCurrent();
+    }
+
+    playBtn.addEventListener("click", () => {
+      if (state.mode === "playing") {
+        state = narratedReducer(state, { type: "PAUSE" });
+        stopSpeech();
+        syncControls();
+      } else {
+        const wasDone = state.mode === "done";
+        state = narratedReducer(state, { type: wasDone ? "REPLAY" : "PLAY" });
+        run();
+      }
+    });
+    prevBtn.addEventListener("click", () => {
+      stopSpeech();
+      state = narratedReducer(state, { type: "PREV" });
+      if (state.mode === "playing") { state = narratedReducer(state, { type: "PAUSE" }); }
+      renderStep(state.step).then(syncControls);
+    });
+    nextBtn.addEventListener("click", () => {
+      stopSpeech();
+      state = narratedReducer(state, { type: "NEXT" });
+      if (state.mode === "playing") { state = narratedReducer(state, { type: "PAUSE" }); }
+      renderStep(state.step).then(syncControls);
+    });
+    muteBtn.addEventListener("click", () => {
+      muted = !muted;
+      muteBtn.textContent = muted ? "🔇" : "🔊";
+      muteBtn.setAttribute("aria-label", muted ? "Unmute narration" : "Mute narration");
+      if (muted) stopSpeech();
+    });
+
+    // Initial paint: first step visible, idle (no autoplay).
+    renderStep(0).then(syncControls);
+  }
+
   // ── SVG helpers ───────────────────────────────────────────────────────────
   function chatIcon() {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -471,8 +615,9 @@
       const wrap = document.createElement("div");
       wrap.className = "lt-msg lt-msg--tutor";
 
-      // Split on mermaid fences. Even indices = text, odd indices = mermaid code.
-      const fence = /```mermaid\n([\s\S]*?)\n```/g;
+      // Split on lt-narrated AND mermaid fences. A combined scanner keeps
+      // text/diagram/narrated ordering intact.
+      const fence = /```(lt-narrated|mermaid)\n([\s\S]*?)\n```/g;
       let lastIndex = 0;
       let m;
       let any = false;
@@ -481,10 +626,23 @@
         const before = text.slice(lastIndex, m.index);
         if (before.trim()) appendParagraphsBold(wrap, before);
         const host = document.createElement("div");
-        host.className = "lt-mermaid-host";
         wrap.appendChild(host);
-        // Fire-and-forget; the placeholder appears synchronously.
-        renderMermaidInto(host, m[1]);
+        if (m[1] === "lt-narrated") {
+          const spec = parseNarrated(m[2]);
+          if (spec) {
+            host.className = "lt-narrated-host";
+            renderNarratedInto(host, spec);
+          } else {
+            // Fallback: treat the raw body as a failed-mermaid-style card.
+            host.className = "lt-mermaid lt-mermaid--failed";
+            const pre = document.createElement("pre");
+            pre.textContent = m[2];
+            host.appendChild(pre);
+          }
+        } else {
+          host.className = "lt-mermaid-host";
+          renderMermaidInto(host, m[2]); // fire-and-forget
+        }
         lastIndex = m.index + m[0].length;
       }
       const tail = text.slice(lastIndex);
