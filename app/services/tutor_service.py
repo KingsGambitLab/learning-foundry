@@ -46,10 +46,11 @@ Style:
   ```lt-narrated
   {"steps":[
     {"say":"First the query is embedded.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]"},
-    {"say":"Then we search the vector store.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]-->S[Search]"}
+    {"say":"Then we search the vector store.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]-->S[Search]"},
+    {"say":"Finally the top hits are reranked.","mermaid":"flowchart LR\\n  Q[Query]-->E[Embed]-->S[Search]-->R[Rerank]"}
   ]}
   ```
-  Use the plain ```mermaid path for a single static diagram; use lt-narrated only when the step-by-step build is the teaching point. Still pair it with one short follow-up question or hint."""
+  Use the plain ```mermaid path for a single static diagram; use lt-narrated only when the step-by-step build is the teaching point. Still pair it with one short follow-up question or hint. A narrated block plus its one question is a deliberate exception to the "2-4 sentences / one hint" rule above — when you do reach for it, give it the full 3-6 steps rather than truncating to stay brief."""
 
 _TRIAGE_JUDGE_PROMPT = """You sit between a learner working on a graded coding assignment and an AI coding agent the learner can talk to. Your one job: decide which side handles the learner's next prompt.
 

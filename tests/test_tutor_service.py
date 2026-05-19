@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.domain.tutor import TutorChatRequest, TutorSubmitRequest, TutorTriageRequest
-from app.services.tutor_service import TutorService
+from app.services.tutor_service import TutorService, _TUTOR_PERSONA
 
 
 def _make_fake_client(reply_text: str = "hello back") -> MagicMock:
@@ -279,8 +279,6 @@ class TutorServiceTriageTest(unittest.TestCase):
 
 class TutorPersonaNarratedContract(unittest.TestCase):
     def test_persona_documents_lt_narrated_and_single_pass(self) -> None:
-        from app.services.tutor_service import _TUTOR_PERSONA
-
         self.assertIn("```lt-narrated", _TUTOR_PERSONA)
         # JSON shape the widget parses
         self.assertIn('"steps"', _TUTOR_PERSONA)
@@ -290,6 +288,8 @@ class TutorPersonaNarratedContract(unittest.TestCase):
         self.assertIn("same reply", _TUTOR_PERSONA.lower())
         # plain mermaid path must still be documented
         self.assertIn("```mermaid", _TUTOR_PERSONA)
+        # over-trigger guard: lt-narrated must be explicitly gated
+        self.assertIn("teaching point", _TUTOR_PERSONA)
 
 
 if __name__ == "__main__":
