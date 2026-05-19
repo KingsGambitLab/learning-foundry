@@ -523,7 +523,12 @@
     card.setAttribute("role", "group");
     card.setAttribute("aria-label", "Narrated whiteboard");
     card.addEventListener("keydown", (e) => {
+      const onButton = !!(e.target && e.target.tagName === "BUTTON");
       if (e.key === " " || e.key === "Spacebar") {
+        // A focused control button activates natively on Space (keyup
+        // -> click). Defer to it; don't also fire the card shortcut
+        // (that would double-toggle / double-act).
+        if (onButton) return;
         e.preventDefault();
         doPlayPause();
       } else if (e.key === "ArrowRight") {
