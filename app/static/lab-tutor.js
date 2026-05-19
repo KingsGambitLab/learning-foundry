@@ -109,20 +109,23 @@
       "class", "linkStyle", "click", "direction", "stateDiagram",
       "stateDiagram-v2", "sequenceDiagram", "classDiagram", "erDiagram",
       "journey", "gantt", "pie", "mindmap",
-      "LR", "RL", "TB", "BT", "TD", "DT",
+      "LR", "RL", "TB", "BT", "TD",
     ]);
     // Most-specific bracket pairs first so e.g. ([stadium]) is not
-    // mis-read by the (round) pattern.
+    // mis-read by the (round) pattern. The node-id quantifier is capped
+    // (\w{0,63}) — Mermaid ids are short identifiers, and an unbounded
+    // \w* here backtracks O(n^2) on long word-char runs (ReDoS) since
+    // this runs in the render path.
     const SHAPES = [
-      /([A-Za-z_]\w*)\s*\[\[([^\]]+)\]\]/g,  // [[subroutine]]
-      /([A-Za-z_]\w*)\s*\[\(([^)]+)\)\]/g,   // [(cylinder)]
-      /([A-Za-z_]\w*)\s*\(\(([^)]+)\)\)/g,   // ((circle))
-      /([A-Za-z_]\w*)\s*\(\[([^\]]+)\]\)/g,  // ([stadium])
-      /([A-Za-z_]\w*)\s*\{\{([^}]+)\}\}/g,   // {{hexagon}}
-      /([A-Za-z_]\w*)\s*\[([^\]]+)\]/g,      // [rect]
-      /([A-Za-z_]\w*)\s*\(([^)]+)\)/g,       // (round)
-      /([A-Za-z_]\w*)\s*\{([^}]+)\}/g,       // {rhombus}
-      /([A-Za-z_]\w*)\s*>([^\]]+)\]/g,       // >asymmetric]
+      /([A-Za-z_]\w{0,63})\s*\[\[([^\]]+)\]\]/g,  // [[subroutine]]
+      /([A-Za-z_]\w{0,63})\s*\[\(([^)]+)\)\]/g,   // [(cylinder)]
+      /([A-Za-z_]\w{0,63})\s*\(\(([^)]+)\)\)/g,   // ((circle))
+      /([A-Za-z_]\w{0,63})\s*\(\[([^\]]+)\]\)/g,  // ([stadium])
+      /([A-Za-z_]\w{0,63})\s*\{\{([^}]+)\}\}/g,   // {{hexagon}}
+      /([A-Za-z_]\w{0,63})\s*\[([^\]]+)\]/g,      // [rect]
+      /([A-Za-z_]\w{0,63})\s*\(([^)]+)\)/g,       // (round)
+      /([A-Za-z_]\w{0,63})\s*\{([^}]+)\}/g,       // {rhombus}
+      /([A-Za-z_]\w{0,63})\s*>([^\]]+)\]/g,       // >asymmetric]
     ];
     const labelById = Object.create(null);
     const order = [];
@@ -139,6 +142,10 @@
       lines[0] = "";
     }
     work = lines.join("\n");
+    // Invariant: exec on the stable `work` (so captured groups stay
+    // reliable across patterns) while accumulating blanking on a separate
+    // `stripped` copy (so each successive pattern sees a progressively
+    // cleaned string). Do not swap these.
     let stripped = work;
     for (const re of SHAPES) {
       re.lastIndex = 0;

@@ -146,3 +146,13 @@ test("diffNewNodeLabels: no change -> []", () => {
     []
   );
 });
+
+test("extractNodeLabels: adversarial long word-run completes fast (no ReDoS)", () => {
+  const big = "flowchart LR\n A" + "x".repeat(20000) + " --> B[End]";
+  const t0 = Date.now();
+  const out = lt.extractNodeLabels(big);
+  const ms = Date.now() - t0;
+  assert.ok(Array.isArray(out), "must return an array, never throw/hang");
+  assert.ok(out.includes("End"), "still extracts the valid labeled node");
+  assert.ok(ms < 1000, "must complete well under 1s (was O(n^2) before cap), took " + ms + "ms");
+});
