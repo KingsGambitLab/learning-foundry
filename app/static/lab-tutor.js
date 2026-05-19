@@ -98,10 +98,86 @@
     }
   }
 
+  // Distinct human-visible node labels from a Mermaid flowchart/graph
+  // source, in declaration order. Pure; never throws. Used to spotlight
+  // the node added by the current step. Worst case (exotic markup): a
+  // label is missed and the spotlight simply no-ops — never breakage.
+  function extractNodeLabels(src) {
+    if (!src || typeof src !== "string") return [];
+    const RESERVED = new Set([
+      "flowchart", "graph", "subgraph", "end", "style", "classDef",
+      "class", "linkStyle", "click", "direction", "stateDiagram",
+      "stateDiagram-v2", "sequenceDiagram", "classDiagram", "erDiagram",
+      "journey", "gantt", "pie", "mindmap",
+      "LR", "RL", "TB", "BT", "TD", "DT",
+    ]);
+    // Most-specific bracket pairs first so e.g. ([stadium]) is not
+    // mis-read by the (round) pattern.
+    const SHAPES = [
+      /([A-Za-z_]\w*)\s*\[\[([^\]]+)\]\]/g,  // [[subroutine]]
+      /([A-Za-z_]\w*)\s*\[\(([^)]+)\)\]/g,   // [(cylinder)]
+      /([A-Za-z_]\w*)\s*\(\(([^)]+)\)\)/g,   // ((circle))
+      /([A-Za-z_]\w*)\s*\(\[([^\]]+)\]\)/g,  // ([stadium])
+      /([A-Za-z_]\w*)\s*\{\{([^}]+)\}\}/g,   // {{hexagon}}
+      /([A-Za-z_]\w*)\s*\[([^\]]+)\]/g,      // [rect]
+      /([A-Za-z_]\w*)\s*\(([^)]+)\)/g,       // (round)
+      /([A-Za-z_]\w*)\s*\{([^}]+)\}/g,       // {rhombus}
+      /([A-Za-z_]\w*)\s*>([^\]]+)\]/g,       // >asymmetric]
+    ];
+    const labelById = Object.create(null);
+    const order = [];
+    // Drop edge labels |...| so they are not parsed as node content.
+    let work = src.replace(/\|[^|]*\|/g, " ");
+    // Blank a leading diagram header line.
+    const lines = work.split(/\r?\n/);
+    if (
+      lines.length &&
+      /^\s*(flowchart|graph|stateDiagram(-v2)?|sequenceDiagram|classDiagram|erDiagram|journey|gantt|pie|mindmap)\b/.test(
+        lines[0]
+      )
+    ) {
+      lines[0] = "";
+    }
+    work = lines.join("\n");
+    let stripped = work;
+    for (const re of SHAPES) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(work)) !== null) {
+        const id = m[1];
+        const label = m[2].trim();
+        if (!(id in labelById) && label !== "") {
+          labelById[id] = label;
+          order.push(id);
+        }
+      }
+      stripped = stripped.replace(re, " $1 ");
+    }
+    // Remove edge operators so arrowheads (x/o) are not read as ids.
+    stripped = stripped.replace(/<?-{1,3}[>xo]?|-\.-?>?|={2,}>?/g, " ");
+    const tokens = stripped.match(/[A-Za-z_]\w*/g) || [];
+    for (const t of tokens) {
+      if (RESERVED.has(t)) continue;
+      if (!(t in labelById)) {
+        labelById[t] = t;
+        order.push(t);
+      }
+    }
+    return order.map((id) => labelById[id]);
+  }
+
+  // Labels present in `currSrc` but not `prevSrc`. No prev (step 0) -> [].
+  function diffNewNodeLabels(prevSrc, currSrc) {
+    const curr = extractNodeLabels(currSrc);
+    if (!prevSrc) return [];
+    const prev = new Set(extractNodeLabels(prevSrc));
+    return curr.filter((l) => !prev.has(l));
+  }
+
   // Node-only export hook for unit tests. In the browser `module` is
   // undefined so this is skipped and the widget bootstraps normally.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { parseNarrated, computeNoAudioMs, narratedReducer };
+    module.exports = { parseNarrated, computeNoAudioMs, narratedReducer, extractNodeLabels, diffNewNodeLabels };
     return;
   }
 

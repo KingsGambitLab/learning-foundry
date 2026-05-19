@@ -93,3 +93,56 @@ test("narratedReducer: STOP resets to idle/step 0", () => {
   const s = lt.narratedReducer({ mode: "playing", step: 2, total: 4 }, { type: "STOP" });
   assert.deepEqual(s, { mode: "idle", step: 0, total: 4 });
 });
+
+test("extractNodeLabels: bracketed flowchart labels", () => {
+  const out = lt.extractNodeLabels("flowchart LR\n A[Query]-->B[Embed]");
+  assert.deepEqual(out.slice().sort(), ["Embed", "Query"]);
+});
+
+test("extractNodeLabels: bare ids when no label declared", () => {
+  const out = lt.extractNodeLabels("graph TD\n A-->B");
+  assert.deepEqual(out.slice().sort(), ["A", "B"]);
+});
+
+test("extractNodeLabels: ignores edge-label text and direction/header", () => {
+  const out = lt.extractNodeLabels("flowchart LR\n A[Q] -->|yes| B[E]");
+  assert.deepEqual(out.slice().sort(), ["E", "Q"]);
+  assert.equal(out.includes("yes"), false);
+  assert.equal(out.includes("LR"), false);
+  assert.equal(out.includes("flowchart"), false);
+});
+
+test("extractNodeLabels: dedupes by first declaration", () => {
+  const out = lt.extractNodeLabels("flowchart LR\n A[Q]-->B[E]\n B[E]-->A[Q]");
+  assert.deepEqual(out.slice().sort(), ["E", "Q"]);
+});
+
+test("extractNodeLabels: shape variants (rhombus/circle)", () => {
+  const out = lt.extractNodeLabels("flowchart TD\n A{Decide}-->B((Done))");
+  assert.deepEqual(out.slice().sort(), ["Decide", "Done"]);
+});
+
+test("extractNodeLabels: non-string / empty -> []", () => {
+  assert.deepEqual(lt.extractNodeLabels(""), []);
+  assert.deepEqual(lt.extractNodeLabels(null), []);
+});
+
+test("diffNewNodeLabels: no prev (step 0) -> []", () => {
+  assert.deepEqual(lt.diffNewNodeLabels(undefined, "flowchart LR\n A[Q]"), []);
+  assert.deepEqual(lt.diffNewNodeLabels("", "flowchart LR\n A[Q]"), []);
+});
+
+test("diffNewNodeLabels: returns only newly added label", () => {
+  const out = lt.diffNewNodeLabels(
+    "flowchart LR\n A[Q]-->B[E]",
+    "flowchart LR\n A[Q]-->B[E]-->C[S]"
+  );
+  assert.deepEqual(out, ["S"]);
+});
+
+test("diffNewNodeLabels: no change -> []", () => {
+  assert.deepEqual(
+    lt.diffNewNodeLabels("flowchart LR\n A[Q]", "flowchart LR\n A[Q]"),
+    []
+  );
+});
